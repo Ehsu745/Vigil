@@ -120,6 +120,8 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 - The recognized text appears under the core. After 1.5 seconds it is typed into that session's iTerm2 pane, followed by Return; click the core before then to cancel. With `--confirm-send` it waits instead, and a second click sends it.
 - If Claude is still working, the panel asks first ("還在工作中，要打斷嗎？") with a menu: send after this step (Claude Code reads it when the current step ends), interrupt and send (Esc first), or cancel.
 - If the pane can't be found, the core turns orange (ERROR) and says why.
+- It listens with the system's input device, except a virtual one (BlackHole, Loopback, Soundflower, Teams or Zoom audio), which carries other apps' sound rather than your voice: then it uses the built-in microphone. `--mic NAME` picks a device by part of its name. If a recording is completely silent, the core says which device it used.
+- `--debug` writes each voice step to stderr (device, levels, recognizer errors, send result; never what you said).
 - Sending needs `DODECA_RICH` (the session's `ITERM_SESSION_ID` is kept in the msg file). It uses AppleScript, which asks once for permission to control iTerm2; if that is not allowed, it falls back to iTerm2's Python API (`pane_api.py send`).
 - In `--demo` nothing is typed anywhere; the core only says what it would have sent.
 

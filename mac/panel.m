@@ -46,7 +46,10 @@ static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize cla
 static NSString *g_claude;                      // --claude PATH (the launcher passes it), else found below
 static NSString *g_listen_locale = @"zh-TW";     // --listen-locale: the language push-to-talk understands
 static int g_confirm_send;                      // --confirm-send: a recognized reply waits for a second click
+static NSString *g_mic;                         // --mic NAME: the input device to listen with
 static const double PREVIEW_FOR = 1.5;          // seconds a recognized reply is shown before it is sent
+static int g_debug;                             // --debug: log each voice step to stderr (never the words)
+#define DBG(...) do { if (g_debug) { fprintf(stderr, "[dodeca] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
 
@@ -543,7 +546,8 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     self.errorUntil = [NSMutableDictionary dictionary];
     if (g_voice) {
         self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
-        self.listener = [[Listener alloc] initWithLocale:g_listen_locale];
+        self.listener = [[Listener alloc] initWithLocale:g_listen_locale mic:g_mic];
+        if (g_debug) self.listener.log = ^(NSString *line) { DBG("%s", line.UTF8String); };
         [self registerHotkeys];
     }
     p.contentView = self.view;
@@ -808,6 +812,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (self.pttSid) [self cancelPtt];
     [self dropPending];
     NSString *why = [self.listener unavailableReason];
+    DBG("press began on %s: %s", sid.UTF8String, why ? why.UTF8String : "listening");
     if (why) { [self fail:sid because:why]; return; }
     [self.speaker stop:self.speaker.speakingSid]; // don't talk over you
     self.pttSid = sid;
@@ -817,21 +822,29 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     BOOL ok = [self.listener start:^(NSString *partial) {
         [me showPreview:partial forSid:sid hint:@"…"];
     }];
+    DBG("recording %s", ok ? "started" : "FAILED to start");
     if (!ok) { [self cancelPtt]; [self fail:sid because:@"麥克風沒辦法開始錄音"]; return; }
     [self showPreview:@"" forSid:sid hint:@"說吧，放開就結束（Esc 取消）"];
 }
 
 - (void)corePressEnded:(NSString *)sid {
+    DBG("press ended on %s (recording for %s)", sid.UTF8String, self.pttSid.UTF8String ?: "nothing");
     if (![sid isEqualToString:self.pttSid]) return;
     [self setEscapeHotkey:NO];
     self.overlay[sid] = @(ST_TRANSCRIBE);
     __weak AppDelegate *me = self;
     [self.listener finish:^(NSString *text) {
         AppDelegate *d = me;
+        DBG("recognized %lu characters%s", (unsigned long)text.length, d && [d.pttSid isEqualToString:sid] ? "" : " (cancelled meanwhile)");
         if (!d || ![d.pttSid isEqualToString:sid]) return; // cancelled meanwhile
         [d.overlay removeObjectForKey:sid];
         d.pttSid = nil;
-        if (!text) { [d.preview orderOut:nil]; return; }
+        if (!text) {
+            [d.preview orderOut:nil];
+            NSString *dev = d.listener.silentDevice;
+            if (dev) [d fail:sid because:[NSString stringWithFormat:@"麥克風完全沒有聲音，用的是 %@。可以用 --mic 指定別的輸入裝置", dev]];
+            return;
+        }
         d.pendingSid = sid;
         d.pendingText = text;
         d.pendingHeld = NO;
@@ -893,6 +906,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 // waits until the current step is done, and interrupting means pressing Esc in that session.
 - (void)sendPending {
     NSString *sid = self.pendingSid, *text = self.pendingText;
+    DBG("sending to %s", sid.UTF8String);
     [self dropPending];
     Session *s = session_by_sid(sid);
     if (!s || !text) return;
@@ -923,6 +937,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 
 // The ERROR look for a few seconds, and the reason out loud
 - (void)fail:(NSString *)sid because:(NSString *)why {
+    DBG("ERROR on %s: %s", sid.UTF8String, why.UTF8String);
     Session *s = session_by_sid(sid);
     self.errorUntil[sid] = @(wall() + 3);
     [self.speaker say:why sid:sid volume:s ? s->vol : 0.8f urgent:YES];
@@ -978,6 +993,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         NSString *r = [[[NSString alloc] initWithData:[out.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding]
             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         int status = t.terminationStatus;
+        DBG("osascript exit %d, answer \"%s\"", status, r.UTF8String ?: "");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (status == 0) [me sent:r to:sid];
             else [me sendWithPythonApi:text iterm:iterm to:sid interrupt:interrupt]; // e.g. Automation not allowed
@@ -1199,6 +1215,9 @@ static void usage(void) {
          "  --auto-speak       read a new reply out on its own if you were active in the last 60 s\n"
          "  --summarize claude summarize replies with claude -p (15 s timeout) instead of the first sentences\n"
          "  --listen-locale L  the language push-to-talk understands (default zh-TW; on-device only)\n"
+         "  --mic NAME         input device to listen with (part of its name; default: the system input, skipping\n"
+         "                     virtual ones like BlackHole)\n"
+         "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
          "  --tty PATH --launcher-pid N --claude PATH   (set by the ./dodeca-panel launcher)");
 }
@@ -1230,6 +1249,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--voice")) g_voice = 1;
             else if (!strcmp(a, "--listen-locale") && v) { g_listen_locale = @(v); i++; }
             else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
+            else if (!strcmp(a, "--debug")) g_debug = 1;
+            else if (!strcmp(a, "--mic") && v) { g_mic = @(v); i++; }
             else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
             else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
             else if (!strcmp(a, "--claude") && v) { g_claude = @(v); i++; }
