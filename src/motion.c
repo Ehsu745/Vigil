@@ -472,7 +472,11 @@ static void whim(Session *s, const Shape *sh, const float *M, Want *w, double no
 /* ---- every frame ------------------------------------------------------------------------------- */
 void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     Motion *m = &s->mo;
-    if (sh->nt && m->cut_for != sh->nt) recut(s, sh, 1, 6);
+    if ((sh->nt && m->cut_for != sh->nt) || (!sh->nt && m->cut_for)) { /* a new shape (Settings > Shape): start clean */
+        recut(s, sh, 1, 6);
+        memset(m->sp, 0, sizeof m->sp); memset(m->push, 0, sizeof m->push); memset(m->off, 0, sizeof m->off); memset(m->ang, 0, sizeof m->ang);
+        m->fish[0].to = m->fish[1].to = -1; m->routine = -1;
+    }
     if (!sh->nt) m->ng = 0;
     if (m->routine != shown) routine_enter(s, sh, shown, now);
     for (int i = 0; i < sh->nv; i++) m->glow[i] *= expf(-dt * 5);
