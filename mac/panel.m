@@ -21,6 +21,7 @@
 #include "../src/dodeca.h"
 #import "speech.h"
 #import "listen.h"
+#import "tip.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -560,72 +561,6 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @end
 
 // ---- the hover tooltip: name and state, then the first two lines of the last reply ----------------------
-@interface TipView : NSView
-@property(copy) NSString *title, *body;
-@property(strong) NSColor *accent;
-@property int maxBodyLines; // 0: as many as the text needs
-- (NSSize)fit;
-@end
-
-// The box wraps its text instead of cutting it: it only shows while you point at a core or talk to it, so it
-// may stretch over the terminal to the left of the panel.
-@implementation TipView
-static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
-- (BOOL)isOpaque { return NO; }
-- (NSFont *)font {
-    return [NSFont fontWithName:g_font_name size:g_font_size] ?: [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
-}
-- (CGFloat)lineH { return ceil([self font].ascender - [self font].descender + [self font].leading) + 2; }
-- (NSDictionary *)attr:(NSColor *)c {
-    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
-    para.lineBreakMode = NSLineBreakByWordWrapping;
-    para.minimumLineHeight = para.maximumLineHeight = [self lineH];
-    return @{NSFontAttributeName: [self font], NSForegroundColorAttributeName: c, NSParagraphStyleAttributeName: para};
-}
-// the body without blank lines or surrounding spaces
-- (NSString *)text {
-    NSMutableArray *a = [NSMutableArray array];
-    for (NSString *l in [self.body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-        NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (t.length) [a addObject:t];
-    }
-    return [a componentsJoinedByString:@"\n"];
-}
-- (CGFloat)heightOf:(NSString *)s width:(CGFloat)w maxLines:(int)n {
-    if (!s.length) return 0;
-    CGFloat h = ceil([s boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin attributes:[self attr:NSColor.whiteColor]].size.height);
-    return n > 0 ? fmin(h, n * [self lineH]) : h;
-}
-- (NSSize)fit {
-    CGFloat w = 0;
-    for (NSString *l in [[(self.title ?: @"") stringByAppendingFormat:@"\n%@", [self text]] componentsSeparatedByString:@"\n"])
-        w = fmax(w, ceil([l sizeWithAttributes:[self attr:NSColor.whiteColor]].width));
-    w = fmin(w + 1, TIP_MAX);
-    CGFloat body = [self heightOf:[self text] width:w maxLines:self.maxBodyLines];
-    CGFloat h = [self heightOf:self.title width:w maxLines:0] + (body > 0 ? TIP_GAP + body : 0);
-    return NSMakeSize(w + TIP_PAD * 2, h + TIP_PAD * 2);
-}
-- (void)drawRect:(NSRect)dirty {
-    (void)dirty;
-    NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
-    NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:b xRadius:7 yRadius:7];
-    [[NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.10 alpha:0.94] setFill];
-    [box fill];
-    [[self.accent colorWithAlphaComponent:0.7] setStroke];
-    [box stroke];
-    CGFloat w = self.bounds.size.width - TIP_PAD * 2, top = self.bounds.size.height - TIP_PAD;
-    CGFloat th = [self heightOf:self.title width:w maxLines:0];
-    NSStringDrawingOptions opt = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine;
-    [self.title ?: @"" drawWithRect:NSMakeRect(TIP_PAD, top - th, w, th) options:opt
-                         attributes:[self attr:[NSColor colorWithSRGBRed:0.97 green:0.97 blue:0.99 alpha:1]] context:nil];
-    NSString *text = [self text];
-    CGFloat bh = [self heightOf:text width:w maxLines:self.maxBodyLines];
-    if (bh > 0)
-        [text drawWithRect:NSMakeRect(TIP_PAD, top - th - TIP_GAP - bh, w, bh) options:opt
-                attributes:[self attr:[NSColor colorWithSRGBRed:0.80 green:0.82 blue:0.86 alpha:1]] context:nil];
-}
-@end
-
 // ---- the application ------------------------------------------------------------------------------------
 @interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions>
 @property(strong) NSPanel *panel;
@@ -839,6 +774,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     t.level = NSFloatingWindowLevel;
     t.collectionBehavior = self.panel.collectionBehavior;
     *view = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+    (*view).fontSize = g_font_size;
     t.contentView = *view;
     return t;
 }
@@ -857,7 +793,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     if (g_single && g_focus_pinned && [g_focus isEqualToString:sid_of(s)]) title = [title stringByAppendingString:@" · pinned"];
     int st = session_shown(s, now);
     NSString *body = (st == ST_WAIT ? msg_text(s, @"notice") : nil) ?: msg_text(s, @"reply") ?: @"(no reply yet)";
-    Col c = s->cur.eh;
+    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; // single core: the session's own colour, else its state colour
     self.tipView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
         self.tipView.title = title;
@@ -1084,7 +1020,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
     self.previewView.title = [NSString stringWithFormat:@"→ %@ · %@", name, hint];
     self.previewView.body = text.length ? text : @" ";
-    Col c = s->cur.eh;
+    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh;
     self.previewView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     NSRect core = [self.view coreRect:(int)(s - room->s)];
     NSRect inScreen = [self.panel convertRectToScreen:[self.view convertRect:core toView:nil]];

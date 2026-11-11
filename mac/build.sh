@@ -19,7 +19,7 @@ ID=local.dodeca-core.panel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cc -O2 -fobjc-arc -Wall -Wextra -o "$APP/Contents/MacOS/dodeca-panel" \
-    mac/panel.m mac/speech.m mac/listen.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
+    mac/panel.m mac/speech.m mac/listen.m mac/tip.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
 
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
