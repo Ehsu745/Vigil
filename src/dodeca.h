@@ -36,7 +36,7 @@ int shape_make(Shape *s, const char *name); /* "dodeca" "bucky" "geo2" "geo3"; 0
 /* ---- session.c: one polyhedron per Claude Code session ---------------------------------------- */
 enum {
     ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP,  /* from the events */
-    ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY,           /* overlays only the panel sets (Session.overlay) */
+    ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR, /* overlays only the panel sets (Session.overlay) */
     ST_N
 };
 extern const char *STATE_NAME[ST_N];
