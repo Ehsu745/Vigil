@@ -19,7 +19,7 @@ ID=local.dodeca-core.panel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cc -O2 -fobjc-arc -Wall -Wextra -o "$APP/Contents/MacOS/dodeca-panel" \
-    mac/panel.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -lm
+    mac/panel.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -framework Carbon -lm
 
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,6 +36,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSMicrophoneUsageDescription</key><string>dodeca-panel listens while you hold a core down (push-to-talk), to send your spoken reply to that Claude Code session.</string>
+	<key>NSAppleEventsUsageDescription</key><string>dodeca-panel brings a session's iTerm2 pane to the front when you double-click its core.</string>
 	<key>NSSpeechRecognitionUsageDescription</key><string>dodeca-panel turns what you say during push-to-talk into text, on this Mac only.</string>
 </dict>
 </plist>

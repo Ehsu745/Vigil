@@ -81,7 +81,31 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 - When run by hand, the panel is 17% of the screen width. Use `--width` (in points) and `--top` to position it, and `--inset` for the space above the first session (default 30). When started by `open_pane.sh` it gets `--fit-pane`, which sizes it to the blank pane.
 - The font defaults to Monaco 12; use `--font` and `--font-size` to match your iTerm2 settings.
 - To go back to the terminal-pane version: `export DODECA_PANE_MODE=terminal`.
-- Point at a core and it reacts: it brightens, slows down and turns toward the cursor. After a moment a tooltip to the left of the panel shows the folder, the state and the first two lines of the last reply (the reply needs `DODECA_RICH`, see below). Only the round shell counts as the core: clicks next to it still reach the terminal underneath.
+- The cores react to the mouse and to a hotkey: see [Interaction and voice](#interaction-and-voice-floating-panel).
+
+## Interaction and voice (floating panel)
+
+The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. `./dodeca-panel --demo` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
+
+| Input | Does | The core |
+|---|---|---|
+| Point at it | Tooltip after 0.3 s: folder, state, first two lines of the last reply (the notification text while NEEDS YOU) | Brightens, spins slower, turns toward the cursor |
+| Unread reply | — | A slow, soft flash until you click it or send a new prompt |
+| Click | Marks the reply as read and shows the tooltip at once | — |
+| Hold (> 0.35 s), release | Push-to-talk | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
+| Double-click | Brings that session's iTerm2 pane to the front | One shockwave ring |
+| Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front | — |
+| Drag | Turns the polyhedron by hand; let go while moving and it spins on, slowing back to its own rotation | — |
+| Scroll | This core's speech volume | The shell gets thicker or thinner for a moment |
+| Esc while recording | Cancels; nothing is sent | Glow shrinks and fades back |
+| `⌃⌥V` (hold) | Push-to-talk to the session that needs you most: NEEDS YOU, else the one that finished last, else the one active last | as holding the core |
+| No keyboard or mouse input for 2 minutes | — | Every core except NEEDS YOU goes to STANDBY (dim indigo); when you come back, cores with an unread reply flare once |
+
+- A single click waits for the system's double-click time before it acts, so a double click never starts with a single one.
+- Hotkeys use `RegisterEventHotKey`, which needs no Accessibility permission. Esc is only taken while recording, so the terminal keeps it otherwise. `--hotkey ctrl+opt+v` changes the push-to-talk key (`cmd`, `opt`, `ctrl`, `shift` plus a letter, digit, `space`, `return`, `tab` or `f1`–`f12`; `none` turns it off). macOS already uses ⌃Space, ⌃⌥Space, ⌘Space and ⌥⌘Space, so the default is `⌃⌥V`.
+- Away is read from the system's "seconds since last input" (no Input Monitoring permission, no key logging). `--away SECONDS` changes the 120 s; `--away 0` turns it off.
+- Double-click and "Bring to front" need `DODECA_RICH` (the iTerm2 session id is kept in the msg file) and, the first time, your OK for the panel to control iTerm2 (System Settings > Privacy & Security > Automation).
+- How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 
 ## Output modes
 
