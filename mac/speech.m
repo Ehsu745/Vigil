@@ -58,6 +58,27 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
 }
 
 // ---- the speaker -----------------------------------------------------------------------------------
+
+// The best installed voice for a language: Premium, then Enhanced, then the regular one; never the
+// novelty or Eloquence voices (robotic) unless nothing else is there. Downloading a better voice in System
+// Settings is enough for it to be used.
+static AVSpeechSynthesisVoice *best_voice(NSString *language) {
+    AVSpeechSynthesisVoice *best = nil;
+    int bestScore = -1;
+    for (AVSpeechSynthesisVoice *v in [AVSpeechSynthesisVoice speechVoices]) {
+        if (![v.language isEqualToString:language]) continue;
+        NSString *id = v.identifier;
+        int score = (int)v.quality * 10;
+        if ([id containsString:@".premium."]) score += 5;
+        else if ([id containsString:@".enhanced."]) score += 4;
+        else if ([id containsString:@".compact."]) score += 3;
+        else if ([id containsString:@".super-compact."]) score += 2;
+        else if ([id containsString:@"eloquence"] || [id containsString:@"speech.synthesis"]) score += 0;
+        else score += 1;
+        if (score > bestScore) { bestScore = score; best = v; }
+    }
+    return best ?: [AVSpeechSynthesisVoice voiceWithLanguage:language];
+}
 @interface Speaker () <AVSpeechSynthesizerDelegate>
 @end
 
@@ -75,7 +96,7 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
     if (!(self = [super init])) return nil;
     _synth = [[AVSpeechSynthesizer alloc] init];
     _synth.delegate = self;
-    _voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voiceId] ?: [AVSpeechSynthesisVoice voiceWithLanguage:voiceId];
+    _voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voiceId] ?: best_voice(voiceId);
     if (!_voice) {
         fprintf(stderr, "dodeca-panel: no voice \"%s\"; using the system voice\n", voiceId.UTF8String);
         _voice = [AVSpeechSynthesisVoice voiceWithLanguage:nil];
