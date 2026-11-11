@@ -1,7 +1,7 @@
 // dodeca-panel: the same polyhedra as dodeca-core, in a floating panel on the right edge of the screen.
 //
-// The panel has no title bar, never takes the keyboard, lets clicks through, and is see-through where the
-// picture is dark, so it can sit over a full-screen iTerm2 window: an empty terminal pane underneath keeps
+// The panel has no title bar, never takes the keyboard, lets clicks through (except on a core, see
+// trackMouse:), and is see-through where the picture is dark, so it can sit over a full-screen iTerm2 window: an empty terminal pane underneath keeps
 // that part of the screen free. When started inside that pane (open_pane.sh does this) it sizes itself to
 // the pane and quits when the pane is closed.
 //
@@ -45,9 +45,33 @@ static void cleanup(void) {
     }
 }
 
+// the second line under a session's name
+static NSString *state_line(const Session *s, int st) {
+    if (!strcmp(s->sid, "ghost")) return @"Waiting for Claude Code";
+    if (st == ST_WORK && s->tool[0]) return [NSString stringWithFormat:@"%s · %s", STATE_TEXT[st], s->tool];
+    return [NSString stringWithUTF8String:STATE_TEXT[st]];
+}
+
+// the last reply of a session, or nil. Only --demo has one so far: reading the real replies needs the
+// richer hook data (DODECA_RICH), which comes later.
+static const char *DEMO_REPLY[] = {
+    "Refactored the channel model so fading is applied per tap.\nAll 42 simulation tests pass; the BER curve now matches the reference within 0.2 dB.\nNext I can add Doppler if you want.",
+    "The lock now debounces the reed switch for 30 ms.\nI also fixed the race where a second unlock arrived before the motor stopped.",
+    "整理好今天的筆記了：三個待辦、兩個已完成。\n要不要我把待辦排進明天的計畫？",
+    "Bumped the bootloader to v2.3 and rebuilt the image.\nFlash it with `make flash`; the OTA path is unchanged.",
+    "Swept 2.40-2.48 GHz: best match at 2.437 GHz, S11 -18 dB.\nThe matching network values are in tune.csv.",
+    "Scratch test done. Nothing to keep.",
+};
+static NSString *last_reply(const Session *s) {
+    int i;
+    if (g_demo_n && sscanf(s->sid, "demo-%d", &i) == 1 && i >= 0 && i < 6) return [NSString stringWithUTF8String:DEMO_REPLY[i]];
+    return nil;
+}
+
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
 @interface PanelView : NSView
 - (BOOL)anythingDue:(double)now;
+- (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center;
 @end
 
 @implementation PanelView {
@@ -55,9 +79,28 @@ static void cleanup(void) {
     double _due[MAX_SESS + 1];
     Canvas _cv;
     int _lastCount;
+    NSRect _core[MAX_SESS + 1]; // where each polyhedron was last drawn, for coreAt:
+    int _coreN;
 }
 
 - (BOOL)isOpaque { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; } // a click on a core never has to activate the app first
+- (void)mouseDown:(NSEvent *)e { (void)e; }                     // on a core: taken, not passed to the window below
+
+// The session whose core is under p (view coordinates), or -1. Only the round shell counts, not the
+// square it is drawn in, so clicks next to a core still reach the terminal. look gets the offset from the
+// core's centre in shell radii (y down, as in the picture), center the core's centre.
+- (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center {
+    for (int i = 0; i < _coreN; i++) {
+        NSRect r = _core[i];
+        CGFloat rad = r.size.width * SHELL_HIT, dx = p.x - NSMidX(r), dy = p.y - NSMidY(r);
+        if (dx * dx + dy * dy > rad * rad) continue;
+        if (look) *look = NSMakePoint(dx / rad, -dy / rad);
+        if (center) *center = NSMakePoint(NSMidX(r), NSMidY(r));
+        return i;
+    }
+    return -1;
+}
 
 - (const Room *)shown { return g_room.n ? &g_room : &g_ghost; }
 
@@ -122,10 +165,7 @@ static void cleanup(void) {
         NSColor *dotColor = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
         NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"];
         if (!name) name = @"claude";
-        NSString *state;
-        if (!strcmp(s->sid, "ghost")) state = @"Waiting for Claude Code";
-        else if (st == ST_WORK && s->tool[0]) state = [NSString stringWithFormat:@"%s · %s", STATE_TEXT[st], s->tool];
-        else state = [NSString stringWithUTF8String:STATE_TEXT[st]];
+        NSString *state = state_line(s, st);
         NSDictionary *dotAttr = @{NSFontAttributeName: font, NSForegroundColorAttributeName: dotColor};
         NSDictionary *nameAttr = @{NSFontAttributeName: font, NSParagraphStyleAttributeName: para,
                                    NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.89 green:0.90 blue:0.93 alpha:1]};
@@ -145,7 +185,58 @@ static void cleanup(void) {
             double rate = session_rate(s, now, 20) * 1.5; // drawing here is cheap, so run a little faster than in a terminal
             _due[i] = now + 1.0 / rate - 0.01;
         }
-        CGContextDrawImage(ctx, CGRectMake((W - side) / 2, top - textH - side, side, side), _img[i]);
+        _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
+        CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
+    }
+    _coreN = n;
+}
+@end
+
+// ---- the hover tooltip: name and state, then the first two lines of the last reply ----------------------
+@interface TipView : NSView
+@property(copy) NSString *title, *body;
+@property(strong) NSColor *accent;
+- (NSSize)fit;
+@end
+
+@implementation TipView
+- (BOOL)isOpaque { return NO; }
+- (NSFont *)font {
+    return [NSFont fontWithName:g_font_name size:g_font_size] ?: [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
+}
+- (NSDictionary *)attr:(NSColor *)c {
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.lineBreakMode = NSLineBreakByTruncatingTail;
+    return @{NSFontAttributeName: [self font], NSForegroundColorAttributeName: c, NSParagraphStyleAttributeName: para};
+}
+- (NSArray *)lines {
+    NSMutableArray *a = [NSMutableArray arrayWithObject:self.title ?: @""];
+    for (NSString *l in [self.body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (t.length && a.count < 3) [a addObject:t];
+    }
+    return a;
+}
+static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
+- (NSSize)fit {
+    CGFloat w = 0, lineH = ceil([self font].ascender - [self font].descender) + 3;
+    NSArray *ls = [self lines];
+    for (NSString *l in ls) w = fmax(w, ceil([l sizeWithAttributes:[self attr:NSColor.whiteColor]].width));
+    return NSMakeSize(fmin(w, TIP_MAX) + TIP_PAD * 2, lineH * ls.count + TIP_PAD * 2 - 3);
+}
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
+    NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:b xRadius:7 yRadius:7];
+    [[NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.10 alpha:0.94] setFill];
+    [box fill];
+    [[self.accent colorWithAlphaComponent:0.7] setStroke];
+    [box stroke];
+    CGFloat lineH = ceil([self font].ascender - [self font].descender) + 3, y = self.bounds.size.height - TIP_PAD - lineH + 3;
+    NSArray *ls = [self lines];
+    for (NSUInteger i = 0; i < ls.count; i++, y -= lineH) {
+        NSColor *c = i ? [NSColor colorWithSRGBRed:0.80 green:0.82 blue:0.86 alpha:1] : [NSColor colorWithSRGBRed:0.97 green:0.97 blue:0.99 alpha:1];
+        [ls[i] drawInRect:NSMakeRect(TIP_PAD, y, self.bounds.size.width - TIP_PAD * 2, lineH) withAttributes:[self attr:c]];
     }
 }
 @end
@@ -157,6 +248,10 @@ static void cleanup(void) {
 @property(strong) NSTimer *timer;
 @property(strong) NSMutableArray *signals;
 @property double last, emptySince;
+@property(strong) NSPanel *tip;
+@property(strong) TipView *tipView;
+@property(copy) NSString *hoverSid;
+@property double hoverSince;
 @end
 
 @implementation AppDelegate
@@ -252,12 +347,76 @@ static void cleanup(void) {
         int n = tail_poll(&g_tail, g_ev, 1024);
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
     }
+    [self trackMouse:now];
     room_tick(&g_room, &g_shape, now, dt);
     g_ghost.s[0].last = now;
     room_tick(&g_ghost, &g_shape, now, dt);
     if (g_room.n) self.emptySince = now;
     if (g_exit_empty && now - self.emptySince > 15) { [NSApp terminate:nil]; return; }
     if (self.panel.visible && [self.view anythingDue:now]) [self.view setNeedsDisplay:YES];
+}
+
+// The core under the mouse, checked every frame. While the mouse is on a core the panel takes clicks;
+// everywhere else it lets them through to the terminal underneath. (Asking for the position each frame
+// needs no permission, and unlike event monitors it also sees the mouse while another app drags.)
+- (void)trackMouse:(double)now {
+    Room *room = g_room.n ? &g_room : &g_ghost;
+    int hit = -1;
+    NSPoint look = NSZeroPoint, center = NSZeroPoint;
+    if (self.panel.visible) {
+        NSPoint w = [self.panel convertPointFromScreen:[NSEvent mouseLocation]];
+        hit = [self.view coreAt:[self.view convertPoint:w fromView:nil] look:&look center:&center];
+        if (hit >= room->n) hit = -1;
+    }
+    for (int i = 0; i < room->n; i++) {
+        Session *s = &room->s[i];
+        s->hover_to = i == hit;
+        if (i == hit) { s->look_x_to = (float)look.x; s->look_y_to = (float)look.y; }
+    }
+    BOOL ignore = hit < 0;
+    if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
+
+    NSString *sid = hit >= 0 ? [NSString stringWithUTF8String:room->s[hit].sid] : nil;
+    if (![sid isEqualToString:self.hoverSid]) { self.hoverSid = sid; self.hoverSince = now; }
+    if (hit < 0 || now - self.hoverSince < 0.3) { [self.tip orderOut:nil]; return; } // a short pause before the tooltip
+    [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
+}
+
+- (void)showTipFor:(const Session *)s at:(NSPoint)center now:(double)now {
+    if (!self.tip) {
+        NSPanel *t = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 40)
+                                                styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                                  backing:NSBackingStoreBuffered defer:NO];
+        t.opaque = NO;
+        t.backgroundColor = [NSColor clearColor];
+        t.hasShadow = YES;
+        t.ignoresMouseEvents = YES;
+        t.level = NSFloatingWindowLevel;
+        t.collectionBehavior = self.panel.collectionBehavior;
+        self.tipView = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+        t.contentView = self.tipView;
+        self.tip = t;
+    }
+    NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
+    NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
+    NSString *body = last_reply(s) ?: @"(no reply yet)";
+    Col c = s->cur.eh;
+    self.tipView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+    if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
+        self.tipView.title = title;
+        self.tipView.body = body;
+        // to the left of the panel, level with the core, kept on the screen
+        NSSize sz = [self.tipView fit];
+        NSPoint at = [self.panel convertPointToScreen:center];
+        NSRect f = NSMakeRect(NSMinX(self.panel.frame) - sz.width - 8, at.y - sz.height / 2, sz.width, sz.height);
+        NSRect vis = (self.panel.screen ?: [NSScreen mainScreen]).visibleFrame;
+        if (NSMinX(f) < NSMinX(vis)) f.origin.x = NSMinX(vis);
+        if (NSMaxY(f) > NSMaxY(vis)) f.origin.y = NSMaxY(vis) - sz.height;
+        if (NSMinY(f) < NSMinY(vis)) f.origin.y = NSMinY(vis);
+        [self.tip setFrame:f display:YES];
+    }
+    [self.tipView setNeedsDisplay:YES];
+    if (!self.tip.visible) [self.tip orderFrontRegardless];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)note { (void)note; cleanup(); }
