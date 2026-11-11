@@ -6,6 +6,8 @@ In your terminal, every running Claude Code session becomes a glowing polyhedron
 
 The approach and parts of the code (`hook.py`, `install_hooks.py`, and the event reading in `src/events.c`) are adapted from [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room) (MIT License, Copyright (c) 2026 Zaviel). The polyhedron rendering, the macOS floating panel and the pane features are new to this project. See [LICENSE](LICENSE).
 
+![dodeca-core demo: three sessions changing state](assets/demo.gif)
+
 ## States
 
 | State | Triggered by | Looks like |

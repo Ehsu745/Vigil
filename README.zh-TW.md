@@ -6,6 +6,8 @@
 
 做法與部分程式碼（`hook.py`、`install_hooks.py`、`src/events.c` 的事件讀取）改寫自 [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room)（MIT License，Copyright (c) 2026 Zaviel）；多面體渲染、macOS 浮動面板與 pane 相關部分為本專案新寫。授權見 [LICENSE](LICENSE)。
 
+![dodeca-core 示範：三個 session 的狀態變化](assets/demo.gif)
+
 ## 狀態
 
 | 狀態 | 觸發事件 | 畫面 |
