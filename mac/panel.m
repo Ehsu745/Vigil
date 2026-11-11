@@ -40,7 +40,8 @@ static double g_away_after = 120;               // --away: seconds without keybo
 static const char *g_hotkey = "ctrl+opt+v";     // --hotkey: push-to-talk to the session that most needs you
 static NSString *g_voice_id = @"zh-TW";          // --voice-id: a voice identifier or a language
 static float g_rate = 0.5f;                     // --rate: 0 (slowest) .. 1 (fastest), 0.5 is normal
-static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize claude
+static int g_voice;                             // --voice: spoken reports and push-to-talk (off: the panel stays silent)
+static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize claude (both imply --voice)
 static NSString *g_claude;                      // --claude PATH (the launcher passes it), else found below
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
@@ -524,8 +525,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     self.overlay = [NSMutableDictionary dictionary];
     self.seen = [NSMutableDictionary dictionary];
     self.summarizing = [NSMutableSet set];
-    self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
-    [self registerHotkeys];
+    if (g_voice) {
+        self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
+        [self registerHotkeys];
+    }
     p.contentView = self.view;
     self.panel = p;
     [self place];
@@ -658,6 +661,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (!s) return;
     s->unread = 0;
     self.hoverSince = 0; // the tooltip shows without the usual pause
+    if (!g_voice) return;
     if ([self.speaker has:sid] || [self.summarizing containsObject:sid]) {
         [self.speaker stop:sid];
         [self.summarizing removeObject:sid];
@@ -763,7 +767,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 
 // long press (or the hotkey): push-to-talk. Without voice input it only shows LISTENING, then TRANSCRIBING.
 - (void)corePressBegan:(NSString *)sid {
-    if (!session_by_sid(sid)) return;
+    if (!g_voice || !session_by_sid(sid)) return;
     if (self.pttSid) [self cancelPtt];
     self.pttSid = sid;
     self.overlay[sid] = @(ST_LISTEN);
@@ -793,7 +797,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     m.autoenablesItems = NO;
     NSString *reply = msg_text(s, @"reply");
     NSMenuItem *replay = [m addItemWithTitle:@"Replay" action:@selector(menuReplay:) keyEquivalent:@""];
-    replay.enabled = reply != nil || msg_text(s, @"notice") != nil;
+    replay.enabled = g_voice && (reply != nil || msg_text(s, @"notice") != nil);
     NSMenuItem *copy = [m addItemWithTitle:@"Copy reply" action:@selector(menuCopy:) keyEquivalent:@""];
     copy.enabled = reply != nil;
     NSMenuItem *mute = [m addItemWithTitle:@"Mute this session" action:@selector(menuMute:) keyEquivalent:@""];
@@ -963,6 +967,7 @@ static void usage(void) {
          "  --glow X  --core X  --events PATH   as in dodeca-core\n"
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
+         "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
          "  --voice-id ID      voice for spoken reports: an identifier or a language (default zh-TW)\n"
          "  --rate X           speaking rate 0..1 (default 0.5)\n"
          "  --auto-speak       read a new reply out on its own if you were active in the last 60 s\n"
@@ -994,8 +999,9 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--hotkey") && v) { g_hotkey = v; i++; }
             else if (!strcmp(a, "--voice-id") && v) { g_voice_id = @(v); i++; }
             else if (!strcmp(a, "--rate") && v) { g_rate = (float)atof(v); i++; }
-            else if (!strcmp(a, "--auto-speak")) g_auto_speak = 1;
-            else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); i++; }
+            else if (!strcmp(a, "--voice")) g_voice = 1;
+            else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
+            else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
             else if (!strcmp(a, "--claude") && v) { g_claude = @(v); i++; }
             else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
             else if (!strcmp(a, "--launcher-pid") && v) { g_launcher_pid = atoi(v); i++; }

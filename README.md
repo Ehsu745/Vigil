@@ -85,7 +85,7 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 
 ## Interaction and voice (floating panel)
 
-The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. `./dodeca-panel --demo` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
+The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. Speaking and push-to-talk are off unless you start it with `--voice`; without it a click only marks the reply as read and holding a core does nothing. `./dodeca-panel --demo --voice` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
 
 | Input | Does | The core |
 |---|---|---|
@@ -98,7 +98,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 | Drag | Turns the polyhedron by hand; let go while moving and it spins on, slowing back to its own rotation | — |
 | Scroll | This core's speech volume | The shell gets thicker or thinner for a moment |
 | Esc while recording | Cancels; nothing is sent | Glow shrinks and fades back |
-| `⌃⌥V` (hold) | Push-to-talk to the session that needs you most: NEEDS YOU, else the one that finished last, else the one active last | as holding the core |
+| `⌃⌥V` (hold, with `--voice`) | Push-to-talk to the session that needs you most: NEEDS YOU, else the one that finished last, else the one active last | as holding the core |
 | No keyboard or mouse input for 2 minutes | — | Every core except NEEDS YOU goes to STANDBY (dim indigo); when you come back, cores with an unread reply flare once |
 
 - A single click waits for the system's double-click time before it acts, so a double click never starts with a single one.
