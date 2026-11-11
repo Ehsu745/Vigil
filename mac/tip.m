@@ -3,7 +3,8 @@
 // in PingFang), the title bold in the session's colour, with a bar of that colour down the left edge.
 #import "tip.h"
 
-static const CGFloat PAD = 11, BAR = 3, MAXW = 460, GAP = 6;
+static const CGFloat PAD = 11, BAR = 3, GAP = 6;
+#define MAXW fmax(460, [self size] * 36) /* wide enough for about the same line length at any font size */
 
 @implementation TipView
 - (BOOL)isOpaque { return NO; }
