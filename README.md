@@ -1,132 +1,134 @@
 # dodeca-core
 
-在終端機裡，每個執行中的 Claude Code session 是一顆發光的多面體：白色細線外殼、藍色光暈、中心一顆像太陽的亮核。狀態改變時，顏色、轉速和核心的明暗跟著變。
+**English** | [繁體中文](README.zh-TW.md)
 
-做法與部分程式碼（`hook.py`、`install_hooks.py`、`src/events.c` 的事件讀取）改寫自 [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room)（MIT License，Copyright (c) 2026 Zaviel）；多面體渲染、macOS 浮動面板與 pane 相關部分為本專案新寫。授權見 [LICENSE](LICENSE)。
+In your terminal, every running Claude Code session becomes a glowing polyhedron: a thin white wireframe shell, a blue glow, and a bright, sun-like core at the center. When a session's state changes, its color, spin speed and core brightness change with it.
 
-## 狀態
+The approach and parts of the code (`hook.py`, `install_hooks.py`, and the event reading in `src/events.c`) are adapted from [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room) (MIT License, Copyright (c) 2026 Zaviel). The polyhedron rendering, the macOS floating panel and the pane features are new to this project. See [LICENSE](LICENSE).
 
-| 狀態 | 觸發事件 | 畫面 |
+## States
+
+| State | Triggered by | Looks like |
 |---|---|---|
-| IDLE | `SessionStart`、完成後 | 白核藍暈，慢速旋轉 |
-| THINK | `UserPromptSubmit`、`PostToolUse` | 黃色線條與光暈，核心呼吸式脈動 |
-| WORK | `PreToolUse` | 白核藍暈，轉速加快，光點沿邊線遊走 |
-| NEEDS YOU | `Notification`（閒置提醒除外） | 紅色線條，白核紅暈，核心故障式閃爍 |
-| DONE | `Stop` | 核心爆亮加一圈衝擊波，2.5 秒後回 IDLE |
-| SLEEP | IDLE 超過 90 秒 | 整體變暗，實心核仍看得見 |
+| IDLE | `SessionStart`, after finishing | White core, blue glow, slow rotation |
+| THINK | `UserPromptSubmit`, `PostToolUse` | Yellow lines and glow, core pulses like breathing |
+| WORK | `PreToolUse` | White core, blue glow, faster rotation, sparks travel along the edges |
+| NEEDS YOU | `Notification` (except idle reminders) | Red lines, white core with red glow, core flickers like a glitch |
+| DONE | `Stop` | Core flares with a shockwave ring, back to IDLE after 2.5 s |
+| SLEEP | IDLE for more than 90 s | Everything dims; the solid core stays visible |
 
-`SessionEnd` 會移除那一顆；30 分鐘沒有任何事件的 session 也會移除。
+`SessionEnd` removes that session's polyhedron. Sessions with no events for 30 minutes are removed too.
 
-## 需求
+## Requirements
 
-- C 編譯器與 `make`（macOS：`xcode-select --install`）
-- zlib（macOS 內建）
-- Python 3（只有 hook 和安裝腳本用到，僅標準函式庫）
-- 支援 truecolor 的終端機；要看到細線和光暈，需要能顯示影像的終端機（iTerm2、kitty、Ghostty、WezTerm）
+- A C compiler and `make` (macOS: `xcode-select --install`)
+- zlib (built into macOS)
+- Python 3 (only for the hook and install script; standard library only)
+- A truecolor terminal. To see the thin lines and glow you need a terminal that can display images (iTerm2, kitty, Ghostty, WezTerm)
 
-## 使用
+## Usage
 
 ```sh
 make
-./dodeca-core --demo          # 先用假的 session 看效果，q 離開
+./dodeca-core --demo          # try it with fake sessions first, q to quit
 
-python3 install_hooks.py          # 只印出會寫進 ~/.claude/settings.json 的內容
-python3 install_hooks.py --apply  # 實際寫入（會先備份）
-./dodeca-core                     # 顯示真正的 session
+python3 install_hooks.py          # only prints what would be written to ~/.claude/settings.json
+python3 install_hooks.py --apply  # actually write it (makes a backup first)
+./dodeca-core                     # show your real sessions
 ```
 
-- 安裝 hook 之後不要搬動這個資料夾，hook 是用絕對路徑呼叫的；搬了就再跑一次 `--apply`。
-- 移除 hook：`python3 install_hooks.py --remove`。
-- hook 只對安裝之後新開的 Claude Code session 生效。
+- Don't move this folder after installing the hook; the hook is called by absolute path. If you do move it, run `--apply` again.
+- To remove the hook: `python3 install_hooks.py --remove`.
+- The hook only applies to Claude Code sessions started after installing it.
 
-## 側邊窗格（iTerm2）
+## Side pane (iTerm2)
 
-`--pane` 是給窄窗格用的直排版面：session 由上到下，每個先兩行文字（名稱、狀態），下面才是多面體。文字用的是終端機本身的字體，所以跟同一個 profile 的其他窗格一樣大。
+`--pane` is a vertical layout for narrow panes: sessions stack top to bottom, each with two lines of text (name, state) above its polyhedron. The text uses the terminal's own font, so it's the same size as other panes using the same profile.
 
 ```sh
-./dodeca-core --pane --demo                # 在一個窄窗格裡先看效果
-python3 install_hooks.py --pane --apply    # 之後每次開 Claude Code 自動開窗格
+./dodeca-core --pane --demo                # try it in a narrow pane first
+python3 install_hooks.py --pane --apply    # open the pane automatically whenever Claude Code starts
 ```
 
-加了 `--pane` 安裝之後，`SessionStart` 會多執行 `open_pane.sh`：把 Claude Code 所在的窗格往右切一塊跑 `dodeca-core --pane --exit-when-empty`，縮到 34 個字元寬，再把鍵盤焦點還給 Claude Code。已經有窗格開著就不會再開；最後一個 session 結束 15 秒後窗格自己關掉。
+When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits a pane off to the right of Claude Code's pane, runs `dodeca-core --pane --exit-when-empty` in it, shrinks it to 34 columns, and gives keyboard focus back to Claude Code. If a pane is already open it won't open another; the pane closes itself 15 seconds after the last session ends.
 
-- 窗格寬度：環境變數 `DODECA_PANE_COLS`（預設 34）。
-- 縮窄窗格要靠 iTerm2 的 Python API（`pane_api.py`）：AppleScript 能切窗格，但在全螢幕視窗裡不能調寬度。需要兩個一次性步驟：在 iTerm2 的 Settings > General > Magic 勾選 Enable Python API；再把腳本複製到 iTerm2 找腳本的資料夾：`mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py`（之後 `open_pane.sh` 會自動保持這份複本是最新的）。沒設定的話窗格會是一半寬，可以自己拖分隔線，面板會跟著變。
-- 除錯：`DODECA_PANE_DEBUG=1 sh open_pane.sh` 會在前景執行並顯示 iTerm2 的回應。
-- 額外參數：環境變數 `DODECA_PANE_ARGS`，例如 `"--shape geo2 --res 1200"`。
-- 第一次執行時 macOS 會問是否允許控制 iTerm2，要按允許。
-- 不用自動開的話，自己切一個窗格跑 `./dodeca-core --pane` 也一樣。
+- Pane width: environment variable `DODECA_PANE_COLS` (default 34).
+- Shrinking the pane needs iTerm2's Python API (`pane_api.py`): AppleScript can split panes but can't resize them in a full-screen window. Two one-time steps: enable Settings > General > Magic > Enable Python API in iTerm2, then copy the script to iTerm2's scripts folder: `mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py` (after that, `open_pane.sh` keeps the copy up to date). Without this the pane is half the width; you can drag the divider yourself and the display follows.
+- Debugging: `DODECA_PANE_DEBUG=1 sh open_pane.sh` runs in the foreground and shows iTerm2's responses.
+- Extra arguments: environment variable `DODECA_PANE_ARGS`, e.g. `"--shape geo2 --res 1200"`.
+- The first time it runs, macOS asks whether to allow controlling iTerm2; click Allow.
+- If you don't want it opened automatically, split a pane yourself and run `./dodeca-core --pane`.
 
-## 浮動面板（macOS）
+## Floating panel (macOS)
 
-`dodeca-panel` 是同一套渲染核心的原生視窗版：一個沒有標題列的面板貼在螢幕右緣，不搶鍵盤、滑鼠點擊會穿過去、暗的地方是透明的，所以可以浮在全螢幕的 iTerm2 上面。畫面由系統直接合成，不經過終端機。
+`dodeca-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it, and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
 
 ```sh
 sh mac/build.sh
-./dodeca-panel --demo              # 先單獨看效果，Ctrl-C 結束
+./dodeca-panel --demo              # try it on its own first, Ctrl-C to quit
 ```
 
-建好之後，`open_pane.sh` 會自動改用它：右邊切出來的 iTerm2 窗格保持空白，只負責把那塊位置空出來，面板在裡面啟動、量出窗格的大小、蓋在正上方。關掉那個窗格面板就結束；最後一個 session 結束 15 秒後面板和窗格一起關。
+Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to the right stays blank and just reserves the space; the panel starts inside it, measures the pane and sits right on top of it. Closing that pane ends the panel; 15 seconds after the last session ends, the panel and pane close together.
 
-- 面板只留在啟動時所在的那個 Space，也就是啟動它的那個全螢幕 iTerm2 視窗；切到別的桌面或 App 不會跟過去。
-- 加 `--all-spaces` 會改成每個 Space 都出現，這時只在 iTerm2 是最前面的 App 時顯示（再加 `--always` 取消這個限制）。
-- 切到沒有那個空窗格的 iTerm2 分頁時，面板仍會浮在右緣，可能蓋到文字；介意的話用 `--bg 1e1e1e` 給它實心底色。
-- 手動執行時面板寬度是螢幕的 17%，用 `--width`（單位是點）和 `--top` 調整位置，`--inset` 調整第一個 session 上方的留白（預設 30）；由 `open_pane.sh` 啟動時會加 `--fit-pane`，改成跟著那個空窗格的大小。
-- 字體預設 Monaco 12，用 `--font`、`--font-size` 對齊你的 iTerm2 設定。
-- 想退回終端機窗格版：`export DODECA_PANE_MODE=terminal`。
+- The panel stays on the Space it was started on, i.e. the full-screen iTerm2 window that launched it; it doesn't follow you to other desktops or apps.
+- `--all-spaces` makes it appear on every Space, shown only while iTerm2 is the frontmost app (add `--always` to drop that condition).
+- If you switch to an iTerm2 tab without the blank pane, the panel still floats on the right edge and may cover text; use `--bg 1e1e1e` to give it a solid background if that bothers you.
+- When run by hand, the panel is 17% of the screen width. Use `--width` (in points) and `--top` to position it, and `--inset` for the space above the first session (default 30). When started by `open_pane.sh` it gets `--fit-pane`, which sizes it to the blank pane.
+- The font defaults to Monaco 12; use `--font` and `--font-size` to match your iTerm2 settings.
+- To go back to the terminal-pane version: `export DODECA_PANE_MODE=terminal`.
 
-## 輸出方式
+## Output modes
 
-程式先在記憶體裡畫出一張 RGB 影像，再用三種方式之一送到終端機，啟動時會自動偵測：
+The program first draws an RGB image in memory, then sends it to the terminal in one of three ways, detected automatically at startup:
 
-| 模式 | 說明 |
+| Mode | Description |
 |---|---|
-| `--kitty` | kitty graphics protocol，真像素。終端機回應支援時優先使用 |
-| `--iterm` | iTerm2 inline image（PNG），真像素。在 iTerm2 裡且不支援上一種時使用 |
-| `--cells` | 半格字元 `▀`，每個字元格兩顆像素。任何 truecolor 終端機都能用，但很粗；tmux 裡固定用這個 |
+| `--kitty` | kitty graphics protocol, real pixels. Preferred when the terminal reports support |
+| `--iterm` | iTerm2 inline images (PNG), real pixels. Used inside iTerm2 when the above isn't supported |
+| `--cells` | Half-block characters `▀`, two pixels per character cell. Works in any truecolor terminal but is coarse; always used inside tmux |
 
-自動偵測的結果不理想時可以用參數強制指定。
+If auto-detection picks poorly, force a mode with the flag.
 
-## 選項
-
-```
---pane            側邊窗格的直排版面
---exit-when-empty 沒有 session 超過 15 秒就結束
---demo [N]        用 N 個假 session（1-6，預設 3）
---shape NAME      dodeca | bucky | geo2（預設）| geo3
---res N           影像最長邊的像素數（預設 960，`--pane` 時 420；越大越細但終端機負擔越重）
---fps N           每秒最多幾格（預設 20；平靜的 session 會自動降低重畫頻率）
---glow X          光暈強度（預設 1.0）
---core X          核心半徑，占外殼內切球半徑的比例（預設 0.35）
---events PATH     事件檔（預設 ~/.dodeca-core/events.jsonl，或環境變數 DODECA_EVENTS）
---snapshot FILE   輸出一張 demo 畫面成 PPM 檔後結束（搭配 --at 秒數、--size 寬x高）
-```
-
-## 架構
+## Options
 
 ```
-Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──▶ 狀態機 ──▶ 軟體渲染 ──▶ 終端機
+--pane            vertical layout for a side pane
+--exit-when-empty exit after 15 s with no sessions
+--demo [N]        use N fake sessions (1-6, default 3)
+--shape NAME      dodeca | bucky | geo2 (default) | geo3
+--res N           pixels on the image's longest side (default 960, 420 with --pane; higher is finer but heavier on the terminal)
+--fps N           max frames per second (default 20; calm sessions redraw less often automatically)
+--glow X          glow strength (default 1.0)
+--core X          core radius as a fraction of the shell's inscribed-sphere radius (default 0.35)
+--events PATH     event file (default ~/.dodeca-core/events.jsonl, or env var DODECA_EVENTS)
+--snapshot FILE   write one demo frame as a PPM file and exit (with --at seconds, --size WxH)
 ```
 
-| 檔案 | 內容 |
+## Architecture
+
+```
+Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──▶ state machine ──▶ software renderer ──▶ terminal
+```
+
+| File | Contents |
 |---|---|
-| `mac/panel.m` | 浮動面板：Cocoa 視窗、文字標籤、把畫布轉成透明影像 |
-| `pane_api.py` | 用 iTerm2 Python API 切窗格並設定寬度 |
-| `open_pane.sh` | `SessionStart` hook：在 iTerm2 裡自動切出側邊窗格 |
-| `hook.py` | 每個事件 append 一行 JSON：時間、session id、事件名、資料夾名、工具名、通知類型 |
-| `src/events.c` | 跟著事件檔讀新增的行 |
-| `src/session.c` | 事件對應到狀態，以及每個狀態的外觀參數表 `LOOKS` |
-| `src/geom.c` | 產生正十二面體、截角二十面體、測地球的頂點與邊 |
-| `src/render.c` | 把線條、光暈、核心、標籤畫進 float RGB 畫布 |
-| `src/main.c` | 主迴圈、終端機設定、三種輸出方式、demo |
+| `mac/panel.m` | Floating panel: Cocoa window, text labels, turning the canvas into a transparent image |
+| `pane_api.py` | Splits panes and sets their width via the iTerm2 Python API |
+| `open_pane.sh` | `SessionStart` hook: automatically splits off a side pane in iTerm2 |
+| `hook.py` | Appends one JSON line per event: time, session id, event name, folder name, tool name, notification type |
+| `src/events.c` | Follows the event file and reads new lines |
+| `src/session.c` | Maps events to states, plus the per-state appearance table `LOOKS` |
+| `src/geom.c` | Generates vertices and edges for the dodecahedron, truncated icosahedron and geodesic spheres |
+| `src/render.c` | Draws lines, glow, core and labels into a float RGB canvas |
+| `src/main.c` | Main loop, terminal setup, the three output modes, demo |
 
-要改顏色或動態，改 `src/session.c` 的 `LOOKS` 表就好。
+To change colors or motion, just edit the `LOOKS` table in `src/session.c`.
 
-## 隱私
+## Privacy
 
-事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱和通知類型，不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
+The event file contains only time, session id, event name, folder name (no path), tool name and notification type. Prompts and tool input/output are never recorded. No network connections, no background daemon, and the file's permissions are 600.
 
-## 已知限制
+## Known limitations
 
-- 權限請求核准之後，Claude Code 不會再送一次事件，所以那個工具執行期間仍顯示 NEEDS YOU，要等工具跑完才會切走。
-- 標籤用的是內建的 3×5 點陣字，只有英數和少數符號；資料夾名稱裡的中文會顯示成 `?`。
+- After you approve a permission request, Claude Code doesn't send another event, so the session keeps showing NEEDS YOU while that tool runs and only switches once the tool finishes.
+- Labels use a built-in 3×5 bitmap font with only letters, digits and a few symbols; non-ASCII characters in folder names (e.g. Chinese) show as `?`.
