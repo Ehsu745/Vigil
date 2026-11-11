@@ -48,7 +48,8 @@ static NSString *g_listen_locale = @"zh-TW";     // --listen-locale: the languag
 static int g_confirm_send;                      // --confirm-send: a recognized reply waits for a second click
 static NSString *g_mic;                         // --mic NAME: the input device to listen with
 static const double PREVIEW_FOR = 1.5;          // seconds a recognized reply is shown before it is sent
-static int g_debug;                             // --debug: log each voice step to stderr (never the words)
+static int g_debug;
+static int g_labels_hover;                      // --labels hover: no name / state lines, only the cores (and the tooltip)                             // --debug: log each voice step to stderr (never the words)
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dodeca] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
@@ -350,7 +351,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     CGFloat scale = self.window ? self.window.backingScaleFactor : 2.0;
     NSFont *font = [NSFont fontWithName:g_font_name size:g_font_size];
     if (!font) font = [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
-    CGFloat lineH = ceil(font.ascender - font.descender) + 3, textH = lineH * 2 + 4, gap = 10, left = 10;
+    CGFloat lineH = ceil(font.ascender - font.descender) + 3, textH = g_labels_hover ? 0 : lineH * 2 + 4, gap = 10, left = 10;
 
     // how many sessions fit, and how large each polyhedron can be (square at most)
     int n = room->n;
@@ -372,21 +373,22 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         CGFloat top = H - i * (textH + side + gap); // this view's y runs upward, so the list starts at the top edge
         int st = session_shown(s, now);
 
-        // a coloured dot and the folder name, then the state in grey
-        Col c = s->cur.eh; // the dot follows the shell's glow colour as it eases between states
-        NSColor *dotColor = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
-        NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"];
-        if (!name) name = @"claude";
-        NSString *state = state_line(s, st);
-        NSDictionary *dotAttr = @{NSFontAttributeName: font, NSForegroundColorAttributeName: dotColor};
-        NSDictionary *nameAttr = @{NSFontAttributeName: font, NSParagraphStyleAttributeName: para,
-                                   NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.89 green:0.90 blue:0.93 alpha:1]};
-        NSDictionary *stateAttr = @{NSFontAttributeName: font, NSParagraphStyleAttributeName: para,
-                                    NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.52 green:0.54 blue:0.59 alpha:1]};
-        CGFloat indent = left + ceil([@"● " sizeWithAttributes:dotAttr].width);
-        [@"●" drawInRect:NSMakeRect(left, top - lineH, indent - left, lineH) withAttributes:dotAttr];
-        [name drawInRect:NSMakeRect(indent, top - lineH, W - indent - 6, lineH) withAttributes:nameAttr];
-        [state drawInRect:NSMakeRect(indent, top - lineH * 2, W - indent - 6, lineH) withAttributes:stateAttr];
+        if (!g_labels_hover) { // a coloured dot and the folder name, then the state in grey
+            Col c = s->cur.eh; // the dot follows the shell's glow colour as it eases between states
+            NSColor *dotColor = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+            NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"];
+            if (!name) name = @"claude";
+            NSString *state = state_line(s, st);
+            NSDictionary *dotAttr = @{NSFontAttributeName: font, NSForegroundColorAttributeName: dotColor};
+            NSDictionary *nameAttr = @{NSFontAttributeName: font, NSParagraphStyleAttributeName: para,
+                                       NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.89 green:0.90 blue:0.93 alpha:1]};
+            NSDictionary *stateAttr = @{NSFontAttributeName: font, NSParagraphStyleAttributeName: para,
+                                        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.52 green:0.54 blue:0.59 alpha:1]};
+            CGFloat indent = left + ceil([@"● " sizeWithAttributes:dotAttr].width);
+            [@"●" drawInRect:NSMakeRect(left, top - lineH, indent - left, lineH) withAttributes:dotAttr];
+            [name drawInRect:NSMakeRect(indent, top - lineH, W - indent - 6, lineH) withAttributes:nameAttr];
+            [state drawInRect:NSMakeRect(indent, top - lineH * 2, W - indent - 6, lineH) withAttributes:stateAttr];
+        }
 
         // the polyhedron: redrawn only as often as its state needs, otherwise the last picture is reused
         int px = (int)(side * scale);
@@ -408,33 +410,47 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @interface TipView : NSView
 @property(copy) NSString *title, *body;
 @property(strong) NSColor *accent;
+@property int maxBodyLines; // 0: as many as the text needs
 - (NSSize)fit;
 @end
 
+// The box wraps its text instead of cutting it: it only shows while you point at a core or talk to it, so it
+// may stretch over the terminal to the left of the panel.
 @implementation TipView
+static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 - (BOOL)isOpaque { return NO; }
 - (NSFont *)font {
     return [NSFont fontWithName:g_font_name size:g_font_size] ?: [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
 }
+- (CGFloat)lineH { return ceil([self font].ascender - [self font].descender + [self font].leading) + 2; }
 - (NSDictionary *)attr:(NSColor *)c {
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
-    para.lineBreakMode = NSLineBreakByTruncatingTail;
+    para.lineBreakMode = NSLineBreakByWordWrapping;
+    para.minimumLineHeight = para.maximumLineHeight = [self lineH];
     return @{NSFontAttributeName: [self font], NSForegroundColorAttributeName: c, NSParagraphStyleAttributeName: para};
 }
-- (NSArray *)lines {
-    NSMutableArray *a = [NSMutableArray arrayWithObject:self.title ?: @""];
+// the body without blank lines or surrounding spaces
+- (NSString *)text {
+    NSMutableArray *a = [NSMutableArray array];
     for (NSString *l in [self.body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (t.length && a.count < 3) [a addObject:t];
+        if (t.length) [a addObject:t];
     }
-    return a;
+    return [a componentsJoinedByString:@"\n"];
 }
-static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
+- (CGFloat)heightOf:(NSString *)s width:(CGFloat)w maxLines:(int)n {
+    if (!s.length) return 0;
+    CGFloat h = ceil([s boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin attributes:[self attr:NSColor.whiteColor]].size.height);
+    return n > 0 ? fmin(h, n * [self lineH]) : h;
+}
 - (NSSize)fit {
-    CGFloat w = 0, lineH = ceil([self font].ascender - [self font].descender) + 3;
-    NSArray *ls = [self lines];
-    for (NSString *l in ls) w = fmax(w, ceil([l sizeWithAttributes:[self attr:NSColor.whiteColor]].width));
-    return NSMakeSize(fmin(w, TIP_MAX) + TIP_PAD * 2, lineH * ls.count + TIP_PAD * 2 - 3);
+    CGFloat w = 0;
+    for (NSString *l in [[(self.title ?: @"") stringByAppendingFormat:@"\n%@", [self text]] componentsSeparatedByString:@"\n"])
+        w = fmax(w, ceil([l sizeWithAttributes:[self attr:NSColor.whiteColor]].width));
+    w = fmin(w + 1, TIP_MAX);
+    CGFloat body = [self heightOf:[self text] width:w maxLines:self.maxBodyLines];
+    CGFloat h = [self heightOf:self.title width:w maxLines:0] + (body > 0 ? TIP_GAP + body : 0);
+    return NSMakeSize(w + TIP_PAD * 2, h + TIP_PAD * 2);
 }
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
@@ -444,12 +460,16 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     [box fill];
     [[self.accent colorWithAlphaComponent:0.7] setStroke];
     [box stroke];
-    CGFloat lineH = ceil([self font].ascender - [self font].descender) + 3, y = self.bounds.size.height - TIP_PAD - lineH + 3;
-    NSArray *ls = [self lines];
-    for (NSUInteger i = 0; i < ls.count; i++, y -= lineH) {
-        NSColor *c = i ? [NSColor colorWithSRGBRed:0.80 green:0.82 blue:0.86 alpha:1] : [NSColor colorWithSRGBRed:0.97 green:0.97 blue:0.99 alpha:1];
-        [ls[i] drawInRect:NSMakeRect(TIP_PAD, y, self.bounds.size.width - TIP_PAD * 2, lineH) withAttributes:[self attr:c]];
-    }
+    CGFloat w = self.bounds.size.width - TIP_PAD * 2, top = self.bounds.size.height - TIP_PAD;
+    CGFloat th = [self heightOf:self.title width:w maxLines:0];
+    NSStringDrawingOptions opt = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine;
+    [self.title ?: @"" drawWithRect:NSMakeRect(TIP_PAD, top - th, w, th) options:opt
+                         attributes:[self attr:[NSColor colorWithSRGBRed:0.97 green:0.97 blue:0.99 alpha:1]] context:nil];
+    NSString *text = [self text];
+    CGFloat bh = [self heightOf:text width:w maxLines:self.maxBodyLines];
+    if (bh > 0)
+        [text drawWithRect:NSMakeRect(TIP_PAD, top - th - TIP_GAP - bh, w, bh) options:opt
+                attributes:[self attr:[NSColor colorWithSRGBRed:0.80 green:0.82 blue:0.86 alpha:1]] context:nil];
 }
 @end
 
@@ -660,6 +680,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (!self.tip) {
         TipView *v;
         self.tip = [self newTipPanel:&v];
+        v.maxBodyLines = 8;
         self.tipView = v;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
@@ -881,6 +902,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (!self.preview) {
         TipView *v;
         self.preview = [self newTipPanel:&v];
+        v.maxBodyLines = 0; // all of it: this is what will be sent
         self.previewView = v;
     }
     NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
@@ -890,12 +912,14 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     self.previewView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     NSRect core = [self.view coreRect:(int)(s - room->s)];
     NSRect inScreen = [self.panel convertRectToScreen:[self.view convertRect:core toView:nil]];
+    // beside the panel, level with the core, like the tooltip: wide enough for the whole text
     NSSize sz = [self.previewView fit];
-    NSRect pf = self.panel.frame;
-    if (sz.width > pf.size.width - 8) sz.width = pf.size.width - 8;
-    NSRect f = NSMakeRect(NSMidX(inScreen) - sz.width / 2, NSMinY(inScreen) + inScreen.size.height * 0.08 - sz.height, sz.width, sz.height);
-    if (NSMaxX(f) > NSMaxX(pf) - 4) f.origin.x = NSMaxX(pf) - 4 - sz.width;
-    if (NSMinX(f) < NSMinX(pf) + 4) f.origin.x = NSMinX(pf) + 4;
+    NSRect vis = (self.panel.screen ?: [NSScreen mainScreen]).visibleFrame;
+    if (sz.height > vis.size.height - 20) sz.height = vis.size.height - 20;
+    NSRect f = NSMakeRect(NSMinX(self.panel.frame) - sz.width - 8, NSMidY(inScreen) - sz.height / 2, sz.width, sz.height);
+    if (NSMinX(f) < NSMinX(vis)) f.origin.x = NSMinX(vis);
+    if (NSMaxY(f) > NSMaxY(vis)) f.origin.y = NSMaxY(vis) - sz.height;
+    if (NSMinY(f) < NSMinY(vis)) f.origin.y = NSMinY(vis);
     [self.preview setFrame:f display:YES];
     [self.previewView setNeedsDisplay:YES];
     [self.preview orderFrontRegardless];
@@ -1217,6 +1241,7 @@ static void usage(void) {
          "  --listen-locale L  the language push-to-talk understands (default zh-TW; on-device only)\n"
          "  --mic NAME         input device to listen with (part of its name; default: the system input, skipping\n"
          "                     virtual ones like BlackHole)\n"
+         "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
          "  --tty PATH --launcher-pid N --claude PATH   (set by the ./dodeca-panel launcher)");
@@ -1250,6 +1275,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--listen-locale") && v) { g_listen_locale = @(v); i++; }
             else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
             else if (!strcmp(a, "--debug")) g_debug = 1;
+            else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--mic") && v) { g_mic = @(v); i++; }
             else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
             else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
