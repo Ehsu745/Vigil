@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code hook for dodeca-core.
+"""Claude Code hook for vigil.
 
 Appends one JSON line per event to ~/.dodeca-core/events.jsonl:
 time, session id, event name, folder name, tool name, notification type.

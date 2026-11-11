@@ -1,6 +1,6 @@
 /* Follows the events file. The hook writes flat JSON objects, one per line, so the reader only
  * needs to pull a handful of string/number fields out of a line. */
-#include "dodeca.h"
+#include "vigil.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

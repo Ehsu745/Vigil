@@ -115,7 +115,7 @@ static AVSpeechSynthesisVoice *best_voice(NSString *language) {
     if ([voiceId isEqualToString:@"system"] && [[NSFileManager defaultManager] isExecutableFileAtPath:@"/usr/bin/say"]) {
         _system = YES;
         _chinese = [[NSLocale preferredLanguages].firstObject hasPrefix:@"zh"];
-        _tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"dodeca-say-%d", (int)getpid()]];
+        _tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"vigil-say-%d", (int)getpid()]];
         [[NSFileManager defaultManager] createDirectoryAtPath:_tmp withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
         return self;
     }
@@ -124,7 +124,7 @@ static AVSpeechSynthesisVoice *best_voice(NSString *language) {
     _synth.delegate = self;
     _voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voiceId] ?: best_voice(voiceId);
     if (!_voice) {
-        fprintf(stderr, "dodeca-panel: no voice \"%s\"; using the system voice\n", voiceId.UTF8String);
+        fprintf(stderr, "vigil-panel: no voice \"%s\"; using the system voice\n", voiceId.UTF8String);
         _voice = [AVSpeechSynthesisVoice voiceWithLanguage:nil];
     }
     _chinese = [_voice.language hasPrefix:@"zh"];

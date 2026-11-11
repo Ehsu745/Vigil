@@ -1,4 +1,4 @@
-// Voice output for dodeca-panel: turns a reply into something worth hearing and speaks it, one session at a
+// Voice output for vigil-panel: turns a reply into something worth hearing and speaks it, one session at a
 // time. Used only by mac/panel.m.
 #import <Foundation/Foundation.h>
 

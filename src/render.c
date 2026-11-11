@@ -1,7 +1,7 @@
 /* Software renderer. Everything is added into a float RGB canvas (light adds up, like a screen blend)
  * and clamped at the end. Glow is computed from distance, so there is no blur pass.
  * Sizes are given for a 600-pixel tile and scaled by k = tile / 600. */
-#include "dodeca.h"
+#include "vigil.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>

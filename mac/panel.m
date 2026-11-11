@@ -1,11 +1,11 @@
-// dodeca-panel: the same polyhedra as dodeca-core, in a floating panel on the right edge of the screen.
+// vigil-panel: the same polyhedra as vigil, in a floating panel on the right edge of the screen.
 //
 // The panel has no title bar, never takes the keyboard, lets clicks through (except on a core, see
 // trackMouse:), and is see-through where the picture is dark, so it can sit over a full-screen iTerm2
 // window: an empty terminal pane underneath keeps that part of the screen free. When started inside that pane (open_pane.sh does this) it sizes itself to
 // the pane and quits when the pane is closed.
 //
-// Build: sh mac/build.sh. That makes DodecaPanel.app and the launcher script ./dodeca-panel, which starts the
+// Build: sh mac/build.sh. That makes Vigil.app and the launcher script ./vigil-panel, which starts the
 // app through LaunchServices (so macOS asks for microphone and speech permission on behalf of the app, not
 // the terminal) and stays in the pane: it passes the pane's terminal with --tty and its own pid with
 // --launcher-pid, and the app quits when the launcher does (the pane was closed, or Ctrl-C).
@@ -19,7 +19,7 @@
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
-#include "../src/dodeca.h"
+#include "../src/vigil.h"
 #import "speech.h"
 #import "listen.h"
 #import "tip.h"
@@ -58,7 +58,7 @@ static const char *g_mode_hotkey = "ctrl+opt+c";  // --mode-hotkey: switch betwe
 static char g_shape_name[16] = "geo2";          // --shape
 static NSString *g_focus;                       // the session in the middle
 static BOOL g_focus_pinned;                     // chosen by a click: auto-follow is off until "Follow automatically"                             // --debug: log each voice step to stderr (never the words)
-#define DBG(...) do { if (g_debug) { fprintf(stderr, "[dodeca] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
+#define DBG(...) do { if (g_debug) { fprintf(stderr, "[vigil] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
 
@@ -1306,16 +1306,16 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     NSString *it2run = @"/Applications/iTerm.app/Contents/Resources/it2run";
     NSString *scripts = [@"~/Library/Application Support/iTerm2/Scripts" stringByExpandingTildeInPath];
     NSString *mine = [[[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"pane_api.py"];
-    NSString *copy = [scripts stringByAppendingPathComponent:@"dodeca_pane.py"];
+    NSString *copy = [scripts stringByAppendingPathComponent:@"vigil_pane.py"];
     if (![fm isExecutableFileAtPath:it2run] || ![fm fileExistsAtPath:scripts] || ![fm fileExistsAtPath:mine]) {
         [self fail:sid because:@"沒辦法控制 iTerm2：請允許面板控制 iTerm2，或打開 iTerm2 的 Python API"];
         return;
     }
     if (![fm contentsEqualAtPath:mine andPath:copy]) { [fm removeItemAtPath:copy error:NULL]; [fm copyItemAtPath:mine toPath:copy error:NULL]; }
-    NSString *result = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"dodeca-send-%d-%u", (int)getpid(), arc4random()]];
+    NSString *result = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"vigil-send-%d-%u", (int)getpid(), arc4random()]];
     NSTask *task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:it2run];
-    task.arguments = @[@"dodeca_pane.py", @"send", iterm, text, result, interrupt ? @"1" : @"0"];
+    task.arguments = @[@"vigil_pane.py", @"send", iterm, text, result, interrupt ? @"1" : @"0"];
     task.standardOutput = task.standardError = [NSFileHandle fileHandleWithNullDevice];
     if (![task launchAndReturnError:NULL]) { [self fail:sid because:@"沒辦法啟動 iTerm2 的 Python API"]; return; }
     [self waitForResult:result sid:sid tries:25]; // it2run returns at once: the script writes its answer to a file
@@ -1621,9 +1621,9 @@ static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
     InstallApplicationEventHandler(NewEventHandlerUPP(hotkey_event), 2, types, (__bridge void *)self, NULL);
     UInt32 mods, key;
     if (strcmp(g_mode_hotkey, "none")) {
-        if (!parse_hotkey(g_mode_hotkey, &mods, &key)) fprintf(stderr, "dodeca-panel: cannot read --mode-hotkey %s\n", g_mode_hotkey);
+        if (!parse_hotkey(g_mode_hotkey, &mods, &key)) fprintf(stderr, "vigil-panel: cannot read --mode-hotkey %s\n", g_mode_hotkey);
         else if (RegisterEventHotKey(key, mods, (EventHotKeyID){'dodc', HK_MODE}, GetApplicationEventTarget(), 0, &g_mode_key) != noErr)
-            fprintf(stderr, "dodeca-panel: hotkey %s is taken by another app\n", g_mode_hotkey);
+            fprintf(stderr, "vigil-panel: hotkey %s is taken by another app\n", g_mode_hotkey);
     }
 }
 
@@ -1632,9 +1632,9 @@ static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
     UInt32 mods, key;
     if (!on) { if (g_ptt_key) { UnregisterEventHotKey(g_ptt_key); g_ptt_key = NULL; } return; }
     if (g_ptt_key || !strcmp(g_hotkey, "none")) return;
-    if (!parse_hotkey(g_hotkey, &mods, &key)) { fprintf(stderr, "dodeca-panel: cannot read --hotkey %s\n", g_hotkey); return; }
+    if (!parse_hotkey(g_hotkey, &mods, &key)) { fprintf(stderr, "vigil-panel: cannot read --hotkey %s\n", g_hotkey); return; }
     if (RegisterEventHotKey(key, mods, (EventHotKeyID){'dodc', HK_PTT}, GetApplicationEventTarget(), 0, &g_ptt_key) != noErr)
-        fprintf(stderr, "dodeca-panel: hotkey %s is taken by another app\n", g_hotkey);
+        fprintf(stderr, "vigil-panel: hotkey %s is taken by another app\n", g_hotkey);
 }
 
 // voice on or off while running: the speaker and the listener are made the first time they are needed
@@ -1663,7 +1663,7 @@ static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
 @end
 
 static void usage(void) {
-    puts("dodeca-panel: the dodeca-core polyhedra in a floating panel on the right edge of the screen\n"
+    puts("vigil-panel: the vigil polyhedra in a floating panel on the right edge of the screen\n"
          "\n"
          "  --demo [N]         made-up sessions instead of the events file (1-6, default 3)\n"
          "  --exit-when-empty  quit once no session has been running for 15 seconds\n"
@@ -1676,7 +1676,7 @@ static void usage(void) {
          "  --bg RRGGBB        solid background colour instead of see-through\n"
          "  --all-spaces       follow you to every Space instead of staying in the one it was opened in\n"
          "  --always           with --all-spaces: stay visible when iTerm2 is not the app in front\n"
-         "  --glow X  --core X  --events PATH   as in dodeca-core\n"
+         "  --glow X  --core X  --events PATH   as in vigil\n"
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
          "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
@@ -1692,7 +1692,7 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
-         "  --tty PATH --launcher-pid N --claude PATH   (set by the ./dodeca-panel launcher)");
+         "  --tty PATH --launcher-pid N --claude PATH   (set by the ./vigil-panel launcher)");
 }
 
 int main(int argc, char **argv) {
@@ -1748,7 +1748,7 @@ int main(int argc, char **argv) {
             for (NSString *c in @[@"~/.local/bin/claude", @"/opt/homebrew/bin/claude", @"/usr/local/bin/claude"])
                 if ([[NSFileManager defaultManager] isExecutableFileAtPath:c.stringByExpandingTildeInPath]) { g_claude = c.stringByExpandingTildeInPath; break; }
         }
-        if (g_summarize_claude && !g_claude) { fprintf(stderr, "dodeca-panel: claude not found, using the local summary\n"); g_summarize_claude = 0; }
+        if (g_summarize_claude && !g_claude) { fprintf(stderr, "vigil-panel: claude not found, using the local summary\n"); g_summarize_claude = 0; }
         if (!shape_make(&g_shape, g_shape_name)) { fprintf(stderr, "unknown shape: %s\n", g_shape_name); return 2; }
         if (!events) {
             snprintf(events_default, sizeof events_default, "%s/.dodeca-core/events.jsonl", home);

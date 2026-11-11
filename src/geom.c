@@ -1,6 +1,6 @@
 /* The wireframe shells. Each is built from the icosahedron/dodecahedron coordinates and scaled so
  * its vertices sit on the same sphere (radius CIRCUM). */
-#include "dodeca.h"
+#include "vigil.h"
 #include <math.h>
 #include <string.h>
 

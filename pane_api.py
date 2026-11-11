@@ -3,13 +3,13 @@
 Also sends a voice reply from the floating panel to a session.
 
 iTerm2 only starts scripts from its own Scripts folder, so open_pane.sh (and the panel) keep a copy of this
-file there as dodeca_pane.py and run:
+file there as vigil_pane.py and run:
 
-  it2run dodeca_pane.py SESSION_ID COMMAND COLUMNS
+  it2run vigil_pane.py SESSION_ID COMMAND COLUMNS
       Splits the given session, runs COMMAND in the new pane on the right, makes that pane COLUMNS wide and
       gives the keyboard back to the original session.
 
-  it2run dodeca_pane.py send SESSION_ID TEXT RESULT_FILE INTERRUPT
+  it2run vigil_pane.py send SESSION_ID TEXT RESULT_FILE INTERRUPT
       Types TEXT into the session and presses Return (with INTERRUPT=1, Esc first, which stops Claude).
       Writes "ok" or "missing" (no such session) to RESULT_FILE, since it2run itself returns at once.
 
