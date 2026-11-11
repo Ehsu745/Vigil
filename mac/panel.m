@@ -784,7 +784,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (!self.tip) {
         TipView *v;
         self.tip = [self newTipPanel:&v];
-        v.maxBodyLines = 8;
+        v.maxBodyLines = 16;
         self.tipView = v;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";

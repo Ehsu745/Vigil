@@ -3,7 +3,7 @@
 // in PingFang), the title bold in the session's colour, with a bar of that colour down the left edge.
 #import "tip.h"
 
-static const CGFloat PAD = 11, BAR = 3, MAXW = 420, GAP = 6;
+static const CGFloat PAD = 11, BAR = 3, MAXW = 460, GAP = 6;
 
 @implementation TipView
 - (BOOL)isOpaque { return NO; }
@@ -22,28 +22,112 @@ static const CGFloat PAD = 11, BAR = 3, MAXW = 420, GAP = 6;
     NSColor *a = [self.accent colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: [NSColor whiteColor];
     return [a blendedColorWithFraction:0.3 ofColor:[NSColor whiteColor]] ?: a;
 }
-// the body without blank lines or surrounding spaces
-- (NSString *)text {
-    NSMutableArray *a = [NSMutableArray array];
-    for (NSString *l in [self.body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-        NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (t.length) [a addObject:t];
+// ---- the body, laid out like Claude Code's terminal: paragraphs with a gap between them, "- " items as
+// bullets with wrapped lines indented under the text, **bold**, `code` in a monospaced font, code blocks
+// indented and dimmed. (A small Markdown subset: what replies are made of.)
+- (NSColor *)textColor { return [NSColor colorWithSRGBRed:0.90 green:0.91 blue:0.94 alpha:1]; }
+- (NSColor *)codeColor { return [NSColor colorWithSRGBRed:0.68 green:0.70 blue:1.00 alpha:1]; }
+- (NSFont *)mono { return [NSFont monospacedSystemFontOfSize:[self size] * 0.95 weight:NSFontWeightRegular]; }
+
+static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regularExpressionWithPattern:p options:0 error:NULL]; }
+
+// one line of text with **bold**, `code` and [links](...) turned into styles
+- (NSAttributedString *)inline:(NSString *)line font:(NSFont *)font color:(NSColor *)color para:(NSParagraphStyle *)para {
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
+    NSDictionary *plain = @{NSFontAttributeName: font, NSForegroundColorAttributeName: color, NSParagraphStyleAttributeName: para};
+    static NSRegularExpression *tok;
+    if (!tok) tok = re(@"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\([^)]*\\)");
+    NSUInteger at = 0;
+    for (NSTextCheckingResult *m in [tok matchesInString:line options:0 range:NSMakeRange(0, line.length)]) {
+        if (m.range.location > at) [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line substringWithRange:NSMakeRange(at, m.range.location - at)] attributes:plain]];
+        NSMutableDictionary *st = [plain mutableCopy];
+        NSRange g;
+        if ([m rangeAtIndex:1].location != NSNotFound) { g = [m rangeAtIndex:1]; st[NSFontAttributeName] = [NSFont systemFontOfSize:font.pointSize weight:NSFontWeightBold]; st[NSForegroundColorAttributeName] = [NSColor whiteColor]; }
+        else if ([m rangeAtIndex:2].location != NSNotFound) { g = [m rangeAtIndex:2]; st[NSFontAttributeName] = [self mono]; st[NSForegroundColorAttributeName] = [self codeColor]; }
+        else { g = [m rangeAtIndex:3]; st[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle); }
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line substringWithRange:g] attributes:st]];
+        at = NSMaxRange(m.range);
     }
-    return [a componentsJoinedByString:@"\n"];
+    if (at < line.length) [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line substringFromIndex:at] attributes:plain]];
+    return out;
 }
-- (CGFloat)heightOf:(NSString *)s title:(BOOL)title width:(CGFloat)w maxLines:(int)n {
-    if (!s.length) return 0;
-    CGFloat h = ceil([s boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin attributes:[self attr:title]].size.height);
-    return n > 0 ? fmin(h, n * [self lineH]) : h;
+
+- (NSMutableParagraphStyle *)paraIndent:(CGFloat)first rest:(CGFloat)rest gap:(BOOL)gap {
+    NSMutableParagraphStyle *p = [[NSMutableParagraphStyle alloc] init];
+    p.lineBreakMode = NSLineBreakByWordWrapping;
+    p.minimumLineHeight = p.maximumLineHeight = [self lineH];
+    p.firstLineHeadIndent = first;
+    p.headIndent = rest;
+    p.paragraphSpacingBefore = gap ? round([self lineH] * 0.55) : 0;
+    return p;
 }
+
+- (NSAttributedString *)rendered {
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
+    NSFont *font = [NSFont systemFontOfSize:[self size]];
+    static NSRegularExpression *item, *heading;
+    if (!item) { item = re(@"^(\\s*)([-*+•]|\\d+[.)])\\s+(.*)$"); heading = re(@"^#{1,6}\\s+(.*)$"); }
+    BOOL code = NO, gap = NO, first = YES;
+    CGFloat step = ceil([@"• " sizeWithAttributes:@{NSFontAttributeName: font}].width);
+    for (NSString *raw in [self.body ?: @"" componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r"]];
+        NSString *t = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if ([t hasPrefix:@"```"] || [t hasPrefix:@"~~~"]) { code = !code; gap = gap || code; continue; }
+        if (!code && !t.length) { gap = !first; continue; }
+        NSAttributedString *piece;
+        if (code) {
+            piece = [[NSAttributedString alloc] initWithString:line attributes:@{NSFontAttributeName: [self mono],
+                NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.62 green:0.66 blue:0.72 alpha:1],
+                NSParagraphStyleAttributeName: [self paraIndent:step * 1.5 rest:step * 1.5 gap:gap && !first]}];
+        } else {
+            NSTextCheckingResult *m = [item firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+            NSTextCheckingResult *h = [heading firstMatchInString:t options:0 range:NSMakeRange(0, t.length)];
+            if (m) { // "- text": the marker hangs, wrapped lines line up with the text after it
+                CGFloat level = floor([m rangeAtIndex:1].length / 2.0) * step * 1.2; // two spaces of indent = one level
+                NSString *marker = [line substringWithRange:[m rangeAtIndex:2]];
+                if ([@"-*+" containsString:marker]) marker = @"•";
+                marker = [marker stringByAppendingString:@" "];
+                CGFloat mw = ceil([marker sizeWithAttributes:@{NSFontAttributeName: font}].width);
+                NSMutableParagraphStyle *ps = [self paraIndent:level rest:level + mw gap:gap && !first];
+                NSMutableAttributedString *a = [[NSMutableAttributedString alloc] initWithString:marker
+                    attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: [self titleColor], NSParagraphStyleAttributeName: ps}];
+                [a appendAttributedString:[self inline:[line substringWithRange:[m rangeAtIndex:3]] font:font color:[self textColor] para:ps]];
+                piece = a;
+            } else if (h) {
+                piece = [self inline:[t substringWithRange:[h rangeAtIndex:1]] font:[NSFont systemFontOfSize:[self size] weight:NSFontWeightBold]
+                               color:[NSColor whiteColor] para:[self paraIndent:0 rest:0 gap:!first]];
+            } else {
+                piece = [self inline:t font:font color:[self textColor] para:[self paraIndent:0 rest:0 gap:gap && !first]];
+            }
+        }
+        if (!first) [out appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
+        [out appendAttributedString:piece];
+        first = NO;
+        gap = NO;
+    }
+    return out;
+}
+
+- (CGFloat)titleHeight:(CGFloat)w {
+    if (!self.title.length) return 0;
+    return ceil([self.title boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin attributes:[self attr:YES]].size.height);
+}
+- (CGFloat)bodyHeight:(NSAttributedString *)body width:(CGFloat)w {
+    if (!body.length) return 0;
+    CGFloat h = ceil([body boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin].size.height);
+    return self.maxBodyLines > 0 ? fmin(h, self.maxBodyLines * [self lineH]) : h;
+}
+
 - (NSSize)fit {
+    NSAttributedString *body = [self rendered];
     CGFloat w = ceil([self.title ?: @"" sizeWithAttributes:[self attr:YES]].width);
-    for (NSString *l in [[self text] componentsSeparatedByString:@"\n"]) w = fmax(w, ceil([l sizeWithAttributes:[self attr:NO]].width));
-    w = fmin(w + 1, MAXW);
-    CGFloat body = [self heightOf:[self text] title:NO width:w maxLines:self.maxBodyLines];
-    CGFloat h = [self heightOf:self.title title:YES width:w maxLines:0] + (body > 0 ? GAP + body : 0);
+    w = fmax(w, ceil([body boundingRectWithSize:NSMakeSize(MAXW, 1e5) options:NSStringDrawingUsesLineFragmentOrigin].size.width));
+    w = fmin(w + 2, MAXW);
+    CGFloat bh = [self bodyHeight:body width:w];
+    CGFloat h = [self titleHeight:w] + (bh > 0 ? GAP + bh : 0);
     return NSMakeSize(w + PAD * 2 + BAR, h + PAD * 2);
 }
+
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
     NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
@@ -58,11 +142,11 @@ static const CGFloat PAD = 11, BAR = 3, MAXW = 420, GAP = 6;
     [[self.accent colorWithAlphaComponent:0.45] setStroke];
     [box stroke];
     CGFloat x = PAD + BAR, w = self.bounds.size.width - PAD * 2 - BAR, top = self.bounds.size.height - PAD;
-    CGFloat th = [self heightOf:self.title title:YES width:w maxLines:0];
+    CGFloat th = [self titleHeight:w];
     NSStringDrawingOptions opt = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine;
     [self.title ?: @"" drawWithRect:NSMakeRect(x, top - th, w, th) options:opt attributes:[self attr:YES] context:nil];
-    NSString *text = [self text];
-    CGFloat bh = [self heightOf:text title:NO width:w maxLines:self.maxBodyLines];
-    if (bh > 0) [text drawWithRect:NSMakeRect(x, top - th - GAP - bh, w, bh) options:opt attributes:[self attr:NO] context:nil];
+    NSAttributedString *body = [self rendered];
+    CGFloat bh = [self bodyHeight:body width:w];
+    if (bh > 0) [body drawWithRect:NSMakeRect(x, top - th - GAP - bh, w, bh) options:opt context:nil];
 }
 @end
