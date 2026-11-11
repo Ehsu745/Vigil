@@ -139,6 +139,22 @@ static void draw_core(Canvas *c, Clip cl, float ox, float oy, float rc, const Lo
     }
 }
 
+/* a soft band of colour just outside the shell: which session this is, in single-core mode */
+static void aura(Canvas *c, Clip cl, float ox, float oy, float R, Col col, float a) {
+    float outer = R * 1.36f; /* stays inside the square the session is drawn in */
+    int bx0 = (int)floorf(ox - outer), bx1 = (int)ceilf(ox + outer) + 1, by0 = (int)floorf(oy - outer), by1 = (int)ceilf(oy + outer) + 1;
+    if (bx0 < cl.x0) bx0 = cl.x0;
+    if (by0 < cl.y0) by0 = cl.y0;
+    if (bx1 > cl.x1) bx1 = cl.x1;
+    if (by1 > cl.y1) by1 = cl.y1;
+    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
+        float dx = x + 0.5f - ox, dy = y + 0.5f - oy, u = (sqrtf(dx * dx + dy * dy) - R * 1.02f) / (R * 0.32f);
+        if (u < -1.2f || u > 1) continue;
+        float w = u < 0 ? expf(-u * u * 3.0f) * 0.55f : (1 - u) * (1 - u); /* fades fast inside, slowly outward */
+        add(c, x, y, col, a * w);
+    }
+}
+
 static void ring(Canvas *c, Clip cl, float ox, float oy, float rad, float width, float a) {
     int bx0 = (int)floorf(ox - rad - width), bx1 = (int)ceilf(ox + rad + width) + 1, by0 = (int)floorf(oy - rad - width), by1 = (int)ceilf(oy + rad + width) + 1;
     if (bx0 < cl.x0) bx0 = cl.x0;
@@ -219,6 +235,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
     float gx = ox + s->look_x * HOVER.gaze * CIRCUM * unit, gy = oy + s->look_y * HOVER.gaze * CIRCUM * unit; /* the core looks at the cursor */
+    if (s->aura_a > 0.01f) aura(c, cl, ox, oy, CIRCUM * unit, s->aura, s->aura_a * glow);
     draw_core(c, cl, gx, gy, rc, L, inten);
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
