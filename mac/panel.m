@@ -25,7 +25,7 @@ static float g_glow = 1.0f, g_core = 0.35f;
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
-static char g_pidfile[1024];
+static char g_pidfile[1024], g_msg_dir[1024];
 static struct termios g_old_tty;
 static int g_tty;
 
@@ -52,8 +52,9 @@ static NSString *state_line(const Session *s, int st) {
     return [NSString stringWithUTF8String:STATE_TEXT[st]];
 }
 
-// the last reply of a session, or nil. Only --demo has one so far: reading the real replies needs the
-// richer hook data (DODECA_RICH), which comes later.
+// What the hook keeps about a session besides its events (only with DODECA_RICH=1): the msg file
+// ~/.dodeca-core/msg/<sid>.json with "reply", "notice", "iterm", "summary" and "t". Read again only when
+// the file changes. --demo makes the same up.
 static const char *DEMO_REPLY[] = {
     "Refactored the channel model so fading is applied per tap.\nAll 42 simulation tests pass; the BER curve now matches the reference within 0.2 dB.\nNext I can add Doppler if you want.",
     "The lock now debounces the reed switch for 30 ms.\nI also fixed the race where a second unlock arrived before the motor stopped.",
@@ -62,10 +63,36 @@ static const char *DEMO_REPLY[] = {
     "Swept 2.40-2.48 GHz: best match at 2.437 GHz, S11 -18 dB.\nThe matching network values are in tune.csv.",
     "Scratch test done. Nothing to keep.",
 };
-static NSString *last_reply(const Session *s) {
+static const char *DEMO_NOTICE = "Claude needs your permission to use Bash";
+
+static NSDictionary *msg_of(const Session *s) {
+    static NSMutableDictionary *cache;
     int i;
-    if (g_demo_n && sscanf(s->sid, "demo-%d", &i) == 1 && i >= 0 && i < 6) return [NSString stringWithUTF8String:DEMO_REPLY[i]];
-    return nil;
+    if (g_demo_n) {
+        if (sscanf(s->sid, "demo-%d", &i) != 1 || i < 0 || i >= 6) return nil;
+        return @{@"reply": [NSString stringWithUTF8String:DEMO_REPLY[i]], @"notice": [NSString stringWithUTF8String:DEMO_NOTICE]};
+    }
+    if (!g_msg_dir[0] || !strcmp(s->sid, "ghost")) return nil;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/%s.json", g_msg_dir, s->sid);
+    struct stat st;
+    NSString *key = [NSString stringWithUTF8String:s->sid];
+    if (!key) return nil;
+    if (!cache) cache = [NSMutableDictionary dictionary];
+    if (stat(path, &st) != 0) { [cache removeObjectForKey:key]; return nil; }
+    double mtime = st.st_mtimespec.tv_sec + st.st_mtimespec.tv_nsec / 1e9;
+    NSArray *hit = cache[key];
+    if (hit && [hit[0] doubleValue] == mtime) return hit[1];
+    NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    id d = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    if (![d isKindOfClass:[NSDictionary class]]) return nil;
+    cache[key] = @[@(mtime), d];
+    return d;
+}
+
+static NSString *msg_text(const Session *s, NSString *field) {
+    id v = msg_of(s)[field];
+    return [v isKindOfClass:[NSString class]] && [v length] ? v : nil;
 }
 
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
@@ -399,7 +426,9 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
     NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
-    NSString *body = last_reply(s) ?: @"(no reply yet)";
+    if (s->unread) title = [title stringByAppendingString:@" · new reply"];
+    int st = session_shown(s, now);
+    NSString *body = (st == ST_WAIT ? msg_text(s, @"notice") : nil) ?: msg_text(s, @"reply") ?: @"(no reply yet)";
     Col c = s->cur.eh;
     self.tipView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
@@ -478,6 +507,9 @@ int main(int argc, char **argv) {
         if (g_demo_n) demo_start(&g_demo, g_demo_n, now);
         else {
             tail_init(&g_tail, events);
+            snprintf(g_msg_dir, sizeof g_msg_dir, "%.1000s", events); // the msg folder sits next to the events file
+            char *slash = strrchr(g_msg_dir, '/');
+            if (slash) strcpy(slash + 1, "msg"); else snprintf(g_msg_dir, sizeof g_msg_dir, "msg");
             int n = tail_history(&g_tail, now - 1800, g_ev, 1024); // rebuild what the sessions were doing
             for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
             char dir[900]; // lets the launcher see that a panel is already open
