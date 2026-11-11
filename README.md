@@ -91,7 +91,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 |---|---|---|
 | Point at it | Tooltip after 0.3 s: folder, state, first two lines of the last reply (the notification text while NEEDS YOU) | Brightens, spins slower, turns toward the cursor |
 | Unread reply | — | A slow, soft flash until you click it or send a new prompt |
-| Click | Marks the reply as read and shows the tooltip at once | — |
+| Click | Speaks the report, or stops it; marks the reply as read | SPEAKING (teal): brightness follows the voice |
 | Hold (> 0.35 s), release | Push-to-talk | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
 | Double-click | Brings that session's iTerm2 pane to the front | One shockwave ring |
 | Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front | — |
@@ -105,6 +105,14 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 - Hotkeys use `RegisterEventHotKey`, which needs no Accessibility permission. Esc is only taken while recording, so the terminal keeps it otherwise. `--hotkey ctrl+opt+v` changes the push-to-talk key (`cmd`, `opt`, `ctrl`, `shift` plus a letter, digit, `space`, `return`, `tab` or `f1`–`f12`; `none` turns it off). macOS already uses ⌃Space, ⌃⌥Space, ⌘Space and ⌥⌘Space, so the default is `⌃⌥V`.
 - Away is read from the system's "seconds since last input" (no Input Monitoring permission, no key logging). `--away SECONDS` changes the 120 s; `--away 0` turns it off.
 - Double-click and "Bring to front" need `DODECA_RICH` (the iTerm2 session id is kept in the msg file) and, the first time, your OK for the panel to control iTerm2 (System Settings > Privacy & Security > Automation).
+
+**Spoken reports.** A report starts with where it comes from: "notes 完成了：…" for a reply, "notes 需要你：…" with the permission request while a session needs you. Only one session speaks at a time, others wait their turn, and a permission request goes to the front of the queue.
+
+- By default the panel speaks only when you click a core or choose Replay. With `--auto-speak` it also reads a new reply out on its own if you used the keyboard or mouse in the last 60 seconds, and reads a new permission request out at once. Muted sessions never speak on their own.
+- What is read is a summary. By default the first paragraph of the reply, at most 3 sentences or 150 characters (no cost, no delay). With `--summarize claude` the panel asks `claude -p` (model haiku, hooks and tools off) in the background for two or three conversational sentences in Traditional Chinese; if that takes more than 15 seconds it uses the local summary. The summary is kept in the msg file, so Replay doesn't ask again. This sends the reply text to Anthropic once more and uses your Claude Code quota.
+- Before reading, code blocks become "（略過一段程式碼）", and Markdown symbols and URLs are removed (links keep their text).
+- `--voice-id` picks the voice: a language (`zh-TW`, the default, or `en-US`) or a voice identifier. `--rate` sets the speed (0 to 1, default 0.5). The built-in zh-TW voice is basic; better ones can be downloaded in System Settings > Accessibility > Spoken Content > System Voice > Manage Voices. With a non-Chinese voice the panel's own words are in English.
+- Speaking needs no permission.
 - How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 
 ## Output modes

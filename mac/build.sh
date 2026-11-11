@@ -19,7 +19,7 @@ ID=local.dodeca-core.panel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cc -O2 -fobjc-arc -Wall -Wextra -o "$APP/Contents/MacOS/dodeca-panel" \
-    mac/panel.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -framework Carbon -lm
+    mac/panel.m mac/speech.m src/events.c src/geom.c src/session.c src/render.c -framework Cocoa -framework Carbon -framework AVFoundation -lm
 
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -53,6 +53,7 @@ cat >dodeca-panel <<'EOF'
 DIR=$(cd "$(dirname "$0")" && pwd)
 set -- --launcher-pid $$ "$@"
 [ -n "$DODECA_EVENTS" ] && set -- --events "$DODECA_EVENTS" "$@" # apps started by LaunchServices get no environment
+C=$(command -v claude 2>/dev/null) && set -- --claude "$C" "$@"     # nor this shell's PATH
 if [ -t 0 ] && [ -t 1 ]; then
     TTY=$(tty)
     exec_open() { open -n -W --stdout "$TTY" --stderr "$TTY" "$DIR/DodecaPanel.app" --args --tty "$TTY" "$@"; }
