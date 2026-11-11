@@ -45,9 +45,9 @@ const Look LOOKS[ST_N] = {
 
 /* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
 const Hover HOVER = {.bright = 0.35f, .slow = 0.7f, .tilt = 0.32f, .gaze = 0.10f, .ease = 7.0f};
-const Touch TOUCH = {.unread_hz = 0.5f, .unread_amp = 0.45f, .ring_for = 1.0f, .vol_for = 1.2f, .coast = 1.2f, .aura = 0.55f};
+const Touch TOUCH = {.unread_hz = 0.5f, .unread_amp = 0.45f, .ring_for = 1.0f, .vol_for = 1.2f, .coast = 1.2f, .aura = 0.6f};
 
-/* single-core mode: who is who, by the colour of the aura around the shell (state colours stay as they are) */
+/* single-core mode: who is who, by the colour of the core (the shell keeps the state colours) */
 const Col HUES[NHUE] = {C(80, 200, 255), C(255, 120, 200), C(140, 235, 110), C(255, 190, 70),
                         C(170, 140, 255), C(70, 230, 200), C(255, 110, 90), C(230, 230, 120)};
 

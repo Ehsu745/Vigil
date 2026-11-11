@@ -64,11 +64,11 @@ typedef struct {
     float ring_for;              /* seconds the double-click shockwave ring takes */
     float vol_for;               /* seconds the shell shows the speech volume after a scroll */
     float coast;                 /* how fast a flung shell slows back to its own rotation (1/s) */
-    float aura;                  /* single-core mode: strength of the colour aura that says which session a core is */
+    float aura;                  /* single-core mode: how far the core is tinted with its session's colour (0..1) */
 } Touch;
 extern const Touch TOUCH;
 #define NHUE 8
-extern const Col HUES[NHUE];     /* single-core mode: one colour per session, for its aura */
+extern const Col HUES[NHUE];     /* single-core mode: one colour per session, tinting its core */
 
 typedef struct { int e, dir; float t, sp; } Pulse;
 
@@ -92,8 +92,8 @@ typedef struct {
     float vol;             /* speech volume 0..1 */
     int muted, held;       /* never speaks on its own / being dragged by the mouse */
     float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */
-    Col aura;              /* single-core mode: this session's colour, drawn as a soft glow around the shell */
-    float aura_a;          /* its strength, 0 = none */
+    Col aura;              /* single-core mode: this session's colour, which tints its core */
+    float aura_a;          /* how much, 0 = none */
 } Session;
 
 typedef struct { Session s[MAX_SESS]; int n; } Room;

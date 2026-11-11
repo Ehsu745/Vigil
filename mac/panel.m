@@ -67,6 +67,28 @@ static Session *session_by_sid(NSString *sid) {
 
 static NSString *sid_of(const Session *s) { return [NSString stringWithUTF8String:s->sid] ?: @""; }
 
+// Single-core mode: where the cluster was put with ⌥-drag, kept in ~/.dodeca-core/panel-position.json per
+// screen size (another monitor setup has its own spot, so it never comes back off-screen).
+static NSString *position_file(void) { return [@"~/.dodeca-core/panel-position.json" stringByExpandingTildeInPath]; }
+static NSString *screen_key(NSScreen *sc) { return [NSString stringWithFormat:@"%.0fx%.0f", sc.frame.size.width, sc.frame.size.height]; }
+static NSMutableDictionary *positions(void) {
+    NSData *d = [NSData dataWithContentsOfFile:position_file()];
+    id j = d ? [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:NULL] : nil;
+    return [j isKindOfClass:[NSMutableDictionary class]] ? j : [NSMutableDictionary dictionary];
+}
+static void save_position(NSScreen *sc, NSPoint origin) {
+    NSMutableDictionary *all = positions();
+    if (sc) {
+        if (origin.x == CGFLOAT_MAX) [all removeObjectForKey:screen_key(sc)];
+        else all[screen_key(sc)] = @[@(origin.x), @(origin.y)];
+    }
+    [[NSFileManager defaultManager] createDirectoryAtPath:[position_file() stringByDeletingLastPathComponent]
+                              withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
+    NSData *out = [NSJSONSerialization dataWithJSONObject:all options:0 error:NULL];
+    [out writeToFile:position_file() atomically:YES];
+    chmod(position_file().fileSystemRepresentation, 0600);
+}
+
 static double wall(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -199,6 +221,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     BOOL _dragging, _pressing, _reordering;
     NSTimer *_pressTimer, *_clickTimer;
     NSMutableDictionary<NSString *, NSValue *> *_place; // single-core mode: where each core is drawn now (eases to its spot)
+    CGFloat _grabY, _holdY; // ⌥-drag: where on the core it was grabbed, and where the mouse is now
+    BOOL _moving;           // single-core mode ⌥-drag: the whole cluster follows the mouse
+    NSPoint _moveMouse, _moveOrigin;
     double _lastDraw;
 }
 
@@ -232,7 +257,18 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self.actions coreTouched:sid];
     _downSid = sid;
     _downAt = _dragAt = e.locationInWindow;
-    if (e.modifierFlags & NSEventModifierFlagOption) { // ⌥-drag: move this core up or down the column
+    if (e.modifierFlags & NSEventModifierFlagOption && g_single) { // ⌥-drag: the cluster goes anywhere on the screen
+        _moving = YES;
+        _moveMouse = [NSEvent mouseLocation];
+        _moveOrigin = self.window.frame.origin;
+        _dragging = _pressing = NO;
+        return;
+    }
+    if (e.modifierFlags & NSEventModifierFlagOption && !g_single) { // ⌥-drag: move this core up or down the column
+        NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+        int i = [self coreAt:p look:NULL center:NULL];
+        _grabY = i >= 0 ? p.y - NSMidY(_core[i]) : 0;
+        _holdY = p.y;
         _reordering = YES;
         _dragging = _pressing = NO;
         return;
@@ -250,7 +286,18 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 }
 
 - (void)mouseDragged:(NSEvent *)e {
-    if (_reordering) { [self reorderTo:[self convertPoint:e.locationInWindow fromView:nil]]; return; }
+    if (_moving) {
+        NSPoint m = [NSEvent mouseLocation];
+        [self.window setFrameOrigin:NSMakePoint(_moveOrigin.x + m.x - _moveMouse.x, _moveOrigin.y + m.y - _moveMouse.y)];
+        return;
+    }
+    if (_reordering) {
+        NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+        _holdY = p.y;
+        [self reorderTo:p];
+        [self setNeedsDisplay:YES]; // the held core follows the mouse
+        return;
+    }
     if (!_downSid || _pressing) return;
     NSPoint p = e.locationInWindow;
     if (!_dragging && hypot(p.x - _downAt.x, p.y - _downAt.y) < DRAG_AFTER) return;
@@ -272,7 +319,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     _pressTimer = nil;
     NSString *sid = _downSid;
     _downSid = nil;
-    if (_reordering) { _reordering = NO; return; }
+    if (_reordering) { _reordering = NO; [self setNeedsDisplay:YES]; return; }
+    if (_moving) { _moving = NO; save_position(self.window.screen, self.window.frame.origin); return; }
     if (!sid) return;
     if (_pressing) { _pressing = NO; [self.actions corePressEnded:sid]; return; }
     if (_dragging) { // let go: it keeps spinning the way it was thrown and slows back to its own rotation
@@ -326,7 +374,11 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     if (to == from) return;
     room_move(r, from, to);
-    _lastCount = -1; // every picture belongs to another row now: redraw them all
+    CGImageRef a = _img[from]; // the pictures move with their sessions
+    if (from < to) memmove(&_img[from], &_img[from + 1], sizeof(CGImageRef) * (size_t)(to - from));
+    else memmove(&_img[to + 1], &_img[to], sizeof(CGImageRef) * (size_t)(from - to));
+    _img[to] = a;
+    for (int i = 0; i <= MAX_SESS; i++) _due[i] = 0;
     [self setNeedsDisplay:YES];
 }
 
@@ -372,8 +424,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     CGFloat small = n > 1 ? fmin(W * 0.2, 2 * M_PI * rx / (n - 1) * 0.75) : 0;
     rx -= small / 2;
     ry -= small / 2;
-    CGFloat cx = W / 2, cy = H - ry - small / 2 - 4;
-    if (cy - big / 2 < 0) cy = big / 2;
+    CGFloat cx = W / 2, cy = H / 2; // the window is just the cluster
     float ease = 1 - expf(-dt * 7);
     NSRect at[MAX_SESS];
     for (int i = 0, k = 0; i < n; i++) {
@@ -441,7 +492,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height - g_inset; // the inset keeps the first line clear of the pane's title bar
     if (H < 60) H = 60;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 2.0;
-    if (g_single) { [self drawSingle:room now:now width:W height:H scale:scale]; return; }
+    if (g_single) { [self drawSingle:room now:now width:W height:self.bounds.size.height scale:scale]; return; }
     NSFont *font = [NSFont fontWithName:g_font_name size:g_font_size];
     if (!font) font = [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
     CGFloat lineH = ceil(font.ascender - font.descender) + 3, textH = g_labels_hover ? 0 : lineH * 2 + 4, gap = 10, left = 10;
@@ -460,6 +511,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.lineBreakMode = NSLineBreakByTruncatingTail;
     CGContextRef ctx = [NSGraphicsContext currentContext].CGContext;
+    int held = -1;
 
     for (int i = 0; i < n; i++) {
         const Session *s = &room->s[i];
@@ -493,9 +545,17 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             _due[i] = now + 1.0 / rate - 0.01;
         }
         _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
+        if (_reordering && [_downSid isEqualToString:sid_of(s)]) { held = i; continue; } // drawn last, at the mouse
         CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
     }
     _coreN = n;
+    if (held >= 0) { // ⌥-drag: the held core under the mouse, a little larger, above the others
+        NSRect r = NSInsetRect(_core[held], -side * 0.06, -side * 0.06);
+        r.origin.y = _holdY - _grabY - r.size.height / 2;
+        CGContextSetAlpha(ctx, 0.92);
+        CGContextDrawImage(ctx, NSRectToCGRect(r), _img[held]);
+        CGContextSetAlpha(ctx, 1);
+    }
 }
 @end
 
@@ -611,6 +671,17 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     }
     if (w > f.size.width * 0.6) w = f.size.width * 0.6;
     if (h > f.size.height) h = f.size.height;
+    if (g_single) { // just the cluster, where it was put last (else the top of the right edge)
+        CGFloat cw = fmax(200, fmin(320, w)), ch = ceil(cw * 1.2) + 8;
+        NSArray *at = positions()[screen_key(screen)];
+        NSRect vis = screen.visibleFrame;
+        NSRect r = NSMakeRect(NSMaxX(f) - cw, NSMaxY(vis) - ch, cw, ch);
+        if ([at isKindOfClass:[NSArray class]] && at.count == 2) r.origin = NSMakePoint([at[0] doubleValue], [at[1] doubleValue]);
+        r.origin.x = fmax(NSMinX(vis), fmin(r.origin.x, NSMaxX(vis) - cw));
+        r.origin.y = fmax(NSMinY(vis), fmin(r.origin.y, NSMaxY(vis) - ch));
+        [self.panel setFrame:r display:YES];
+        return;
+    }
     [self.panel setFrame:NSMakeRect(NSMaxX(f) - w, NSMinY(f), w, h) display:YES];
 }
 
@@ -1183,6 +1254,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     [m addItemWithTitle:@"Bring to front" action:@selector(menuFront:) keyEquivalent:@""];
     [m addItemWithTitle:g_single ? @"All cores" : @"Single core" action:@selector(menuMode:) keyEquivalent:@""];
     if (g_single && g_focus_pinned) [m addItemWithTitle:@"Follow automatically" action:@selector(menuFollow:) keyEquivalent:@""];
+    if (g_single && positions()[screen_key(self.panel.screen ?: [NSScreen mainScreen])]) [m addItemWithTitle:@"Reset position" action:@selector(menuResetPosition:) keyEquivalent:@""];
     for (NSMenuItem *i in m.itemArray) { i.target = self; i.representedObject = sid; }
     return m;
 }
@@ -1205,10 +1277,16 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 - (void)menuFront:(NSMenuItem *)i { [self coreDoubleClicked:i.representedObject]; }
 - (void)menuMode:(NSMenuItem *)i { (void)i; [self toggleMode]; }
 - (void)menuFollow:(NSMenuItem *)i { (void)i; g_focus_pinned = NO; self.focusSince = wall(); }
+- (void)menuResetPosition:(NSMenuItem *)i {
+    (void)i;
+    save_position(self.panel.screen ?: [NSScreen mainScreen], NSMakePoint(CGFLOAT_MAX, 0)); // forget it
+    [self place];
+}
 
 - (void)toggleMode {
     g_single = !g_single;
     g_focus_pinned = NO;
+    [self place];
     [self.view relayout];
 }
 
