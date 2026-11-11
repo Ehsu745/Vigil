@@ -2,3 +2,4 @@ dodeca-core
 *.ppm
 *.o
 .DS_Store
+dodeca-panel

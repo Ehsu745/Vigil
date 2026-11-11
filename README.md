@@ -2,7 +2,7 @@
 
 在終端機裡，每個執行中的 Claude Code session 是一顆發光的多面體：白色細線外殼、藍色光暈、中心一顆像太陽的亮核。狀態改變時，顏色、轉速和核心的明暗跟著變。
 
-做法參考了 [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room)（hook 寫 JSONL、顯示程式 tail 檔案），程式碼是另外寫的。
+做法與部分程式碼（`hook.py`、`install_hooks.py`、`src/events.c` 的事件讀取）改寫自 [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room)（MIT License，Copyright (c) 2026 Zaviel）；多面體渲染、macOS 浮動面板與 pane 相關部分為本專案新寫。授權見 [LICENSE](LICENSE)。
 
 ## 狀態
 
