@@ -7,11 +7,11 @@ dodeca-core shows every running Claude Code session as a glowing polyhedron, eit
 ```sh
 make                          # builds ./dodeca-core (C11, links zlib and libm)
 ./dodeca-core --demo          # fake sessions cycling through every state; q quits
-sh mac/build.sh               # builds ./dodeca-panel, the macOS floating panel (Cocoa)
+sh mac/build.sh               # builds DodecaPanel.app and its launcher script ./dodeca-panel (macOS floating panel)
 ./dodeca-panel --demo
 ```
 
-Both binaries are build output and are gitignored. Don't commit them.
+`dodeca-core`, `DodecaPanel.app` and the `./dodeca-panel` launcher are build output and are gitignored. Don't commit them. The launcher starts the app with `open -n -W` so macOS attributes microphone and speech permissions to the app (a binary started straight from the terminal would count as iTerm2); it passes `--tty` and `--launcher-pid`, and the app quits when the launcher ends.
 
 ## Checking a change
 
