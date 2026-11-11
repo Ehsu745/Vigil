@@ -189,6 +189,60 @@ static void text(Canvas *c, Clip cl, float cx, int y, const char *s, int fs, Col
     }
 }
 
+/* ---- the shell, as the motion system has moved it --------------------------------------------- */
+typedef struct { float M[9], T[9], ox, oy, unit, tall, st, ux, uy; } Proj;
+static void project(const Proj *P, const float *p, float *out) {
+    float w[3];
+    m3_app(w, P->M, p);
+    float pp = CAM / (CAM - w[2]);
+    float dx = w[0] * P->unit * pp * (1 - 0.5f * P->tall), dy = w[1] * P->unit * pp * (1 + P->tall);
+    float par = (dx * P->ux + dy * P->uy) * (1 + P->st), per = (-dx * P->uy + dy * P->ux) * (1 - P->st * 0.5f);
+    out[0] = P->ox + par * P->ux - per * P->uy; out[1] = P->oy + par * P->uy + per * P->ux; out[2] = w[2];
+}
+static int moved(const Motion *mo, int t) { return fabsf(mo->off[t]) > 0.002f || mo->ang[t] != 0; }
+static int same_tri(const Motion *mo, int a, int b) {
+    if (mo->ang[a] != mo->ang[b]) return 0;
+    if (fabsf(mo->off[a]) < 0.002f && fabsf(mo->off[b]) < 0.002f) return 1;
+    return mo->grp[a] == mo->grp[b] && fabsf(mo->off[a] - mo->off[b]) < 0.002f;
+}
+typedef struct { int n; float ang[4], R[4][9]; } RotCache; /* a frame has only a few distinct layer turns */
+static const float *layer_rot(RotCache *rc, const Motion *mo, float a) {
+    for (int i = 0; i < rc->n; i++) if (rc->ang[i] == a) return rc->R[i];
+    int i = rc->n < 4 ? rc->n++ : 3;
+    rc->ang[i] = a; m3_rot(rc->R[i], mo->lax, a);
+    return rc->R[i];
+}
+/* where node v is drawn as part of triangle t: slid out with its patch, and turned with its layer */
+static void at_tri(const Proj *P, const Motion *mo, const Shape *sh, float base[][3], int v, int t, RotCache *rc, float *out) {
+    float p[3];
+    const float *n = mo->gn[mo->grp[t]];
+    float o = mo->off[t] * CIRCUM;
+    p[0] = base[v][0] + n[0] * o; p[1] = base[v][1] + n[1] * o; p[2] = base[v][2] + n[2] * o;
+    if (mo->ang[t] != 0) m3_app(p, layer_rot(rc, mo, mo->ang[t]), p);
+    (void)sh;
+    project(P, p, out);
+}
+static void draw_edge(Canvas *c, Clip cl, const float *a, const float *b, const Look *L, float edge, float thin, float halo, float gg, float k) {
+    float depth = 0.3f + 0.7f * ((a[2] + b[2]) * 0.5f + CIRCUM) / (2 * CIRCUM); /* far edges are fainter */
+    float al = depth * edge * (1 + gg);
+    glow_line(c, cl, a[0], a[1], b[0], b[1], mix(L->line, WHITE, gg * 0.6f), thin * al, L->eh, halo * al, k);
+}
+static const float (*icosa(void))[3] { /* the 12 corners of an icosahedron on the shell's sphere */
+    static float v[12][3];
+    static int made;
+    if (!made) {
+        const float P = 1.6180339887f, l = sqrtf(1 + P * P) / CIRCUM;
+        int n = 0;
+        for (int a = -1; a <= 1; a += 2) for (int b = -1; b <= 1; b += 2) {
+            v[n][0] = 0; v[n][1] = a / l; v[n][2] = b * P / l; n++;
+            v[n][0] = a / l; v[n][1] = b * P / l; v[n][2] = 0; n++;
+            v[n][0] = b * P / l; v[n][1] = 0; v[n][2] = a / l; n++;
+        }
+        made = 1;
+    }
+    return (const float (*)[3])v;
+}
+
 static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, double now, float glow, float core_frac, int label) {
     double t = now - s->created + s->phase; /* small numbers keep sin() precise */
     Look lit_look = s->cur; /* pointed at: a brighter shell */
@@ -217,7 +271,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit;
 
     /* the core */
-    float gl = fminf(1, L->glitch + s->shake * s->shake * CARRY.shake_glitch);
+    float gl = fminf(1, L->glitch + s->shake * s->shake * CARRY.shake_glitch + (motion_crazy(s, now) ? 0.9f : 0));
     float breathe = (1 + L->depth * (float)sin(t * L->hz * 6.283185)) * (1 - gl) + glitch_val(t) * gl;
     float flick = 1 + 0.035f * (float)sin(t * 17.3) + 0.025f * (float)sin(t * 29.1 + 1.7);
     float burst = (float)(1 - (now - s->burst_at) / 1.4);
@@ -231,32 +285,84 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
     if (wave > 0 && wave <= 1) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
 
-    /* the shell */
-    float q[MAX_V][3];
-    float cy = cosf(s->ay), sy = sinf(s->ay), cx = cosf(s->ax), sx = sinf(s->ax);
-    float ty = HOVER.tilt * s->look_x + s->lean_x + s->w_lean_x, tx = HOVER.tilt * s->look_y + s->lean_y + s->w_lean_y; /* then turned to face the cursor, or into the motion */
-    float lm = hypotf(s->lean_x, s->lean_y), st = lm / CARRY.lean_max * CARRY.stretch; /* and stretched along the motion */
-    float ux = lm > 1e-4f ? s->lean_x / lm : 1, uy = lm > 1e-4f ? s->lean_y / lm : 0;
-    float cty = cosf(ty), sty = sinf(ty), ctx = cosf(tx), stx = sinf(tx);
-    for (int i = 0; i < sh->nv; i++) {
-        const float *v = sh->v[i];
-        float x0 = v[0] * cy + v[2] * sy, z0 = -v[0] * sy + v[2] * cy;
-        float y0 = v[1] * cx - z0 * sx, z1 = v[1] * sx + z0 * cx;
-        float x = x0 * cty + z1 * sty, z2 = -x0 * sty + z1 * cty;
-        float y = y0 * ctx + z2 * stx, z = -y0 * stx + z2 * ctx, p = CAM / (CAM - z);
-        float dx = x * unit * p * (1 - 0.5f * s->w_tall), dy = y * unit * p * (1 + s->w_tall), par = (dx * ux + dy * uy) * (1 + st), per = (-dx * uy + dy * ux) * (1 - st * 0.5f);
-        q[i][0] = ox + par * ux - per * uy; q[i][1] = oy + par * uy + per * ux; q[i][2] = z;
+    /* the shell: the snap turns (mo.q), the drift (ax, ay), then turned toward the cursor or into the motion */
+    const Motion *mo = &s->mo;
+    Proj P;
+    {
+        float E[9], Ty[9], Tx[9], Y[3] = {0, 1, 0}, X[3] = {1, 0, 0};
+        float ty = HOVER.tilt * s->look_x + s->lean_x + s->w_lean_x, tx = HOVER.tilt * s->look_y + s->lean_y + s->w_lean_y;
+        m3_euler(E, s->ax, s->ay);
+        m3_rot(Ty, Y, ty);
+        m3_rot(Tx, X, -tx);
+        m3_mul(P.T, Tx, Ty);
+        m3_mul(P.M, E, mo->q);
+        m3_mul(P.M, P.T, P.M);
     }
+    float lm = hypotf(s->lean_x, s->lean_y); /* stretched along the motion when carried */
+    P.st = lm / CARRY.lean_max * CARRY.stretch;
+    P.ux = lm > 1e-4f ? s->lean_x / lm : 1; P.uy = lm > 1e-4f ? s->lean_y / lm : 0;
+    P.ox = ox; P.oy = oy; P.unit = unit * (mo->scale > 0 ? mo->scale : 1); P.tall = s->w_tall;
+    /* each node, pushed out or in by a spike */
+    float base[MAX_V][3], q[MAX_V][3];
+    for (int i = 0; i < sh->nv; i++) {
+        float r = 1 + mo->push[i];
+        base[i][0] = sh->v[i][0] * r; base[i][1] = sh->v[i][1] * r; base[i][2] = sh->v[i][2] * r;
+        project(&P, base[i], q[i]);
+    }
+    int crazy = motion_crazy(s, now), any = 0;
+    for (int t = 0; t < sh->nt && !any; t++) any = moved(mo, t);
+    float strobe = crazy ? (sinf((float)t * 90.0f) > 0 ? 0.45f : 1.0f) : 1.0f; /* going crazy: the threads stutter */
+    float edge = L->edge * strobe, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
+    RotCache rc_ = {0};
     for (int i = 0; i < sh->ne; i++) {
-        const float *a = q[sh->e[i][0]], *b = q[sh->e[i][1]];
-        float depth = 0.3f + 0.7f * ((a[2] + b[2]) * 0.5f + CIRCUM) / (2 * CIRCUM); /* far edges are fainter */
-        float al = depth * L->edge, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
-        glow_line(c, cl, a[0], a[1], b[0], b[1], L->line, thin * al, L->eh, glow * sh->df * al, k);
+        int a = sh->e[i][0], b = sh->e[i][1], t1 = sh->et[i][0], t2 = sh->et[i][1];
+        float gg = (mo->glow[a] + mo->glow[b]) * 0.5f, pa[3], pb[3];
+        if (!any || t1 < 0) { draw_edge(c, cl, q[a], q[b], L, edge, thin, glow * sh->df, gg, k); continue; }
+        /* an edge between two triangles that moved apart is drawn on each of them */
+        at_tri(&P, mo, sh, base, a, t1, &rc_, pa); at_tri(&P, mo, sh, base, b, t1, &rc_, pb);
+        draw_edge(c, cl, pa, pb, L, edge, thin, glow * sh->df, gg, k);
+        if (t2 >= 0 && !same_tri(mo, t1, t2)) {
+            at_tri(&P, mo, sh, base, a, t2, &rc_, pa); at_tri(&P, mo, sh, base, b, t2, &rc_, pb);
+            draw_edge(c, cl, pa, pb, L, edge, thin, glow * sh->df, gg, k);
+        }
     }
-    for (int i = 0; i < sh->nv; i++) {
-        float d = 0.3f + 0.7f * (q[i][2] + CIRCUM) / (2 * CIRCUM);
-        if (k > 0.3f) blob(c, cl, q[i][0], q[i][1], 5 * k, L->eh, 0.3f * d * L->edge * glow * sh->df, L->eh, 0.1f * d * L->edge * glow * sh->df, 0.5f);
-        disc(c, cl, q[i][0], q[i][1], k * 1.5f > 0.6f ? k * 1.5f : 0.6f, L->line, 0.95f * d * L->edge * (k > 0.3f ? 1 : 0.5f));
+    for (int i = 0; i < sh->nv; i++) { /* the nodes: one dot for each place a node is drawn */
+        int seen[MAX_DEG], ns = 0, nt = any ? sh->nvt[i] : 0;
+        for (int j = 0; j <= nt; j++) {
+            float p[3];
+            if (!nt) { if (j) break; memcpy(p, q[i], sizeof p); }
+            else {
+                if (j == nt) break;
+                int tt = sh->vt[i][j], dup = 0;
+                for (int u = 0; u < ns; u++) if (same_tri(mo, seen[u], tt)) dup = 1;
+                if (dup) continue;
+                seen[ns++] = tt;
+                at_tri(&P, mo, sh, base, i, tt, &rc_, p);
+            }
+            float d = 0.3f + 0.7f * (p[2] + CIRCUM) / (2 * CIRCUM), gg = mo->glow[i];
+            if (k > 0.3f) blob(c, cl, p[0], p[1], 5 * k * (1 + gg), L->eh, (0.3f * d * edge * glow * sh->df) * (1 + 2 * gg), L->eh, 0.1f * d * edge * glow * sh->df, 0.5f);
+            disc(c, cl, p[0], p[1], (k * 1.5f > 0.6f ? k * 1.5f : 0.6f) * (1 + gg), mix(L->line, WHITE, gg), clamp01(0.95f * d * edge * (k > 0.3f ? 1 : 0.5f) + gg));
+        }
+    }
+    if (mo->inner > 0.01f) { /* the inner shell: a small icosahedron turning against the outer one */
+        float R[9], M2[9], ax[3] = {0.28f, 0.94f, 0.19f}, pts[12][3];
+        m3_rot(R, ax, mo->inner_ang);
+        m3_mul(M2, P.T, R);
+        Proj PI = P; memcpy(PI.M, M2, sizeof M2);
+        const float (*iv)[3] = icosa();
+        for (int i = 0; i < 12; i++) { float v[3] = {iv[i][0] * 0.42f, iv[i][1] * 0.42f, iv[i][2] * 0.42f}; project(&PI, v, pts[i]); }
+        for (int i = 0; i < 12; i++) for (int j = i + 1; j < 12; j++) {
+            float dx = iv[i][0] - iv[j][0], dy = iv[i][1] - iv[j][1], dz = iv[i][2] - iv[j][2];
+            if (dx * dx + dy * dy + dz * dz > 3.9f) continue; /* only the 30 edges (edge length² is 3.3 on this sphere, the next distance 8.7) */
+            glow_line(c, cl, pts[i][0], pts[i][1], pts[j][0], pts[j][1], L->eh, 0.5f * mo->inner * edge, L->eh, 0.4f * mo->inner * glow * edge, k);
+        }
+    }
+    if (mo->scan_a > 0.01f) { /* the scan plane, seen edge-on: a flat ellipse at its height */
+        float h = mo->scan_h, rx = sqrtf(fmaxf(0, 1.04f - h * h)) * CIRCUM * P.unit, ry = rx * 0.14f, cy = oy + h * CIRCUM * P.unit;
+        for (int i = 0; i < 40; i++) {
+            float a0 = (float)i / 40 * 6.2831853f, a1 = (float)(i + 1) / 40 * 6.2831853f;
+            glow_line(c, cl, ox + rx * cosf(a0), cy + ry * sinf(a0), ox + rx * cosf(a1), cy + ry * sinf(a1), L->eh, 0.35f * mo->scan_a, L->eh, 0.15f * mo->scan_a * glow, k);
+        }
     }
     /* pulses running along the edges */
     if (L->flow > 0.03f) {

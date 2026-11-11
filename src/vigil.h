@@ -7,6 +7,7 @@
 #define MAX_V 96
 #define MAX_E 280
 #define MAX_DEG 6
+#define MAX_T 180           /* triangles of the finest geodesic shell (geo3) */
 #define NPULSE 14
 #define CIRCUM 1.7320508f   /* every shell is scaled so its vertices sit on a sphere of this radius */
 #define INRADIUS 1.3763819f /* inradius of the dodecahedron on that sphere: the unit the core radius is given in */
@@ -29,7 +30,15 @@ typedef struct {
     float v[MAX_V][3];
     int e[MAX_E][2];
     int adj[MAX_V][MAX_DEG], nadj[MAX_V]; /* edges meeting at each vertex */
+    int vn[MAX_V][MAX_DEG];               /* the vertex at the other end of each of those edges */
     float df;                             /* halo damping for dense meshes: sqrt(30 / edges) */
+    /* the triangles (geodesic shells only; 0 for dodeca and bucky, which then keep a rigid net) */
+    int nt;
+    int t[MAX_T][3];
+    float tn[MAX_T][3];                   /* unit normal (the direction from the centre through the triangle) */
+    int tnb[MAX_T][3];                    /* the triangle across each side, -1 if none */
+    int et[MAX_E][2];                     /* the two triangles on each edge, -1 if none */
+    int vt[MAX_V][MAX_DEG], nvt[MAX_V];   /* the triangles around each vertex */
 } Shape;
 int shape_make(Shape *s, const char *name); /* "dodeca" "bucky" "geo2" "geo3"; 0 if the name is unknown */
 
@@ -85,7 +94,9 @@ extern const Carry CARRY;
 
 /* Left alone, a core is not still: now and then it does something small on its own, like a living thing.
  * Each behaviour ("whim") is a row of WHIMS in session.c. */
-enum { W_NONE, W_LOOK, W_PEEK, W_HOP, W_TWIRL, W_SHIVER, W_BLINK, W_YAWN, W_SIGH, W_N };
+enum { W_NONE, W_LOOK, W_PEEK, W_HOP, W_TWIRL, W_SHIVER, W_BLINK, W_YAWN, W_SIGH,
+       W_ALIGN, W_STEP, W_UNFOLD, W_SCAN, W_SPIKE, W_CRAZY, /* geometric ones, played by motion.c */
+       W_N };
 typedef struct {
     const char *name;
     float dur;           /* seconds */
@@ -98,6 +109,55 @@ extern const WhimGap WHIM_GAP;
 extern const Col HUES[NHUE];     /* single-core mode: one colour per session, tinting its core */
 
 typedef struct { int e, dir; float t, sp; } Pulse;
+
+/* ---- motion.c: how the shell moves (the "Core Bestiary" design) --------------------------------
+ * At rest the shell is an exact geodesic sphere. It moves only in geometric ways: snap turns about
+ * symmetry axes, irregular patches of triangles sliding out along their normal and locking back, layers
+ * of triangles turning against the rest, spikes (one node pulled far out, or in toward the centre), a
+ * scan plane and nodes lighting in sequence. Each state runs its own routine; see motion.c. */
+#define MAX_TURN 6
+#define MAX_SPIKE 32
+#define MAX_EV 24
+typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /* kind: 0 in-out, 1 speeds up and stops dead, 2 jerks out and back */
+typedef struct { int v; float len, up, hd, dn; double at; } Spike;         /* len < 0: pulled in toward the centre */
+typedef struct { int from, to, ntrail, trail[10]; double at, trail_at[10]; } Fish;
+typedef struct { double at; int kind; } MEvent;                             /* something a routine asked to happen later */
+typedef struct {
+    float q[9];                          /* the snap turns, on top of the drift (applied before ax / ay) */
+    Turn turn[MAX_TURN];
+    float rate;                          /* how much of the state's own spin is used now, eased (0..1) */
+    /* the cut: which triangles move together as one patch */
+    int cut_for, cutid, ng;              /* cut_for: the triangle count it was made for (0 = none yet) */
+    unsigned char grp[MAX_T];            /* each triangle's patch */
+    float gw[MAX_T], gn[MAX_T][3];       /* each patch's reach (0 = stays put) and normal */
+    float off[MAX_T];                    /* how far each triangle has slid out, shell radii */
+    float ang[MAX_T], lax[3];            /* each triangle's layer turn, about the axis lax */
+    int ang_on;                          /* a routine set layer turns this frame */
+    float push[MAX_V];                   /* each node pushed out (+) or pulled in (-), shell radii */
+    Spike sp[MAX_SPIKE];
+    float glow[MAX_V];                   /* nodes lit by scans, waves and clicks */
+    float scale;                         /* the whole shell (1 = as usual) */
+    float inner, inner_ang, inner_rate;  /* the inner shell: how visible, its turn, its speed */
+    float scan_h, scan_a;                /* a scan plane at view height scan_h (-1 top .. 1 bottom), 0 = none */
+    double crazy_until, tense_until, last_crazy;
+    double defend_seen, press_seen, press_at, wstart;
+    int press_g, locked, flinched;
+    float lock;
+    unsigned char pdist[MAX_T];          /* patch steps from the pressed patch */
+    MEvent ev[MAX_EV];
+    /* the routine of the state shown now */
+    int routine, r_flag, norder;
+    double r_at, r_next;
+    float r_end, seq_s[8], seq_d[8];
+    signed char layer[MAX_T];            /* THINK: which of the two lifted layers a patch is in */
+    unsigned char belt[MAX_T];           /* WORK: the triangles on the turbine belt */
+    unsigned char order[MAX_T];          /* WORK: piston firing order; whims: unfold order */
+    float rank[MAX_T];                   /* DONE: when each patch locks back (0..1) */
+    unsigned char clicked[MAX_T];
+    Fish fish[2];                        /* NEEDS YOU */
+    double stir_next;                    /* IDLE hover */
+    float stir[3];
+} Motion;
 
 typedef struct {
     char sid[72], name[40], tool[40];
@@ -135,6 +195,12 @@ typedef struct {
     float w_off_x, w_off_y;        /* the whole core moved, shell radii, y down */
     float w_tall;                  /* stretched up (+) or squashed (-) */
     float w_scale, w_bright;       /* size and brightness factors (1 = as usual) */
+    /* set by the panel only: lock-on (pointed at for 2 s), a rush at the core, a press on it */
+    float lock_to;
+    double defend_at, press_at;
+    float defend_x, defend_y;      /* where the rush came from, view space, y down */
+    float press_x, press_y;        /* where the press landed, like look_x / look_y */
+    Motion mo;
 } Session;
 
 typedef struct { Session s[MAX_SESS]; int n; } Room;
@@ -146,6 +212,16 @@ int session_shown(const Session *s, double now);
 void session_init(Session *s, const char *sid, double t, const Shape *sh);
 extern const char *STATE_TEXT[ST_N];                          /* "Idle", "Thinking", ... for text labels */
 double session_rate(const Session *s, double now, int fps); /* how many times a second its picture needs redrawing */
+
+void motion_init(Session *s);
+void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt);
+int motion_busy(const Session *s, double now);            /* moving on its own: wants the full frame rate */
+int motion_crazy(const Session *s, double now);           /* in the middle of a crazy fit (glitching) */
+/* small 3x3 matrix helpers, row-major (shared with render.c) */
+void m3_mul(float *r, const float *a, const float *b);    /* r = a * b (r may be a or b) */
+void m3_rot(float *r, const float *axis, float angle);    /* about a unit axis */
+void m3_app(float *out, const float *m, const float *v);
+void m3_euler(float *r, float ax, float ay);              /* the drift: about y by ay, then about x by ax */
 
 /* the built-in demo: made-up sessions that walk through every state */
 typedef struct { int n, step[6]; double next[6]; } Demo;

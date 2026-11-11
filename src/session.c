@@ -59,6 +59,13 @@ const Whim WHIMS[W_N] = {
     [W_BLINK] = {"blink", 0.45f, 2.5f, 0},
     [W_YAWN] = {"yawn", 3.0f, 1, 0.5f}, /* stretches up, glows, sinks back */
     [W_SIGH] = {"sigh", 2.6f, 1.5f, 2}, /* swells and brightens slowly: a breath; asleep, a snore */
+    /* the geometric ones (motion.c) */
+    [W_ALIGN] = {"align", 2.2f, 2, 0},    /* turns a vertex exactly toward you, holds */
+    [W_STEP] = {"step", 1.3f, 1, 0},      /* two snap turns of 72°, like a combination lock */
+    [W_UNFOLD] = {"unfold", 2.4f, 1, 0},  /* a fresh cut of patches opens row by row and closes again */
+    [W_SCAN] = {"scan", 1.6f, 1, 0},      /* one plane sweeps top to bottom */
+    [W_SPIKE] = {"spike", 1.2f, 1, 0},    /* one or two sharp spikes snap out and back */
+    [W_CRAZY] = {"crazy", 1.9f, .35f, 0}, /* the full fit, rarely, out of nowhere */
 };
 const WhimGap WHIM_GAP = {.idle_min = 3, .idle_max = 10, .sleep_min = 7, .sleep_max = 18};
 
@@ -89,6 +96,8 @@ void session_init(Session *s, const char *sid, double t, const Shape *sh) {
     s->vol = 0.8f;
     s->state = ST_IDLE;
     s->cur = LOOKS[ST_IDLE];
+    s->defend_at = s->press_at = -1e9;
+    motion_init(s);
     s->rng = hash_str(sid) | 1; /* seeded by the id: a session always moves the same way */
     s->ay = frand(&s->rng) * 6.283f;
     s->ax = 0.35f + frand(&s->rng) * 6.283f;
@@ -315,7 +324,8 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
         ease(&s->look_x, s->look_x_to * s->hover_to + s->w_lx, kh);
         ease(&s->look_y, s->look_y_to * s->hover_to + s->w_ly, kh);
         carried(s, now, dt);
-        float spin = c->rot * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
+        motion_tick(s, sh, session_shown(s, now), now, dt);
+        float spin = c->rot * s->mo.rate * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
         if (!s->held) { /* while dragged the panel turns it; after that a fling fades back into its own spin */
             s->ay += (spin + s->spin_y) * dt;
             s->ax += (spin * 0.37f + s->spin_x) * dt;
@@ -351,7 +361,8 @@ double session_rate(const Session *s, double now, int fps) {
                || s->carried || s->carry > 0.01f || s->shake > 0.01f || s->whim
                || fabsf(s->look_x) + fabsf(s->look_y) > 0.01f
                || fabsf(s->jig_x) + fabsf(s->jig_y) + 0.05f * (fabsf(s->jig_vx) + fabsf(s->jig_vy)) > 0.003f
-               || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for; /* the mouse is doing something */
+               || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for /* the mouse is doing something */
+               || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
     return r < fps ? r : fps;
