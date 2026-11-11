@@ -12,12 +12,12 @@ The approach and parts of the code (`hook.py`, `install_hooks.py`, and the event
 
 | State | Triggered by | Looks like |
 |---|---|---|
-| IDLE | `SessionStart`, after finishing | White core, blue glow, slow rotation |
+| IDLE | `SessionStart`, after finishing | White core, blue glow, slow rotation; every few seconds it does something on its own: glances around, peeks, hops, twirls, shivers, blinks, yawns or sighs |
 | THINK | `UserPromptSubmit`, `PostToolUse` | Yellow lines and glow, core pulses like breathing |
 | WORK | `PreToolUse` | White core, blue glow, faster rotation, sparks travel along the edges |
-| NEEDS YOU | `Notification` (except idle reminders) | Red lines, white core with red glow, core flickers like a glitch |
+| NEEDS YOU | `Notification` (except idle reminders) | Orange lines, white core with orange glow, core flickers like a glitch |
 | DONE | `Stop` | Core flares with a shockwave ring, back to IDLE after 2.5 s |
-| SLEEP | IDLE for more than 90 s | Everything dims; the solid core stays visible |
+| SLEEP | IDLE for more than 90 s | Everything dims; the solid core stays visible, and now and then snores, yawns or twitches |
 
 `SessionEnd` removes that session's polyhedron. Sessions with no events for 30 minutes are removed too.
 
@@ -94,15 +94,15 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 | Click | Speaks the report, or stops it; marks the reply as read | SPEAKING (teal): brightness follows the voice |
 | Hold (> 0.35 s), release | Push-to-talk: what you say is shown under the core for 1.5 s, then typed into that session with Return; click the core in that time to cancel | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
 | Double-click | Brings that session's iTerm2 pane to the front | One shockwave ring |
-| Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front | — |
+| Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front, and **Settings** (voice, read new replies aloud, summaries by Claude, wait before sending, labels, text size, glow, shape, away time). Settings apply at once, are saved in `~/.dodeca-core/panel-settings.json` and win over the launch options; Settings > Use launch options again forgets them. With no session running, right-click shows Settings only | — |
 | Drag | Turns the polyhedron by hand; let go while moving and it spins on, slowing back to its own rotation | — |
 | Scroll | This core's speech volume | The shell gets thicker or thinner for a moment |
 | Esc while recording | Cancels; nothing is sent | Glow shrinks and fades back |
 | `⌃⌥V` (hold, with `--voice`) | Push-to-talk to the session that needs you most: NEEDS YOU, else the one that finished last, else the one active last | as holding the core |
 | No keyboard or mouse input for 2 minutes | — | Every core except NEEDS YOU goes to STANDBY (dim indigo); when you come back, cores with an unread reply flare once |
 
-- **Single-core mode** (`--single`, or `⌃⌥C` at any time; `--mode-hotkey` changes the key): one large core for one session, and the others as small cores floating around it. Each session's core is tinted with its own colour, so you can tell who is who; the shell keeps the state colours. The panel shrinks to just this cluster: ⌥-drag it anywhere on the screen, and it comes back there next time (saved per screen size in `~/.dodeca-core/panel-position.json`; right-click > Reset position puts it back on the right edge). Click a small core and it swaps into the middle and stays there (the tooltip says "pinned"); right-click > Follow automatically lets the panel choose again. On its own the middle follows the news: a session that needs you, else the one with the newest reply; it does not jump around just because sessions are busy. Push-to-talk with the hotkey goes to the core in the middle. The right-click menu also switches modes.
-- `⌥`-drag a core up or down to reorder the column (in the all-cores mode): the core follows the mouse and the others make room.
+- **Single-core mode** (`--single`, or `⌃⌥C` at any time; `--mode-hotkey` changes the key): one large core for one session, and the others as small cores floating around it. Each session's core is tinted with its own colour, so you can tell who is who; the shell keeps the state colours. The panel shrinks to just this cluster: ⌥-drag it anywhere on the screen (or ⌥-click it: it rides on the mouse until the next click puts it down; the pointer hides, the core leans into the motion, sloshes when you stop or turn, the small cores trail behind, and a hard shake makes it dizzy), and it comes back there next time (saved per screen size in `~/.dodeca-core/panel-position.json`; right-click > Reset position puts it back on the right edge). Click a small core and it swaps into the middle and stays there (the tooltip says "pinned"); right-click > Follow automatically lets the panel choose again. On its own the middle follows the news: a session that needs you, else the one with the newest reply; it does not jump around just because sessions are busy. Push-to-talk with the hotkey goes to the core in the middle. The right-click menu also switches modes.
+- `⌥`-drag a core up or down to reorder the column (in the all-cores mode): the core follows the mouse and the others make room. An ⌥-click picks the core up without holding the button; the next click puts it down.
 - `--labels hover` leaves out the two lines of text above each core, so the panel shows only the cores (larger, since they get that space) and the tooltip says which is which.
 - The tooltip and the recognized-text preview appear to the left of the panel, over the terminal, and wrap their text instead of cutting it off; the preview shows everything that will be sent. The title is in the session's colour (its state colour, or its own colour in single-core mode) with a bar of that colour down the left edge; the text is in the system font at `--font-size`, laid out like Claude Code's terminal: paragraphs apart, `-` items as bullets with wrapped lines indented, **bold**, `code` in a monospaced font, code blocks indented.
 - A single click waits for the system's double-click time before it acts, so a double click never starts with a single one.
@@ -123,7 +123,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 - Recognition runs on this Mac only (`SFSpeechRecognizer` with on-device recognition required): the recording is never uploaded. If the language has no on-device model, push-to-talk is turned off and the core says why. `--listen-locale` sets the language (default `zh-TW`).
 - The recognized text appears under the core. After 1.5 seconds it is typed into that session's iTerm2 pane, followed by Return; click the core before then to cancel. With `--confirm-send` it waits instead, and a second click sends it.
 - If Claude is still working, the panel asks first ("還在工作中，要打斷嗎？") with a menu: send after this step (Claude Code reads it when the current step ends), interrupt and send (Esc first), or cancel.
-- If the pane can't be found, the core turns orange (ERROR) and says why.
+- If the pane can't be found, the core turns red (ERROR) and says why.
 - It listens with the system's input device, except a virtual one (BlackHole, Loopback, Soundflower, Teams or Zoom audio), which carries other apps' sound rather than your voice: then it uses the built-in microphone. `--mic NAME` picks a device by part of its name. If a recording is completely silent, the core says which device it used.
 - `--debug` writes each voice step to stderr (device, levels, recognizer errors, send result; never what you said).
 - Sending needs `DODECA_RICH` (the session's `ITERM_SESSION_ID` is kept in the msg file). It uses AppleScript, which asks once for permission to control iTerm2; if that is not allowed, it falls back to iTerm2's Python API (`pane_api.py send`).

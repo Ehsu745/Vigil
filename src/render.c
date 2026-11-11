@@ -193,6 +193,9 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     double t = now - s->created + s->phase; /* small numbers keep sin() precise */
     Look lit_look = s->cur; /* pointed at: a brighter shell */
     lit_look.edge *= 1 + HOVER.bright * 0.6f * s->hover;
+    lit_look.edge *= 1 + CARRY.lift * s->carry + 0.5f * s->shake; /* carried: lit up, more so when shaken */
+    float wb = s->w_bright > 0 ? s->w_bright : 1, ws = s->w_scale > 0 ? s->w_scale : 1; /* a whim (0 = never ticked) */
+    lit_look.edge *= 0.4f + 0.6f * wb;
     lit_look.hr *= 1 + lit_look.lh * s->level * 0.15f; /* the glow grows with the microphone level */
     float flash = 0, thick = 1;
     if (s->unread && !s->overlay) { /* an unread reply: a slow, soft flash, as if waiting for leave to report */
@@ -210,19 +213,19 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     int fs = tw / 120 < 1 ? 1 : tw / 120, label_h = fs * 16;
     if (!label || th - label_h < 12) label_h = 0;
     float m = fminf((float)tw, (float)(th - label_h));
-    float ox = cl.x0 + tw * 0.5f, oy = cl.y0 + (th - label_h) * 0.5f;
-    float unit = m * SHELL_FRAC / CIRCUM, k = m / 600.0f;
+    float unit = m * SHELL_FRAC / CIRCUM * ws, k = m / 600.0f;
+    float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit;
 
     /* the core */
-    float gl = L->glitch;
+    float gl = fminf(1, L->glitch + s->shake * s->shake * CARRY.shake_glitch);
     float breathe = (1 + L->depth * (float)sin(t * L->hz * 6.283185)) * (1 - gl) + glitch_val(t) * gl;
     float flick = 1 + 0.035f * (float)sin(t * 17.3) + 0.025f * (float)sin(t * 29.1 + 1.7);
     float burst = (float)(1 - (now - s->burst_at) / 1.4);
     if (burst < 0) burst = 0;
     float voice = (1 - L->lc) + L->lc * (0.35f + 1.3f * s->level); /* speaking: brightness follows the voice */
-    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice + burst * 0.8f;
+    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice * (1 + CARRY.lift * s->carry) * wb + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
-    float gx = ox + s->look_x * HOVER.gaze * CIRCUM * unit, gy = oy + s->look_y * HOVER.gaze * CIRCUM * unit; /* the core looks at the cursor */
+    float gx = ox + (s->look_x * HOVER.gaze + s->jig_x) * CIRCUM * unit, gy = oy + (s->look_y * HOVER.gaze + s->jig_y) * CIRCUM * unit; /* the core looks at the cursor, and sloshes when carried */
     draw_core(c, cl, gx, gy, rc, L, inten);
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
@@ -231,7 +234,9 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     /* the shell */
     float q[MAX_V][3];
     float cy = cosf(s->ay), sy = sinf(s->ay), cx = cosf(s->ax), sx = sinf(s->ax);
-    float ty = HOVER.tilt * s->look_x, tx = HOVER.tilt * s->look_y; /* then turned so its front faces the cursor */
+    float ty = HOVER.tilt * s->look_x + s->lean_x + s->w_lean_x, tx = HOVER.tilt * s->look_y + s->lean_y + s->w_lean_y; /* then turned to face the cursor, or into the motion */
+    float lm = hypotf(s->lean_x, s->lean_y), st = lm / CARRY.lean_max * CARRY.stretch; /* and stretched along the motion */
+    float ux = lm > 1e-4f ? s->lean_x / lm : 1, uy = lm > 1e-4f ? s->lean_y / lm : 0;
     float cty = cosf(ty), sty = sinf(ty), ctx = cosf(tx), stx = sinf(tx);
     for (int i = 0; i < sh->nv; i++) {
         const float *v = sh->v[i];
@@ -239,7 +244,8 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         float y0 = v[1] * cx - z0 * sx, z1 = v[1] * sx + z0 * cx;
         float x = x0 * cty + z1 * sty, z2 = -x0 * sty + z1 * cty;
         float y = y0 * ctx + z2 * stx, z = -y0 * stx + z2 * ctx, p = CAM / (CAM - z);
-        q[i][0] = ox + x * unit * p; q[i][1] = oy + y * unit * p; q[i][2] = z;
+        float dx = x * unit * p * (1 - 0.5f * s->w_tall), dy = y * unit * p * (1 + s->w_tall), par = (dx * ux + dy * uy) * (1 + st), per = (-dx * uy + dy * ux) * (1 - st * 0.5f);
+        q[i][0] = ox + par * ux - per * uy; q[i][1] = oy + par * uy + per * ux; q[i][2] = z;
     }
     for (int i = 0; i < sh->ne; i++) {
         const float *a = q[sh->e[i][0]], *b = q[sh->e[i][1]];

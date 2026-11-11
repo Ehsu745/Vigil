@@ -67,6 +67,33 @@ typedef struct {
     float aura;                  /* single-core mode: how far the core is tinted with its session's colour (0..1) */
 } Touch;
 extern const Touch TOUCH;
+
+/* carried by the mouse (panel only: ⌥-click or ⌥-drag). Speeds are in core widths per second. */
+typedef struct {
+    float lift;               /* picked up: core and shell brighten by this fraction */
+    float ease;               /* how fast lift and lean follow (1/s) */
+    float lean, lean_max;     /* the shell turns into the motion: radians per unit of speed, and at most */
+    float stretch;            /* at full lean the shell stretches along the motion by this fraction */
+    float spring, damp, lag;  /* the core hangs on a spring inside the shell; mouse acceleration pushes it by lag */
+    float jig_max;            /* the core stays within this fraction of the shell radius */
+    float shake_gain, shake_fade; /* shaking builds from acceleration and calms down at this rate (1/s) */
+    float shake_spin;         /* extra spin at full shake (rad/s) */
+    float shake_glitch;       /* how much full shake makes the core stutter (0..1) */
+    float drop;               /* put down: the core drops by this speed and springs back */
+} Carry;
+extern const Carry CARRY;
+
+/* Left alone, a core is not still: now and then it does something small on its own, like a living thing.
+ * Each behaviour ("whim") is a row of WHIMS in session.c. */
+enum { W_NONE, W_LOOK, W_PEEK, W_HOP, W_TWIRL, W_SHIVER, W_BLINK, W_YAWN, W_SIGH, W_N };
+typedef struct {
+    const char *name;
+    float dur;           /* seconds */
+    float idle, sleep;   /* how likely it is picked while idle / asleep (0 = never) */
+} Whim;
+extern const Whim WHIMS[W_N];
+typedef struct { float idle_min, idle_max, sleep_min, sleep_max; } WhimGap; /* seconds between whims */
+extern const WhimGap WHIM_GAP;
 #define NHUE 8
 extern const Col HUES[NHUE];     /* single-core mode: one colour per session, tinting its core */
 
@@ -94,6 +121,20 @@ typedef struct {
     float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */
     Col aura;              /* single-core mode: this session's colour, which tints its core */
     float aura_a;          /* how much, 0 = none */
+    int carried;           /* riding on the mouse (see CARRY) */
+    float move_x, move_y;  /* the mouse speed while carried, core widths per second, y down; 0 otherwise */
+    /* the rest room_tick works out */
+    float carry, lean_x, lean_y, shake, last_mx, last_my;
+    float jig_x, jig_y, jig_vx, jig_vy; /* the core's offset on its spring, in shell radii, y down */
+    /* whims (room_tick): what plays now, and what it does to the picture this frame */
+    int whim;
+    double whim_at, whim_next;
+    float whim_a, whim_b, whim_k;  /* its random direction and size; how free it is to play (0 while touched) */
+    float w_lx, w_ly;              /* gaze, added to the cursor look */
+    float w_lean_x, w_lean_y;      /* shell turned, radians */
+    float w_off_x, w_off_y;        /* the whole core moved, shell radii, y down */
+    float w_tall;                  /* stretched up (+) or squashed (-) */
+    float w_scale, w_bright;       /* size and brightness factors (1 = as usual) */
 } Session;
 
 typedef struct { Session s[MAX_SESS]; int n; } Room;
