@@ -39,7 +39,7 @@ static int g_launcher_pid;      // --launcher-pid: quit when this process ends
 static const char *g_tty_path;  // --tty
 static double g_away_after = 120;               // --away: seconds without keyboard or mouse input until "away"
 static const char *g_hotkey = "ctrl+opt+v";     // --hotkey: push-to-talk to the session that most needs you
-static NSString *g_voice_id = @"zh-TW";          // --voice-id: a voice identifier or a language
+static NSString *g_voice_id = @"system";         // --voice-id: "system" (System Settings' voice, Siri too), a language or an identifier
 static float g_rate = 0.5f;                     // --rate: 0 (slowest) .. 1 (fastest), 0.5 is normal
 static int g_voice;                             // --voice: spoken reports and push-to-talk (off: the panel stays silent)
 static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize claude (both imply --voice)
@@ -1194,7 +1194,7 @@ static void usage(void) {
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
          "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
-         "  --voice-id ID      voice for spoken reports: an identifier or a language (default zh-TW)\n"
+         "  --voice-id ID      voice: system (default: the System Voice of Spoken Content, Siri works), a language or an identifier\n"
          "  --rate X           speaking rate 0..1 (default 0.5)\n"
          "  --auto-speak       read a new reply out on its own if you were active in the last 60 s\n"
          "  --summarize claude summarize replies with claude -p (15 s timeout) instead of the first sentences\n"
