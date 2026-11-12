@@ -1313,7 +1313,10 @@ static void r_hole(Ctx *c) {
         tm_add(m, A);
         for (int t = 0; t < sh->nt; t++) if (m->grp[t] == g) { m->tmi[t] = (unsigned char)(base + g + 1); tt_set(m, t, off, 1); m->talpha[t] = al; }
     }
-    H->moving = alive || wake > .01f; /* only the void and its dust left: motion_busy lets it rest */
+    /* all swallowed: the void grows to 0.85 of the shell (back again as it wakes) */
+    float gt = !alive && wake < .5f ? 1.0f : 0.0f;
+    H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 1.1f : 4)));
+    H->moving = alive || wake > .01f || fabsf(gt - H->grow) > .01f; /* only the void and its dust left: motion_busy lets it rest */
 }
 
 /* the panel's own states */
