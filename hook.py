@@ -7,7 +7,8 @@ It never stores prompts, tool input/output or full paths in that file.
 
 With DODECA_RICH=1 it also keeps one small file per session, ~/.dodeca-core/msg/<session id>.json,
 for the floating panel's tooltip and voice features: Claude's last reply, the last notification text
-(e.g. a permission prompt) and the iTerm2 session the conversation runs in. The text never goes into the
+(e.g. a permission prompt) and the iTerm2 session or tmux pane the conversation runs in (where a reply
+typed in the panel goes). The text never goes into the
 event file; a reply only adds "m": 1 to its Stop line. The file is deleted when the session ends.
 
 Always exits 0 and prints nothing, so it cannot block or change Claude Code.
@@ -101,7 +102,9 @@ def drop_stale():
 def rich(d, ev, sid, rec):
     if ev == "SessionStart":
         drop_stale()
-        update_msg(sid, {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80]})
+        pane = os.environ.get("TMUX_PANE", "")
+        update_msg(sid, {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
+                         "tmux": pane if re.fullmatch(r"%\d{1,6}", pane) else ""})
     elif ev == "SessionEnd":
         drop_msg(sid)
     elif ev == "Stop":
