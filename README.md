@@ -1,16 +1,117 @@
-# Vigil
+<p align="center"><img src="assets/icon.png" width="112" alt=""></p>
 
-**English** | [繁體中文](README.zh-TW.md)
+<h1 align="center">Vigil</h1>
 
-*Formerly dodeca-core. The data folder (`~/.dodeca-core`) and the `DODECA_*` variables keep their old names for now.*
+<p align="center">
+  A status display for Claude Code: each running session is a polyhedron whose colour and motion show what it is doing.
+</p>
 
-In your terminal, every running Claude Code session becomes a glowing polyhedron: a thin white wireframe shell, a blue glow, and a bright, sun-like core at the center. When a session's state changes, its color, spin speed and core brightness change with it.
+<p align="center">
+  <b>English</b> · <a href="README.zh-TW.md">繁體中文</a>
+</p>
 
-The approach and parts of the code (`hook.py`, `install_hooks.py`, and the event reading in `src/events.c`) are adapted from [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room) (MIT License, Copyright (c) 2026 Zaviel). The polyhedron rendering, the macOS floating panel and the pane features are new to this project. See [LICENSE](LICENSE).
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-panel-7AA2F7" alt="macOS panel">
+  <img src="https://img.shields.io/badge/Windows%20(WSL)-panel-3FC1D9" alt="Windows panel">
+  <img src="https://img.shields.io/badge/terminal-any%20truecolor-E9892B" alt="Any truecolor terminal">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A3CF7E" alt="MIT license"></a>
+</p>
 
-![Vigil demo: three sessions changing state](assets/demo.gif)
+<p align="center"><img src="assets/demo.gif" width="640" alt="Three sessions in the terminal, changing state"></p>
+
+When you run several Claude Code sessions, or leave one working while you do something else, Vigil shows which ones are thinking, running a tool, waiting for your approval or done. It runs in a terminal pane, or as a small always-on-top window on macOS and Windows.
+
+In the window you can point at a session's core to read its last reply, and on Windows double-click it to type an answer, so you don't have to switch back to the terminal each time an agent finishes.
+
+A Claude Code hook appends one line per event to a file; a C program reads the file and draws the cores with its own renderer. Everything runs locally, with no network access, and needs only libc, libm and zlib.
+
+<sub>Formerly dodeca-core: the data folder `~/.dodeca-core` and the `DODECA_*` variables keep their old names for now.</sub>
+
+<p align="center">
+  <a href="#states">States</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#panels">Panels</a> ·
+  <a href="#privacy">Privacy</a> ·
+  <a href="#reference">Reference</a>
+</p>
 
 ## States
+
+<table>
+  <tr>
+    <td width="33%" align="center"><img src="assets/states/idle.gif" width="180" alt="IDLE"><br><b>IDLE</b><br><sub>After start, or after finishing. Turns slowly; now and then does a small motion on its own</sub></td>
+    <td width="33%" align="center"><img src="assets/states/think.gif" width="180" alt="THINK"><br><b>THINK</b><br><sub>After a prompt or a tool result. Amber</sub></td>
+    <td width="33%" align="center"><img src="assets/states/work.gif" width="180" alt="WORK"><br><b>WORK</b><br><sub>While a tool runs. Cyan, sparks along the edges</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/states/needs.gif" width="180" alt="NEEDS YOU"><br><b>NEEDS YOU</b><br><sub>Waiting for your approval. Orange, flickering core</sub></td>
+    <td align="center"><img src="assets/states/done.gif" width="180" alt="DONE"><br><b>DONE</b><br><sub>Claude finished replying. A short burst, then IDLE</sub></td>
+    <td align="center"><img src="assets/states/sleep.gif" width="180" alt="SLEEP"><br><b>SLEEP</b><br><sub>Idle for 90 s. Dims</sub></td>
+  </tr>
+</table>
+
+Each state has several motions, and one is picked at random each time the state starts ([the full list](#reference)). A session is removed on `SessionEnd`, or after 30 minutes without events.
+
+## Quick start
+
+```sh
+make
+./vigil --demo                     # made-up sessions; q quits
+
+python3 install_hooks.py           # dry run: shows what would change in ~/.claude/settings.json
+python3 install_hooks.py --apply   # installs the hook (backs up your settings first)
+./vigil                            # your sessions
+```
+
+- Needs a C compiler, `make`, zlib and Python 3 (standard library only). macOS: `xcode-select --install`. WSL: `sudo apt install build-essential zlib1g-dev`.
+- Terminals that can show images (iTerm2, kitty, Ghostty, WezTerm) get full resolution; other truecolor terminals get half-block characters.
+- The hook applies to sessions started after installing it. It is called by absolute path, so run `--apply` again if you move this folder. `--remove` uninstalls it.
+- `--rich` also keeps Claude's last reply, which the panels need for the text box and voice. Off by default; see [Privacy](#privacy).
+
+## Panels
+
+A small window that stays above other windows, never takes keyboard focus, and lets clicks through except on a core.
+
+```sh
+sh mac/build.sh && ./vigil-panel --demo     # macOS
+sh win/build.sh && ./vigil-win --demo       # Windows: run from WSL (needs mingw-w64)
+```
+
+<p align="center"><img src="assets/demos/reply.gif" width="800" alt="Pointing at the main core shows the approval it waits for; pointing at a small core shows its last reply"><br>
+<sub>Point at a core to see its last reply, or the approval it is waiting for. After 2 s the focus frame locks on.</sub></p>
+
+<p align="center"><img src="assets/demos/input.gif" width="800" alt="Scrolling a long reply, then typing an answer with an image attached"><br>
+<sub>The wheel scrolls a long reply. Double-click opens a reply box; an image dragged onto the core is added as <code>[Image #1]</code>. Enter sends it to that session (Windows).</sub></p>
+
+<p align="center"><img src="assets/demos/carry.gif" width="806" alt="Carrying the cores: a fast move leaves the small ones behind; moving close brings them back"><br>
+<sub>Alt-click picks the cores up, and the small ones follow on their orbit. Move too fast and they drop off and bounce off the screen edge; bring the main core close to one and it returns to its orbit. Gravity: Floaty.</sub></p>
+
+- **One core or all.** By default one large core shows the session that needs you (else the one with the newest reply), and the other sessions are small cores around it. `--all` shows each session as its own core, placed where you like.
+- **Replying.** Windows: double-click a core, type, Enter; images can be dropped on the core. macOS: hold a core and speak (push-to-talk, recognised on the Mac); the text goes into that session's iTerm2 pane.
+- **Spoken reports** (macOS, `--voice`): clicking a core reads a short summary of its reply.
+- **Settings** (right-click > Settings): shape, glow, size, gravity, focus frame, which way the wheel spins a core, the text box's font, size, box and text colours, and which motions each state uses, with a live preview.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/settings.png" alt="Settings: a live preview of the cores, then Look, Motion and Replies"></td>
+    <td width="50%"><img src="assets/settings-motions.png" alt="Settings > Motions: the routines and actions each state may run"></td>
+  </tr>
+</table>
+
+<p align="center"><sub>The Windows panel's Settings window, General and Motions, with the preview zoomed to 2×.</sub></p>
+
+## Privacy
+
+The event file contains only time, session id, event name, folder name (no path), tool name and notification type. Prompts and tool input/output are never recorded. No network connections, no background daemon, and the file's permissions are 600.
+
+With `DODECA_RICH=1` (`install_hooks.py --rich`) the hook also keeps one file per session in `~/.dodeca-core/msg/<session id>.json` (mode 600, folder 700): **the text of Claude's last reply** and of the last notification (e.g. a permission prompt), at most 4000 characters each, and the `ITERM_SESSION_ID` of the terminal it runs in. Each new reply or notice replaces the old one, the file is deleted when the session ends, and files left by sessions that never ended are deleted after 24 hours. The event file stays the same apart from `"m": 1` on a `Stop` line. Since reply text is written to disk, turn this on only on your own machine.
+
+Voice (`vigil-panel --voice`): speech is synthesized on this Mac, and push-to-talk recognition is on-device only, so recordings never leave the Mac and are not kept. The recognized text is typed into the Claude Code session it was meant for, like anything you type. The one network use is `--summarize claude`, which sends the reply text to Anthropic through `claude -p` to shorten it.
+
+## Reference
+
+<details>
+<summary><b>Every motion</b></summary>
 
 | State | Triggered by | Looks like |
 |---|---|---|
@@ -25,48 +126,10 @@ Each time a state starts it picks one of its motions at random (the panel's Sett
 
 `SessionEnd` removes that session's polyhedron. Sessions with no events for 30 minutes are removed too.
 
-## Requirements
+</details>
 
-- A C compiler and `make` (macOS: `xcode-select --install`)
-- zlib (built into macOS)
-- Python 3 (only for the hook and install script; standard library only)
-- A truecolor terminal. To see the thin lines and glow you need a terminal that can display images (iTerm2, kitty, Ghostty, WezTerm)
-
-## Usage
-
-```sh
-make
-./dodeca-core --demo          # try it with fake sessions first, q to quit
-
-python3 install_hooks.py          # only prints what would be written to ~/.claude/settings.json
-python3 install_hooks.py --apply  # actually write it (makes a backup first)
-./dodeca-core                     # show your real sessions
-```
-
-- Don't move this folder after installing the hook; the hook is called by absolute path. If you do move it, run `--apply` again.
-- To remove the hook: `python3 install_hooks.py --remove`.
-- The hook only applies to Claude Code sessions started after installing it.
-- `--rich` (with or without `--apply`) runs the hook with `DODECA_RICH=1`, which also keeps the text of Claude's last reply for the floating panel's tooltip and voice features. Off by default; see [Privacy](#privacy). The dry run shows exactly which lines of your settings would change.
-
-## Side pane (iTerm2)
-
-`--pane` is a vertical layout for narrow panes: sessions stack top to bottom, each with two lines of text (name, state) above its polyhedron. The text uses the terminal's own font, so it's the same size as other panes using the same profile.
-
-```sh
-./dodeca-core --pane --demo                # try it in a narrow pane first
-python3 install_hooks.py --pane --apply    # open the pane automatically whenever Claude Code starts
-```
-
-When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits a pane off to the right of Claude Code's pane, runs `vigil --pane --exit-when-empty` in it, shrinks it to 34 columns, and gives keyboard focus back to Claude Code. If a pane is already open it won't open another; the pane closes itself 15 seconds after the last session ends.
-
-- Pane width: environment variable `DODECA_PANE_COLS` (default 34).
-- Shrinking the pane needs iTerm2's Python API (`pane_api.py`): AppleScript can split panes but can't resize them in a full-screen window. Two one-time steps: enable Settings > General > Magic > Enable Python API in iTerm2, then copy the script to iTerm2's scripts folder: `mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py` (after that, `open_pane.sh` keeps the copy up to date). Without this the pane is half the width; you can drag the divider yourself and the display follows.
-- Debugging: `DODECA_PANE_DEBUG=1 sh open_pane.sh` runs in the foreground and shows iTerm2's responses.
-- Extra arguments: environment variable `DODECA_PANE_ARGS`, e.g. `"--shape geo2 --res 1200"`.
-- The first time it runs, macOS asks whether to allow controlling iTerm2; click Allow.
-- If you don't want it opened automatically, split a pane yourself and run `./dodeca-core --pane`.
-
-## Floating panel (macOS)
+<details>
+<summary><b>Floating panel (macOS)</b></summary>
 
 `vigil-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it (except on a core, see below), and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
 
@@ -85,24 +148,12 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 - When run by hand, the panel is 17% of the screen width. Use `--width` (in points) and `--top` to position it, and `--inset` for the space above the first session (default 30). When started by `open_pane.sh` it gets `--fit-pane`, which sizes it to the blank pane.
 - The font defaults to Monaco 12; use `--font` and `--font-size` to match your iTerm2 settings.
 - To go back to the terminal-pane version: `export DODECA_PANE_MODE=terminal`.
-- The cores react to the mouse and to a hotkey: see [Interaction and voice](#interaction-and-voice-floating-panel).
+- The cores react to the mouse and to a hotkey: see [Interaction and voice](#reference).
 
-## Windows (WSL)
+</details>
 
-On Windows, run Claude Code inside WSL; the hook and the terminal version work there as on Linux (`sudo apt install build-essential zlib1g-dev`, then `make` and `python3 install_hooks.py --rich --apply` in WSL). The floating panel is a native Windows program that reads the same events file through WSL's `\\wsl.localhost` share:
-
-```sh
-sudo apt install mingw-w64      # once, in WSL
-sh win/build.sh                 # builds vigil-panel.exe and the launcher ./vigil-win
-./vigil-win                     # from WSL: starts the panel on ~/.dodeca-core/events.jsonl; Ctrl-C quits
-./vigil-win --demo              # made-up sessions
-```
-
-By default it is in single-core mode, as on the Mac: one big core for the session in focus with the other sessions as small satellites around it, in a small see-through window, always on top, never taking focus, and clicks outside the core go through to the windows behind. The core follows the news like the macOS single-core mode (a session that needs you, else the newest reply); a click on a core, or the right-click menu's **Session**, pins one. Turning off **Show other sessions** (or `--no-others`) leaves only the big core. `--all` or **Ctrl+Alt+C** switches to all cores: each core is its own small window, starting in a column on the right edge, and you can put each one anywhere.
-
-Alt does what ⌥ does on the Mac: **Alt-drag** moves the cluster (single core) or that one core (all cores) anywhere on the screen; **Alt-click** picks it up, and the next click anywhere puts it down. Places are kept per screen size in `~/.dodeca-core/panel-position-win.json` (each core by its folder name), and **Reset position(s)** in the menu forgets them. Pointing at a core for a moment shows the text box: name and state, then the last reply, or the permission notice while it needs you (with `--rich` hooks). Resting on a core for 2 s, or carrying it, draws the focus frame (six styles, as on the Mac). With no input for a while (2 minutes by default) every core shows STANDBY, except one that needs you; back again, unread replies flash. The mouse wheel over a core scrolls a long reply in its box (and spins the core). **Double-click** a core to type an answer under its box: Enter sends it, Shift+Enter starts a new line, Esc closes it and keeps the draft. Drag image files (png, jpg, gif, webp) onto a core or that box to send them along: the core reads them (TRANSCRIBING) while they are over it, and each one puts an `[Image #N]` token where the cursor is, as in Claude Code; move or delete it like any text (Backspace takes a whole token). On send each token becomes the image's WSL path (`/mnt/c/...`) in its place, which Claude Code reads as an image. It goes into the session's tmux pane when Claude Code runs inside tmux in WSL (the `--rich` hook notes the pane); otherwise the terminal comes to the front and the text is typed into it, on one line. Right-click a core for **Reply**, **Copy reply** and **Bring to front**: there is no iTerm2 here, so that brings up the terminal or VS Code window with the folder name in its title, else the Windows Terminal window used last, but cannot pick the tab. Right-click > **Settings...** opens the Settings window: a live preview across the top (the cluster as it will look; drag its core to feel the gravity; scroll on it to zoom in up to 3x, double-click to zoom back; buttons to show it in each state; a reply in the text box's font and size) and three cards below. **Look**: shape, glow, size on screen, inner core. **Motion**: gravity (Floaty to Firm: how hard the main core holds the small cores on their orbit; carried, they slide round it and trail behind, and a hard fling sends them bouncing off the screen edges), other sessions on or off, focus frame. **Replies**: the text box's font (the terminal's monospaced face, so a reply lines up as it does in Claude Code, Chinese in Microsoft JhengHei two cells wide as in Windows Terminal; or Segoe UI; the reply box always types in the terminal's face), text size, where it opens (next to the core, or the middle of the screen), and names over the cores in all-cores mode. The **Motions** page (the switch at the top) chooses, for every state, which routines it may run (one is picked each time the state starts; any routine may go to any state, except the black hole, which is for sleep only) and which actions it may play now and then while left alone; **▶** on a chip plays it in the preview. At the foot: how long until the cores rest (STANDBY) and **Reset to defaults**. Choices apply at once, are kept in `~/.dodeca-core/panel-settings-win.json` and win over the launch options until reset; Esc closes the window. Also there: all the motion, lock-on, the rush defence, the press, drag to spin, the double-click ring. Not yet: voice; the iTerm2 features have no Windows counterpart. Windows Terminal cannot show the kitty or iTerm2 images, so the terminal version draws with half-block cells there.
-
-## Interaction and voice (floating panel)
+<details>
+<summary><b>Interaction and voice (macOS panel)</b></summary>
 
 The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. Speaking and push-to-talk are off unless you start it with `--voice`; without it a click only marks the reply as read and holding a core does nothing. `./vigil-panel --demo --voice` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
 
@@ -159,7 +210,61 @@ The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel 
 5. Optional: a better zh-TW voice (System Settings > Accessibility > Spoken Content > System Voice > Manage Voices); iTerm2 > Settings > General > Magic > Enable Python API, as the fallback for sending.
 - How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 
-## Output modes
+</details>
+
+<details>
+<summary><b>Windows panel</b></summary>
+
+On Windows, run Claude Code inside WSL; the hook and the terminal version work there as on Linux (`sudo apt install build-essential zlib1g-dev`, then `make` and `python3 install_hooks.py --rich --apply` in WSL). The floating panel is a native Windows program that reads the same events file through WSL's `\\wsl.localhost` share:
+
+```sh
+sudo apt install mingw-w64      # once, in WSL
+sh win/build.sh                 # builds vigil-panel.exe and the launcher ./vigil-win
+./vigil-win                     # from WSL: starts the panel on ~/.dodeca-core/events.jsonl; Ctrl-C quits
+./vigil-win --demo              # made-up sessions
+```
+
+By default it is in single-core mode, as on the Mac: one big core for the session in focus with the other sessions as small satellites around it, in a small see-through window, always on top, never taking focus, and clicks outside the core go through to the windows behind. The core follows the news like the macOS single-core mode (a session that needs you, else the newest reply); a click on a core, or the right-click menu's **Session**, pins one. Turning off **Show other sessions** (or `--no-others`) leaves only the big core. `--all` or **Ctrl+Alt+C** switches to all cores: each core is its own small window, starting in a column on the right edge, and you can put each one anywhere.
+
+Alt does what ⌥ does on the Mac: **Alt-drag** moves the cluster (single core) or that one core (all cores) anywhere on the screen; **Alt-click** picks it up, and the next click anywhere puts it down. Places are kept per screen size in `~/.dodeca-core/panel-position-win.json` (each core by its folder name), and **Reset position(s)** in the menu forgets them.
+
+Pointing at a core for a moment shows the text box: name and state, then the last reply, or the permission notice while it needs you (with `--rich` hooks). Resting on a core for 2 s, or carrying it, draws the focus frame (six styles, as on the Mac). With no input for a while (2 minutes by default) every core shows STANDBY, except one that needs you; back again, unread replies flash. The mouse wheel over a core scrolls a long reply in its box (and spins the core).
+
+**Double-click** a core to type an answer under its box: Enter sends it, Shift+Enter starts a new line, Esc closes it and keeps the draft. Drag image files (png, jpg, gif, webp) onto a core or that box to send them along: the core reads them (TRANSCRIBING) while they are over it, and each one puts an `[Image #N]` token where the cursor is, as in Claude Code; move or delete it like any text (Backspace takes a whole token). On send each token becomes the image's WSL path (`/mnt/c/...`) in its place, which Claude Code reads as an image. It goes into the session's tmux pane when Claude Code runs inside tmux in WSL (the `--rich` hook notes the pane); otherwise the terminal comes to the front and the text is typed into it, on one line.
+
+Right-click a core for **Reply**, **Copy reply** and **Bring to front**: there is no iTerm2 here, so that brings up the terminal or VS Code window with the folder name in its title, else the Windows Terminal window used last, but cannot pick the tab.
+
+Right-click > **Settings...** opens the Settings window: a live preview across the top (the cluster as it will look; drag its core to feel the gravity; scroll on it to zoom in up to 3x, double-click to zoom back; buttons to show it in each state; a reply in the text box's font and size) and three cards below. **Look**: shape, glow, size on screen, inner core. **Motion**: what scrolling on a core does (Roll, Roll back, Turn, Turn back or Off), gravity (Floaty to Firm: how hard the main core holds the small cores on their orbit; carried, they slide round it and trail behind, and a hard fling sends them bouncing off the screen edges), other sessions on or off, focus frame. **Replies**: the text box's colours: Box (five dark tones) and Text (Auto, White, Cream, Mint, Sky), each with a palette swatch that opens the Windows colour window for any colour (on Auto, text on a light box turns dark); its font (the terminal's monospaced face, so a reply lines up as it does in Claude Code, Chinese in Microsoft JhengHei two cells wide as in Windows Terminal; or Segoe UI; the reply box always types in the terminal's face), text size, where it opens (next to the core, or the middle of the screen), and names over the cores in all-cores mode.
+
+The **Motions** page (the switch at the top) chooses, for every state, which routines it may run (one is picked each time the state starts; any routine may go to any state, except the black hole, which is for sleep only) and which actions it may play now and then while left alone; **▶** on a chip plays it in the preview. At the foot: how long until the cores rest (STANDBY) and **Reset to defaults**. Choices apply at once, are kept in `~/.dodeca-core/panel-settings-win.json` and win over the launch options until reset; Esc closes the window.
+
+Also there: all the motion, lock-on, the rush defence, the press, drag to spin, the double-click ring. Not yet: voice; the iTerm2 features have no Windows counterpart. Windows Terminal cannot show the kitty or iTerm2 images, so the terminal version draws with half-block cells there.
+
+</details>
+
+<details>
+<summary><b>iTerm2 side pane</b></summary>
+
+`--pane` is a vertical layout for narrow panes: sessions stack top to bottom, each with two lines of text (name, state) above its polyhedron. The text uses the terminal's own font, so it's the same size as other panes using the same profile.
+
+```sh
+./vigil --pane --demo                # try it in a narrow pane first
+python3 install_hooks.py --pane --apply    # open the pane automatically whenever Claude Code starts
+```
+
+When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits a pane off to the right of Claude Code's pane, runs `vigil --pane --exit-when-empty` in it, shrinks it to 34 columns, and gives keyboard focus back to Claude Code. If a pane is already open it won't open another; the pane closes itself 15 seconds after the last session ends.
+
+- Pane width: environment variable `DODECA_PANE_COLS` (default 34).
+- Shrinking the pane needs iTerm2's Python API (`pane_api.py`): AppleScript can split panes but can't resize them in a full-screen window. Two one-time steps: enable Settings > General > Magic > Enable Python API in iTerm2, then copy the script to iTerm2's scripts folder: `mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py` (after that, `open_pane.sh` keeps the copy up to date). Without this the pane is half the width; you can drag the divider yourself and the display follows.
+- Debugging: `DODECA_PANE_DEBUG=1 sh open_pane.sh` runs in the foreground and shows iTerm2's responses.
+- Extra arguments: environment variable `DODECA_PANE_ARGS`, e.g. `"--shape geo2 --res 1200"`.
+- The first time it runs, macOS asks whether to allow controlling iTerm2; click Allow.
+- If you don't want it opened automatically, split a pane yourself and run `./vigil --pane`.
+
+</details>
+
+<details>
+<summary><b>Output modes</b></summary>
 
 The program first draws an RGB image in memory, then sends it to the terminal in one of three ways, detected automatically at startup:
 
@@ -171,7 +276,10 @@ The program first draws an RGB image in memory, then sends it to the terminal in
 
 If auto-detection picks poorly, force a mode with the flag.
 
-## Options
+</details>
+
+<details>
+<summary><b>Options</b></summary>
 
 ```
 --pane            vertical layout for a side pane
@@ -186,7 +294,10 @@ If auto-detection picks poorly, force a mode with the flag.
 --snapshot FILE   write one demo frame as a PPM file and exit (with --at seconds, --size WxH)
 ```
 
-## Architecture
+</details>
+
+<details>
+<summary><b>Architecture</b></summary>
 
 ```
 Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──▶ state machine ──▶ software renderer ──▶ terminal
@@ -202,19 +313,26 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 | `src/session.c` | Maps events to states, plus the per-state appearance table `LOOKS` |
 | `src/geom.c` | Generates vertices and edges for the dodecahedron, truncated icosahedron and geodesic spheres |
 | `src/render.c` | Draws lines, glow, core and labels into a float RGB canvas |
+| `src/motion.c` | How each state moves: snap turns, patches, spikes, one routine per motion, the idle whims |
+| `win/panel.c` | The Windows panel: layered windows, orbit physics, Settings window |
 | `src/main.c` | Main loop, terminal setup, the three output modes, demo |
 
-To change colors or motion, just edit the `LOOKS` table in `src/session.c`.
+Colours are the `LOOKS` table in `src/session.c`; how each state moves is a routine in `src/motion.c`.
 
-## Privacy
+</details>
 
-The event file contains only time, session id, event name, folder name (no path), tool name and notification type. Prompts and tool input/output are never recorded. No network connections, no background daemon, and the file's permissions are 600.
-
-With `DODECA_RICH=1` (`install_hooks.py --rich`) the hook also keeps one file per session in `~/.dodeca-core/msg/<session id>.json` (mode 600, folder 700): **the text of Claude's last reply** and of the last notification (e.g. a permission prompt), at most 4000 characters each, and the `ITERM_SESSION_ID` of the terminal it runs in. Each new reply or notice replaces the old one, the file is deleted when the session ends, and files left by sessions that never ended are deleted after 24 hours. The event file stays the same apart from `"m": 1` on a `Stop` line. Since reply text is written to disk, turn this on only on your own machine.
-
-Voice (`vigil-panel --voice`): speech is synthesized on this Mac, and push-to-talk recognition is on-device only, so recordings never leave the Mac and are not kept. The recognized text is typed into the Claude Code session it was meant for, like anything you type. The one network use is `--summarize claude`, which sends the reply text to Anthropic through `claude -p` to shorten it.
-
-## Known limitations
+<details>
+<summary><b>Known limitations</b></summary>
 
 - After you approve a permission request, Claude Code doesn't send another event, so the session keeps showing NEEDS YOU while that tool runs and only switches once the tool finishes.
 - Labels use a built-in 3×5 bitmap font with only letters, digits and a few symbols; non-ASCII characters in folder names (e.g. Chinese) show as `?`.
+
+</details>
+
+## Credits and license
+
+Vigil is made by **Zaviel** ([zelvet-velvet](https://github.com/zelvet-velvet)): the living cores and the Core Bestiary motion, the Windows panel, single-core mode and carrying, the interactions, voice, and the Settings window.
+
+It grew out of **dodeca-core** by **Shang-En Hsu** ([Ehsu745](https://github.com/Ehsu745/dodeca-core-cc-status)), who wrote the first polyhedron renderer, the terminal output modes, the first macOS floating panel and the iTerm2 side pane. dodeca-core itself started from Zaviel's [clawd-room](https://github.com/zelvet-velvet/clawd-room): `hook.py`, `install_hooks.py` and the event reading in `src/events.c` are adapted from it.
+
+MIT License; [LICENSE](LICENSE) keeps both copyright lines.
