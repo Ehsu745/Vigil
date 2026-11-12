@@ -37,7 +37,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `src/render.c`: draws into a float RGB `Canvas`.
 - `src/main.c`: terminal main loop, the output modes (kitty / iTerm2 inline PNG / half-block cells), options, `--snapshot`.
 - `mac/panel.m`: the floating panel. It reuses `events.c`, `geom.c`, `session.c` and `render.c`, but not `main.c`.
-- `hook.py`, `install_hooks.py`: the Claude Code hook and its installer.
+- `hook.py`, `install_hooks.py`: the Claude Code hook and its installer (`--rich` sets `DODECA_RICH=1`).
 - `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`.
 
 To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts to the mouse (panel only) is the `HOVER` table next to it; the panel's hit test (`coreAt:` in `mac/panel.m`) uses the shell outline `SHELL_HIT` from `dodeca.h`. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
@@ -45,7 +45,7 @@ To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts t
 ## Rules
 
 - **The hook must never get in Claude Code's way.** `hook.py` always exits 0, prints nothing and finishes fast. It writes each event with a single `O_APPEND` write so concurrent sessions don't interleave lines.
-- **Privacy:** the event file holds only time, session id, event name, folder name (not the full path), tool name and notification type. Never add prompts, tool input/output or paths. The file is mode 600 and its directory 700.
+- **Privacy:** the event file holds only time, session id, event name, folder name (not the full path), tool name and notification type. Never add prompts, tool input/output or paths. The file is mode 600 and its directory 700. The one exception is opt-in: with `DODECA_RICH=1` the hook keeps the last reply and notification text and the iTerm2 session id in `~/.dodeca-core/msg/<sid>.json` (600, written to a temp file and renamed, at most 4000 characters per text, deleted on `SessionEnd`); the event line only gets `"m": 1`. Never put that text in `events.jsonl`.
 - **No dependencies:** the Python scripts use only the standard library. The C code uses only libc, libm and zlib (plus Cocoa for the panel).
 - **Don't run `python3 install_hooks.py --apply` or `--remove` without asking.** They edit the user's `~/.claude/settings.json`. Running it without flags is a dry run and is safe.
 - The labels use a built-in 3×5 bitmap font (ASCII letters, digits, a few symbols). Anything else renders as `?`.

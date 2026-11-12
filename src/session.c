@@ -93,7 +93,7 @@ void room_apply(Room *r, const Event *e) {
     s->last = e->t;
     if (e->cwd[0]) snprintf(s->name, sizeof s->name, "%s", e->cwd);
     if (!strcmp(ev, "SessionStart")) set_state(s, ST_IDLE, e->t);
-    else if (!strcmp(ev, "UserPromptSubmit")) set_state(s, ST_THINK, e->t);
+    else if (!strcmp(ev, "UserPromptSubmit")) { set_state(s, ST_THINK, e->t); s->unread = 0; }
     else if (!strcmp(ev, "PreToolUse")) {
         snprintf(s->tool, sizeof s->tool, "%s", e->tool);
         set_state(s, ST_WORK, e->t);
@@ -102,7 +102,7 @@ void room_apply(Room *r, const Event *e) {
         set_state(s, ST_THINK, e->t);
         if (e->t + HOLD_WORK > s->hold_work_until) s->hold_work_until = e->t + HOLD_WORK;
     } else if (!strcmp(ev, "Notification")) set_state(s, ST_WAIT, e->t);
-    else if (!strcmp(ev, "Stop")) { set_state(s, ST_CHEER, e->t); s->burst_at = e->t; }
+    else if (!strcmp(ev, "Stop")) { set_state(s, ST_CHEER, e->t); s->burst_at = e->t; if (e->msg) s->unread = 1; }
     else if (!strcmp(ev, "_idle")) set_state(s, ST_IDLE, e->t);   /* (the built-in demo) */
     else if (!strcmp(ev, "_sleep")) set_state(s, ST_SLEEP, e->t);
 }
@@ -191,6 +191,7 @@ void demo_run(Demo *d, Room *room, double now) {
             snprintf(e.cwd, sizeof e.cwd, "%s", DEMO_NAME[i]);
             snprintf(e.ev, sizeof e.ev, "%s", SCRIPT[d->step[i] % NSCRIPT].ev);
             snprintf(e.tool, sizeof e.tool, "%s", SCRIPT[d->step[i] % NSCRIPT].tool);
+            e.msg = !strcmp(e.ev, "Stop"); /* every demo session has a (made-up) reply */
             room_apply(room, &e);
             d->next[i] += SCRIPT[d->step[i] % NSCRIPT].dur;
             d->step[i]++;

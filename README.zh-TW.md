@@ -42,6 +42,7 @@ python3 install_hooks.py --apply  # 實際寫入（會先備份）
 - 安裝 hook 之後不要搬動這個資料夾，hook 是用絕對路徑呼叫的；搬了就再跑一次 `--apply`。
 - 移除 hook：`python3 install_hooks.py --remove`。
 - hook 只對安裝之後新開的 Claude Code session 生效。
+- 加 `--rich`（搭配或不搭配 `--apply`）會用 `DODECA_RICH=1` 執行 hook，另外保留 Claude 最後一則回覆的文字，給浮動面板的提示框和語音功能用。預設關閉，見[隱私](#隱私)。dry run 會列出你的設定裡哪幾行會改。
 
 ## 側邊窗格（iTerm2）
 
@@ -130,6 +131,8 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 ## 隱私
 
 事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱和通知類型，不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
+
+開啟 `DODECA_RICH=1`（`install_hooks.py --rich`）時，hook 另外為每個 session 保留一個檔案 `~/.dodeca-core/msg/<session id>.json`（權限 600，資料夾 700）：**Claude 最後一則回覆的文字**和最後一則通知（例如權限請求）的文字，各最多 4000 字，以及它所在終端機的 `ITERM_SESSION_ID`。新的回覆或通知會蓋掉舊的，session 結束時檔案會刪掉，沒正常結束的 session 留下的檔案 24 小時後刪除。事件檔除了 `Stop` 那行多一個 `"m": 1` 之外不變。因為回覆文字會寫到磁碟上，只在你自己的電腦上開。
 
 ## 已知限制
 

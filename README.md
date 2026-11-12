@@ -42,6 +42,7 @@ python3 install_hooks.py --apply  # actually write it (makes a backup first)
 - Don't move this folder after installing the hook; the hook is called by absolute path. If you do move it, run `--apply` again.
 - To remove the hook: `python3 install_hooks.py --remove`.
 - The hook only applies to Claude Code sessions started after installing it.
+- `--rich` (with or without `--apply`) runs the hook with `DODECA_RICH=1`, which also keeps the text of Claude's last reply for the floating panel's tooltip and voice features. Off by default; see [Privacy](#privacy). The dry run shows exactly which lines of your settings would change.
 
 ## Side pane (iTerm2)
 
@@ -130,6 +131,8 @@ To change colors or motion, just edit the `LOOKS` table in `src/session.c`.
 ## Privacy
 
 The event file contains only time, session id, event name, folder name (no path), tool name and notification type. Prompts and tool input/output are never recorded. No network connections, no background daemon, and the file's permissions are 600.
+
+With `DODECA_RICH=1` (`install_hooks.py --rich`) the hook also keeps one file per session in `~/.dodeca-core/msg/<session id>.json` (mode 600, folder 700): **the text of Claude's last reply** and of the last notification (e.g. a permission prompt), at most 4000 characters each, and the `ITERM_SESSION_ID` of the terminal it runs in. Each new reply or notice replaces the old one, the file is deleted when the session ends, and files left by sessions that never ended are deleted after 24 hours. The event file stays the same apart from `"m": 1` on a `Stop` line. Since reply text is written to disk, turn this on only on your own machine.
 
 ## Known limitations
 
