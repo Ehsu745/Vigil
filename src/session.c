@@ -31,6 +31,9 @@ const Look LOOKS[ST_N] = {
     [ST_SLEEP] = {0.04f, 0.26f, 0.08f, 0.30f, 0.30f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE},
 };
 
+/* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
+const Hover HOVER = {.bright = 0.35f, .slow = 0.7f, .tilt = 0.32f, .gaze = 0.10f, .ease = 7.0f};
+
 static uint32_t hash_str(const char *s) {
     uint32_t h = 2166136261u;
     for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
@@ -129,8 +132,13 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
         ease(&c->edge, L->edge, k); ease(&c->flow, L->flow, k); ease(&c->hr, L->hr, k); ease(&c->glitch, L->glitch, k);
         ease_col(&c->col, L->col, k); ease_col(&c->halo, L->halo, k);
         ease_col(&c->line, L->line, k); ease_col(&c->eh, L->eh, k);
-        s->ay += c->rot * dt;
-        s->ax += c->rot * 0.37f * dt;
+        float kh = 1.0f - expf(-dt * HOVER.ease);
+        ease(&s->hover, s->hover_to, kh);
+        ease(&s->look_x, s->look_x_to * s->hover_to, kh);
+        ease(&s->look_y, s->look_y_to * s->hover_to, kh);
+        float spin = c->rot * (1 - HOVER.slow * s->hover);
+        s->ay += spin * dt;
+        s->ax += spin * 0.37f * dt;
         if (c->flow > 0.03f) {
             for (int j = 0; j < NPULSE; j++) {
                 Pulse *p = &s->p[j];
@@ -154,7 +162,7 @@ const char *STATE_TEXT[ST_N] = {"Idle", "Thinking", "Working", "Needs approval",
  * A state change gets the full rate for a moment so the colours ease smoothly. */
 double session_rate(const Session *s, double now, int fps) {
     static const double RATE[ST_N] = {[ST_IDLE] = 10, [ST_THINK] = 15, [ST_WORK] = 20, [ST_WAIT] = 20, [ST_CHEER] = 20, [ST_SLEEP] = 4};
-    double r = now - s->state_t < 1.5 ? 20 : RATE[session_shown(s, now)];
+    double r = now - s->state_t < 1.5 || s->hover_to > 0 || s->hover > 0.01f ? 20 : RATE[session_shown(s, now)];
     return r < fps ? r : fps;
 }
 

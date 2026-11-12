@@ -63,7 +63,7 @@ When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits
 
 ## Floating panel (macOS)
 
-`dodeca-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it, and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
+`dodeca-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it (except on a core, see below), and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
 
 ```sh
 sh mac/build.sh
@@ -78,6 +78,7 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 - When run by hand, the panel is 17% of the screen width. Use `--width` (in points) and `--top` to position it, and `--inset` for the space above the first session (default 30). When started by `open_pane.sh` it gets `--fit-pane`, which sizes it to the blank pane.
 - The font defaults to Monaco 12; use `--font` and `--font-size` to match your iTerm2 settings.
 - To go back to the terminal-pane version: `export DODECA_PANE_MODE=terminal`.
+- Point at a core and it reacts: it brightens, slows down and turns toward the cursor. After a moment a tooltip to the left of the panel shows the folder, the state and the first two lines of the last reply (the reply needs `DODECA_RICH`, see below). Only the round shell counts as the core: clicks next to it still reach the terminal underneath.
 
 ## Output modes
 

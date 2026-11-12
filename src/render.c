@@ -190,13 +190,15 @@ static void text(Canvas *c, Clip cl, float cx, int y, const char *s, int fs, Col
 }
 
 static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, double now, float glow, float core_frac, int label) {
-    const Look *L = &s->cur;
+    Look lit_look = s->cur; /* pointed at: a brighter shell */
+    lit_look.edge *= 1 + HOVER.bright * 0.6f * s->hover;
+    const Look *L = &lit_look;
     int tw = cl.x1 - cl.x0, th = cl.y1 - cl.y0;
     int fs = tw / 120 < 1 ? 1 : tw / 120, label_h = fs * 16;
     if (!label || th - label_h < 12) label_h = 0;
     float m = fminf((float)tw, (float)(th - label_h));
     float ox = cl.x0 + tw * 0.5f, oy = cl.y0 + (th - label_h) * 0.5f;
-    float unit = m * 0.36f / CIRCUM, k = m / 600.0f;
+    float unit = m * SHELL_FRAC / CIRCUM, k = m / 600.0f;
     double t = now - s->created + s->phase; /* small numbers keep sin() precise */
 
     /* the core */
@@ -205,18 +207,23 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float flick = 1 + 0.035f * (float)sin(t * 17.3) + 0.025f * (float)sin(t * 29.1 + 1.7);
     float burst = (float)(1 - (now - s->burst_at) / 1.4);
     if (burst < 0) burst = 0;
-    float inten = L->core * breathe * flick * glow + burst * 0.8f;
+    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
-    draw_core(c, cl, ox, oy, rc, L, inten);
+    float gx = ox + s->look_x * HOVER.gaze * CIRCUM * unit, gy = oy + s->look_y * HOVER.gaze * CIRCUM * unit; /* the core looks at the cursor */
+    draw_core(c, cl, gx, gy, rc, L, inten);
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
 
     /* the shell */
     float q[MAX_V][3];
     float cy = cosf(s->ay), sy = sinf(s->ay), cx = cosf(s->ax), sx = sinf(s->ax);
+    float ty = HOVER.tilt * s->look_x, tx = HOVER.tilt * s->look_y; /* then turned so its front faces the cursor */
+    float cty = cosf(ty), sty = sinf(ty), ctx = cosf(tx), stx = sinf(tx);
     for (int i = 0; i < sh->nv; i++) {
         const float *v = sh->v[i];
-        float x = v[0] * cy + v[2] * sy, z0 = -v[0] * sy + v[2] * cy;
-        float y = v[1] * cx - z0 * sx, z = v[1] * sx + z0 * cx, p = CAM / (CAM - z);
+        float x0 = v[0] * cy + v[2] * sy, z0 = -v[0] * sy + v[2] * cy;
+        float y0 = v[1] * cx - z0 * sx, z1 = v[1] * sx + z0 * cx;
+        float x = x0 * cty + z1 * sty, z2 = -x0 * sty + z1 * cty;
+        float y = y0 * ctx + z2 * stx, z = -y0 * stx + z2 * ctx, p = CAM / (CAM - z);
         q[i][0] = ox + x * unit * p; q[i][1] = oy + y * unit * p; q[i][2] = z;
     }
     for (int i = 0; i < sh->ne; i++) {

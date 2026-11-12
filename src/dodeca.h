@@ -10,6 +10,8 @@
 #define NPULSE 14
 #define CIRCUM 1.7320508f   /* every shell is scaled so its vertices sit on a sphere of this radius */
 #define INRADIUS 1.3763819f /* inradius of the dodecahedron on that sphere: the unit the core radius is given in */
+#define SHELL_FRAC 0.36f    /* the shell's sphere radius as a fraction of the side of the square it is drawn in */
+#define SHELL_HIT 0.375f    /* the drawn outline, perspective included: what the panel treats as "on the core" */
 
 typedef struct { float r, g, b; } Col;
 
@@ -41,6 +43,16 @@ typedef struct {
 } Look;
 extern const Look LOOKS[ST_N];
 
+/* how a core reacts while the mouse points at it (only the panel sets hover; the terminal never does) */
+typedef struct {
+    float bright; /* core and shell brighten by this fraction */
+    float slow;   /* rotation slows by this fraction */
+    float tilt;   /* the shell turns up to this many radians toward the cursor */
+    float gaze;   /* the core moves up to this fraction of the shell radius toward the cursor */
+    float ease;   /* how fast it reacts (1/s) */
+} Hover;
+extern const Hover HOVER;
+
 typedef struct { int e, dir; float t, sp; } Pulse;
 
 typedef struct {
@@ -52,6 +64,9 @@ typedef struct {
     double phase;  /* each session's own time offset, so they do not pulse in step */
     Pulse p[NPULSE];
     uint32_t rng;
+    /* the mouse (panel only): *_to is set by the panel, the rest eases toward it in room_tick */
+    float hover_to, look_x_to, look_y_to; /* 1 while pointed at; cursor offset from the centre, -1..1, y down */
+    float hover, look_x, look_y;
 } Session;
 
 typedef struct { Session s[MAX_SESS]; int n; } Room;

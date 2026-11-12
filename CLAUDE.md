@@ -40,7 +40,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `hook.py`, `install_hooks.py`: the Claude Code hook and its installer.
 - `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`.
 
-To change colors or motion, edit `LOOKS` in `src/session.c`. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
+To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts to the mouse (panel only) is the `HOVER` table next to it; the panel's hit test (`coreAt:` in `mac/panel.m`) uses the shell outline `SHELL_HIT` from `dodeca.h`. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
 
 ## Rules
 
