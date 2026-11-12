@@ -89,7 +89,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 
 | Input | Does | The core |
 |---|---|---|
-| Point at it | Tooltip after 0.3 s: folder, state, first two lines of the last reply (the notification text while NEEDS YOU) | Brightens, spins slower, turns toward the cursor |
+| Point at it | Tooltip after 0.3 s, to the left of the panel: folder, state and up to 8 wrapped lines of the last reply (the notification text while NEEDS YOU) | Brightens, spins slower, turns toward the cursor |
 | Unread reply | — | A slow, soft flash until you click it or send a new prompt |
 | Click | Speaks the report, or stops it; marks the reply as read | SPEAKING (teal): brightness follows the voice |
 | Hold (> 0.35 s), release | Push-to-talk: what you say is shown under the core for 1.5 s, then typed into that session with Return; click the core in that time to cancel | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
@@ -101,6 +101,8 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 | `⌃⌥V` (hold, with `--voice`) | Push-to-talk to the session that needs you most: NEEDS YOU, else the one that finished last, else the one active last | as holding the core |
 | No keyboard or mouse input for 2 minutes | — | Every core except NEEDS YOU goes to STANDBY (dim indigo); when you come back, cores with an unread reply flare once |
 
+- `--labels hover` leaves out the two lines of text above each core, so the panel shows only the cores (larger, since they get that space) and the tooltip says which is which.
+- The tooltip and the recognized-text preview appear to the left of the panel, over the terminal, and wrap their text instead of cutting it off; the preview shows everything that will be sent.
 - A single click waits for the system's double-click time before it acts, so a double click never starts with a single one.
 - Hotkeys use `RegisterEventHotKey`, which needs no Accessibility permission. Esc is only taken while recording, so the terminal keeps it otherwise. `--hotkey ctrl+opt+v` changes the push-to-talk key (`cmd`, `opt`, `ctrl`, `shift` plus a letter, digit, `space`, `return`, `tab` or `f1`–`f12`; `none` turns it off). macOS already uses ⌃Space, ⌃⌥Space, ⌘Space and ⌥⌘Space, so the default is `⌃⌥V`.
 - Away is read from the system's "seconds since last input" (no Input Monitoring permission, no key logging). `--away SECONDS` changes the 120 s; `--away 0` turns it off.
