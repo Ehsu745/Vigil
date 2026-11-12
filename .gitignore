@@ -3,3 +3,4 @@ dodeca-core
 *.o
 .DS_Store
 dodeca-panel
+DodecaPanel.app/

@@ -5,8 +5,12 @@
 // that part of the screen free. When started inside that pane (open_pane.sh does this) it sizes itself to
 // the pane and quits when the pane is closed.
 //
-// Build: sh mac/build.sh
+// Build: sh mac/build.sh. That makes DodecaPanel.app and the launcher script ./dodeca-panel, which starts the
+// app through LaunchServices (so macOS asks for microphone and speech permission on behalf of the app, not
+// the terminal) and stays in the pane: it passes the pane's terminal with --tty and its own pid with
+// --launcher-pid, and the app quits when the launcher does (the pane was closed, or Ctrl-C).
 #import <Cocoa/Cocoa.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -27,7 +31,9 @@ static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
 static char g_pidfile[1024], g_msg_dir[1024];
 static struct termios g_old_tty;
-static int g_tty;
+static int g_tty = -1;          // the pane's terminal while we keep it blank (stdout, or --tty), else -1
+static int g_launcher_pid;      // --launcher-pid: quit when this process ends
+static const char *g_tty_path;  // --tty
 
 static double wall(void) {
     struct timeval tv;
@@ -37,11 +43,11 @@ static double wall(void) {
 
 static void cleanup(void) {
     if (g_pidfile[0]) { unlink(g_pidfile); g_pidfile[0] = 0; }
-    if (g_tty) {
+    if (g_tty >= 0) {
         const char *on = "\x1b[?25h";
-        if (write(STDOUT_FILENO, on, strlen(on)) < 0) { }
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_old_tty);
-        g_tty = 0;
+        if (write(g_tty, on, strlen(on)) < 0) { }
+        tcsetattr(g_tty, TCSAFLUSH, &g_old_tty);
+        g_tty = -1;
     }
 }
 
@@ -278,7 +284,8 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 @property(strong) NSPanel *tip;
 @property(strong) TipView *tipView;
 @property(copy) NSString *hoverSid;
-@property double hoverSince;
+@property double hoverSince, sizeCheck;
+@property unsigned short paneCols, paneRows;
 @end
 
 @implementation AppDelegate
@@ -291,7 +298,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     NSRect f = screen.frame;
     CGFloat w = g_width > 0 ? g_width : fmax(220, fmin(360, f.size.width * 0.17)), h = f.size.height - g_top;
     struct winsize ws = {0};
-    if (g_fit_pane && g_tty && ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col && ws.ws_xpixel && ws.ws_ypixel) {
+    if (g_fit_pane && g_tty >= 0 && ioctl(g_tty, TIOCGWINSZ, &ws) == 0 && ws.ws_col && ws.ws_xpixel && ws.ws_ypixel) {
         CGFloat cw = (CGFloat)ws.ws_xpixel / ws.ws_col, k = 1;
         if (cw > 13) k = 1 / screen.backingScaleFactor; // the terminal reported device pixels, the screen is measured in points
         if (g_width <= 0) w = ws.ws_xpixel * k;
@@ -351,6 +358,13 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     __weak AppDelegate *me = self;
     [self onSignal:SIGWINCH handler:^{ [me place]; }];
     [self onSignal:SIGHUP handler:^{ [NSApp terminate:nil]; }]; // the pane was closed
+    if (g_launcher_pid > 0) { // started by the launcher script: it gets the pane's signals, we only see it end
+        if (kill(g_launcher_pid, 0) != 0) { [NSApp terminate:nil]; return; }
+        dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)g_launcher_pid, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
+        dispatch_source_set_event_handler(src, ^{ [NSApp terminate:nil]; });
+        dispatch_resume(src);
+        [self.signals addObject:src];
+    }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
     [self onSignal:SIGINT handler:^{ [NSApp terminate:nil]; }];
     [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(appChanged:)
@@ -375,6 +389,15 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
     }
     [self trackMouse:now];
+    if (g_launcher_pid > 0 && g_tty >= 0 && now - self.sizeCheck > 0.5) { // no SIGWINCH outside the pane's process group
+        struct winsize ws = {0};
+        self.sizeCheck = now;
+        if (ioctl(g_tty, TIOCGWINSZ, &ws) == 0 && (ws.ws_col != self.paneCols || ws.ws_row != self.paneRows)) {
+            self.paneCols = ws.ws_col;
+            self.paneRows = ws.ws_row;
+            [self place];
+        }
+    }
     room_tick(&g_room, &g_shape, now, dt);
     g_ghost.s[0].last = now;
     room_tick(&g_ghost, &g_shape, now, dt);
@@ -465,7 +488,8 @@ static void usage(void) {
          "  --bg RRGGBB        solid background colour instead of see-through\n"
          "  --all-spaces       follow you to every Space instead of staying in the one it was opened in\n"
          "  --always           with --all-spaces: stay visible when iTerm2 is not the app in front\n"
-         "  --glow X  --core X  --events PATH   as in dodeca-core");
+         "  --glow X  --core X  --events PATH   as in dodeca-core\n"
+         "  --tty PATH --launcher-pid N         (set by the ./dodeca-panel launcher)");
 }
 
 int main(int argc, char **argv) {
@@ -488,6 +512,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--glow") && v) { g_glow = (float)atof(v); i++; }
             else if (!strcmp(a, "--core") && v) { g_core = (float)atof(v); i++; }
             else if (!strcmp(a, "--events") && v) { events = v; i++; }
+            else if (!strcmp(a, "--tty") && v) { g_tty_path = v; i++; }
+            else if (!strcmp(a, "--launcher-pid") && v) { g_launcher_pid = atoi(v); i++; }
             else if (!strcmp(a, "--bg") && v) {
                 unsigned int rgb = 0;
                 if (sscanf(v[0] == '#' ? v + 1 : v, "%6x", &rgb) == 1)
@@ -525,15 +551,18 @@ int main(int argc, char **argv) {
         g_ghost.n = 1;
 
         // in a terminal pane: keep the pane blank, it is only there to hold the space
-        if (isatty(STDOUT_FILENO) && isatty(STDIN_FILENO)) {
+        int fd = -1;
+        if (g_tty_path) fd = open(g_tty_path, O_RDWR | O_NOCTTY);
+        else if (isatty(STDOUT_FILENO) && isatty(STDIN_FILENO)) fd = STDOUT_FILENO;
+        if (fd >= 0 && isatty(fd)) {
             struct termios t;
-            tcgetattr(STDIN_FILENO, &g_old_tty);
+            tcgetattr(fd, &g_old_tty);
             t = g_old_tty;
             t.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &t);
+            tcsetattr(fd, TCSAFLUSH, &t);
             const char *blank = "\x1b[?25l\x1b[2J\x1b[H";
-            if (write(STDOUT_FILENO, blank, strlen(blank)) < 0) { }
-            g_tty = 1;
+            if (write(fd, blank, strlen(blank)) < 0) { }
+            g_tty = fd;
         }
         atexit(cleanup);
 
