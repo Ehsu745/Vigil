@@ -87,6 +87,19 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 - To go back to the terminal-pane version: `export DODECA_PANE_MODE=terminal`.
 - The cores react to the mouse and to a hotkey: see [Interaction and voice](#interaction-and-voice-floating-panel).
 
+## Windows (WSL)
+
+On Windows, run Claude Code inside WSL; the hook and the terminal version work there as on Linux (`sudo apt install build-essential zlib1g-dev`, then `make` and `python3 install_hooks.py --rich --apply` in WSL). The floating panel is a native Windows program that reads the same events file through WSL's `\\wsl.localhost` share:
+
+```sh
+sudo apt install mingw-w64      # once, in WSL
+sh win/build.sh                 # builds vigil-panel.exe and the launcher ./vigil-win
+./vigil-win                     # from WSL: starts the panel on ~/.dodeca-core/events.jsonl; Ctrl-C quits
+./vigil-win --demo              # made-up sessions
+```
+
+It is a see-through column of cores on the right edge of the screen, always on top, never taking focus, and clicks outside a core go through to the windows behind. This first version has the cores and all their motion, the hover replies, lock-on, the rush defence, the press, drag to spin, the double-click ring, and a right-click menu (shape, glow, quit). Not yet: the tooltip, single-core mode, the focus frame, carrying, voice; the iTerm2 features have no Windows counterpart. Windows Terminal cannot show the kitty or iTerm2 images, so the terminal version draws with half-block cells there.
+
 ## Interaction and voice (floating panel)
 
 The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. Speaking and push-to-talk are off unless you start it with `--voice`; without it a click only marks the reply as read and holding a core does nothing. `./vigil-panel --demo --voice` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).

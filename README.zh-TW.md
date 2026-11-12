@@ -87,6 +87,19 @@ sh mac/build.sh
 - 想退回終端機窗格版：`export DODECA_PANE_MODE=terminal`。
 - 核心會對滑鼠和快捷鍵起反應：見[互動與語音](#互動與語音浮動面板)。
 
+## Windows（WSL）
+
+在 Windows 上，請在 WSL 裡跑 Claude Code；hook 和終端機版本在那裡跟 Linux 一樣能用（`sudo apt install build-essential zlib1g-dev`，然後在 WSL 裡 `make` 和 `python3 install_hooks.py --rich --apply`）。浮動面板是原生的 Windows 程式，透過 WSL 的 `\\wsl.localhost` 共用讀同一個事件檔：
+
+```sh
+sudo apt install mingw-w64      # 只要一次，在 WSL 裡
+sh win/build.sh                 # 產生 vigil-panel.exe 和啟動腳本 ./vigil-win
+./vigil-win                     # 在 WSL 裡：用 ~/.dodeca-core/events.jsonl 啟動面板；Ctrl-C 結束
+./vigil-win --demo              # 假的 session
+```
+
+它是貼在螢幕右緣、半透明的一列核心，永遠在最上層，不會搶焦點，點在核心以外的地方會傳到後面的視窗。第一版有核心和它們所有的動作、指著時的回應、鎖定、衝撞防禦、按壓、拖曳轉動、雙擊光圈，以及右鍵選單（形狀、光暈、結束）。還沒有：提示框、單核心模式、對焦框、拿著走、語音；iTerm2 相關功能在 Windows 上沒有對應。Windows Terminal 無法顯示 kitty 或 iTerm2 的影像，所以終端機版本在那裡用半格字元繪製。
+
 ## 互動與語音（浮動面板）
 
 `vigil-panel` 裡的核心會對滑鼠和一個全域快捷鍵起反應。面板仍然不會搶走 iTerm2 的鍵盤焦點，點在核心圓形外殼以外的地方也照樣傳到終端機。說話和按住說話要加 `--voice` 才會開；沒加的話，單擊只會把回覆標成已讀，長按核心沒有作用。`./vigil-panel --demo --voice` 可以用假的 session 試下面每一項（加 `--away 10` 可以很快看到待命狀態）。

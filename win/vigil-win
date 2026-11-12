@@ -1,0 +1,9 @@
+#!/bin/sh
+# Starts Vigil's Windows panel from WSL (copied next to vigil-panel.exe by win/build.sh).
+# Claude Code and the hook run in WSL and write ~/.dodeca-core/events.jsonl there; the panel is a Windows
+# program, so it is given that file's Windows path (\\wsl.localhost\<distro>\...). Ctrl-C here quits it.
+DIR=$(cd "$(dirname "$0")" && pwd)
+EVENTS=${DODECA_EVENTS:-$HOME/.dodeca-core/events.jsonl}
+mkdir -p "$(dirname "$EVENTS")" && chmod 700 "$(dirname "$EVENTS")"
+[ -e "$EVENTS" ] || { : >"$EVENTS"; chmod 600 "$EVENTS"; }
+exec "$DIR/vigil-panel.exe" --events "$(wslpath -w "$EVENTS")" "$@"

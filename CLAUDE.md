@@ -40,6 +40,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `src/render.c`: draws into a float RGB `Canvas`; draws the shell per triangle when patches have moved.
 - `src/main.c`: terminal main loop, the output modes (kitty / iTerm2 inline PNG / half-block cells), options, `--snapshot`.
 - `mac/panel.m`: the floating panel. It reuses `events.c`, `geom.c`, `session.c` and `render.c`, but not `main.c`.
+- `win/panel.c`: the Windows panel (`vigil-panel.exe`, built with MinGW-w64 by `win/build.sh`, started from WSL by `win/vigil-win`). Claude Code and the hook run in WSL; the exe reads the events file through `\\wsl.localhost` and draws the shared renderer's cores into a layered window. Like `panel.m` it reuses `events.c`, `geom.c`, `session.c`, `motion.c` and `render.c`, not `main.c`. Build it with no new warnings too.
 - `mac/tip.m`: the box beside the panel (hover tooltip, voice-reply preview): wraps its text, system font, title and edge bar in the session's colour.
 - `mac/speech.m`: the panel's voice output: Markdown cleanup, the local summary, the one-at-a-time `Speaker` (`AVSpeechSynthesizer`), and the background `claude -p` summary (hooks off via `--settings`, so it never shows up as a session). Never call `claude` from the hook.
 - `mac/listen.m`: push-to-talk recognition (`SFSpeechRecognizer`, `requiresOnDeviceRecognition` always on: never fall back to server recognition). The panel types the result into the session's iTerm2 pane with AppleScript, or `pane_api.py send` as the fallback; Claude Code needs the text and Return sent separately.
