@@ -92,7 +92,7 @@ sh mac/build.sh
 | 滑鼠指著 | 0.3 秒後出現提示框：資料夾、狀態、最後一則回覆的前兩行（NEEDS YOU 時改顯示通知文字） | 變亮、轉慢、朝游標轉過來 |
 | 有未讀回覆 | — | 規律的柔和閃光，直到你點它或送出新的 prompt |
 | 單擊 | 念出回報，或停止；回覆標成已讀 | SPEAKING（青綠色）：亮度跟著語音起伏 |
-| 長按（> 0.35 秒）後放開 | 按住說話 | 按住時 LISTENING（綠色、外殼停轉、光暈隨麥克風音量變大），放開後 TRANSCRIBING（紫色光點沿邊線快速繞行） |
+| 長按（> 0.35 秒）後放開 | 按住說話：說的話會在核心下方顯示 1.5 秒，然後打進那個 session 並按 Enter；這段時間內點核心可以取消 | 按住時 LISTENING（綠色、外殼停轉、光暈隨麥克風音量變大），放開後 TRANSCRIBING（紫色光點沿邊線快速繞行） |
 | 雙擊 | 把那個 session 的 iTerm2 窗格叫到最前面 | 一圈衝擊波 |
 | 右鍵 | 選單：重播、複製回覆、靜音這個 session、叫到最前面 | — |
 | 拖曳 | 用手轉動多面體；邊移動邊放開會繼續轉，慢慢回到自己的轉速 | — |
@@ -111,8 +111,27 @@ sh mac/build.sh
 - 預設只有在你點核心或選「重播」時才會說話。加 `--auto-speak` 的話，如果你最近 60 秒內有用鍵盤或滑鼠，新的回覆會自動念出來；新的權限請求則會立刻念。靜音的 session 不會自己說話。
 - 念的是摘要。預設是回覆的第一段，最多 3 句或 150 字（不花錢、沒有延遲）。加 `--summarize claude` 的話，面板會在背景呼叫 `claude -p`（haiku 模型，關掉 hook 和工具），請它濃縮成兩三句口語化的繁體中文；超過 15 秒就改用本地摘要。摘要會存在 msg 檔裡，重播不會再問一次。這會把回覆文字再送給 Anthropic 一次，也會用到你的 Claude Code 額度。
 - 念之前，程式碼區塊會換成「（略過一段程式碼）」，Markdown 符號和網址會拿掉（連結保留文字）。
-- `--voice-id` 選聲音：語言（預設 `zh-TW`，或 `en-US`）或聲音的識別碼。`--rate` 設定語速（0 到 1，預設 0.5）。內建的 zh-TW 聲音比較陽春，可以在系統設定 > 輔助使用 > 朗讀內容 > 系統聲音 > 管理聲音 下載更好的。用非中文的聲音時，面板自己的用語會改成英文。
+- 用的是系統設定 > 輔助使用 > 閱讀與朗讀 裡的 **系統聲音**。請選 **Siri** 的聲音：只有它念中文夾英文會自然，而且 App 只能用這個方式用到它（面板用 `say` 一句一句產生語音再播放，所以按下後大約一秒才會出聲）。`--voice-id zh-TW`（或 `en-US`、聲音識別碼）改用 App 可以直接指定的聲音：會立刻開始，面板會挑裝好的最好的那個（zh-TW 請在管理聲音下載 **美佳（高品質）**），但中文裡夾的英文會念得很差。`--rate` 設定語速（0 到 1，預設 0.5）。macOS 語言是中文時，面板自己的用語是中文。
 - 說話不需要任何權限。
+
+**語音回覆。** 按住核心（或 `⌃⌥V`）、說話、放開。
+
+- 辨識只在這台 Mac 上進行（`SFSpeechRecognizer`，強制離線辨識），錄音不會上傳。如果那個語言沒有離線模型，按住說話會關閉，核心會說明原因。`--listen-locale` 設定語言（預設 `zh-TW`）。
+- 辨識出來的文字會顯示在核心下方，1.5 秒後打進那個 session 的 iTerm2 窗格並按 Enter；在那之前點核心可以取消。加 `--confirm-send` 的話會一直等，再點一次才送出。
+- 如果 Claude 還在工作，面板會先問（「還在工作中，要打斷嗎？」）並跳出選單：等這一步做完再送（Claude Code 會在目前這一步結束後讀到）、打斷再送（先按 Esc），或取消。
+- 找不到窗格時，核心會變成橘色（ERROR）並說明原因。
+- 錄音用系統的輸入裝置，但如果那是虛擬裝置（BlackHole、Loopback、Soundflower、Teams 或 Zoom 的音訊裝置），它傳的是別的 App 的聲音而不是你的聲音，這時會改用內建麥克風。`--mic 名稱` 可以用名稱的一部分指定裝置。錄到完全沒有聲音時，核心會說它用的是哪個裝置。
+- `--debug` 會把語音的每個步驟寫到 stderr（裝置、音量、辨識錯誤、送出結果；不會寫你說的內容）。
+- 送出需要 `DODECA_RICH`（session 的 `ITERM_SESSION_ID` 存在 msg 檔裡）。用的是 AppleScript，第一次會問能不能控制 iTerm2；不允許的話會改用 iTerm2 的 Python API（`pane_api.py send`）。
+- `--demo` 不會打字到任何地方，核心只會說它本來會送出什麼。
+
+**語音功能的一次性設定：**
+
+1. `sh mac/build.sh`，然後用 `--voice` 啟動面板（`open_pane.sh` 開的窗格用 `DODECA_PANE_ARGS="--voice"`）。
+2. `python3 install_hooks.py --rich --apply`，保留回覆和 iTerm2 session id（之後新開的 Claude Code session 才會生效）。
+3. 第一次按住核心時，macOS 會問麥克風和語音辨識權限：兩個都允許，然後再按住一次。
+4. 第一次送出回覆或雙擊核心時，macOS 會問 DodecaPanel 能不能控制 iTerm2：允許（系統設定 > 隱私權與安全性 > 自動化）。
+5. 選用：更好的 zh-TW 聲音（系統設定 > 輔助使用 > 朗讀內容 > 系統聲音 > 管理聲音）；iTerm2 > Settings > General > Magic > Enable Python API，當作送出的備援。
 - 每種反應的樣子在 `src/session.c` 設定：`LOOKS`（SPEAKING、LISTENING、TRANSCRIBING、STANDBY 那幾列）、`HOVER` 和 `TOUCH`。
 
 ## 輸出方式
@@ -167,6 +186,8 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱和通知類型，不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
 
 開啟 `DODECA_RICH=1`（`install_hooks.py --rich`）時，hook 另外為每個 session 保留一個檔案 `~/.dodeca-core/msg/<session id>.json`（權限 600，資料夾 700）：**Claude 最後一則回覆的文字**和最後一則通知（例如權限請求）的文字，各最多 4000 字，以及它所在終端機的 `ITERM_SESSION_ID`。新的回覆或通知會蓋掉舊的，session 結束時檔案會刪掉，沒正常結束的 session 留下的檔案 24 小時後刪除。事件檔除了 `Stop` 那行多一個 `"m": 1` 之外不變。因為回覆文字會寫到磁碟上，只在你自己的電腦上開。
+
+語音（`dodeca-panel --voice`）：語音合成在這台 Mac 上完成，按住說話的辨識強制離線，錄音不會離開這台 Mac，也不會保存。辨識出來的文字會打進它要送去的那個 Claude Code session，就像你自己打字一樣。唯一會用到網路的是 `--summarize claude`：它透過 `claude -p` 把回覆文字送給 Anthropic 來縮短。
 
 ## 已知限制
 

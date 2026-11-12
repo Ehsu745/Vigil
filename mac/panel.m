@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include "../src/dodeca.h"
 #import "speech.h"
+#import "listen.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -38,11 +39,17 @@ static int g_launcher_pid;      // --launcher-pid: quit when this process ends
 static const char *g_tty_path;  // --tty
 static double g_away_after = 120;               // --away: seconds without keyboard or mouse input until "away"
 static const char *g_hotkey = "ctrl+opt+v";     // --hotkey: push-to-talk to the session that most needs you
-static NSString *g_voice_id = @"zh-TW";          // --voice-id: a voice identifier or a language
+static NSString *g_voice_id = @"system";         // --voice-id: "system" (System Settings' voice, Siri too), a language or an identifier
 static float g_rate = 0.5f;                     // --rate: 0 (slowest) .. 1 (fastest), 0.5 is normal
 static int g_voice;                             // --voice: spoken reports and push-to-talk (off: the panel stays silent)
 static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize claude (both imply --voice)
 static NSString *g_claude;                      // --claude PATH (the launcher passes it), else found below
+static NSString *g_listen_locale = @"zh-TW";     // --listen-locale: the language push-to-talk understands
+static int g_confirm_send;                      // --confirm-send: a recognized reply waits for a second click
+static NSString *g_mic;                         // --mic NAME: the input device to listen with
+static const double PREVIEW_FOR = 1.5;          // seconds a recognized reply is shown before it is sent
+static int g_debug;                             // --debug: log each voice step to stderr (never the words)
+#define DBG(...) do { if (g_debug) { fprintf(stderr, "[dodeca] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
 
@@ -149,6 +156,7 @@ static NSString *saved_summary(const Session *s, NSString *reply) {
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
 // what the panel does when a core is clicked, held, ... (AppDelegate)
 @protocol CoreActions
+- (void)coreTouched:(NSString *)sid; // any mouse-down on a core, before it is known what it becomes
 - (void)coreClicked:(NSString *)sid;
 - (void)coreDoubleClicked:(NSString *)sid;
 - (void)corePressBegan:(NSString *)sid; // held down longer than PRESS_AFTER: push-to-talk
@@ -166,6 +174,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (BOOL)anythingDue:(double)now;
 - (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center;
 - (void)cancelPress;
+- (NSRect)coreRect:(int)i;
 @end
 
 @implementation PanelView {
@@ -187,6 +196,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (BOOL)isOpaque { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; } // a click on a core never has to activate the app first
 - (BOOL)busy { return _downSid != nil; }
+- (NSRect)coreRect:(int)i { return i >= 0 && i < _coreN ? _core[i] : NSZeroRect; }
 
 - (NSString *)sidAt:(NSEvent *)e {
     int i = [self coreAt:[self convertPoint:e.locationInWindow fromView:nil] look:NULL center:NULL];
@@ -201,6 +211,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     NSString *sid = [self sidAt:e];
     if (!sid) return;
     if (e.clickCount >= 2 && _clickTimer.valid && [sid isEqualToString:_clickSid]) {
+        [self.actions coreTouched:sid];
         [_clickTimer invalidate];
         _clickTimer = nil;
         [self.actions coreDoubleClicked:sid];
@@ -209,6 +220,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [_clickTimer invalidate]; // a click on another core: the earlier single click still counts
     if (_clickTimer) [self.actions coreClicked:_clickSid];
     _clickTimer = nil;
+    [self.actions coreTouched:sid];
     _downSid = sid;
     _downAt = _dragAt = e.locationInWindow;
     _dragTime = e.timestamp;
@@ -451,12 +463,18 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 @property(strong) NSPanel *tip;
 @property(strong) TipView *tipView;
 @property(copy) NSString *hoverSid, *pttSid; // pttSid: the session push-to-talk is for
-@property double hoverSince, sizeCheck, pttEndedAt;
+@property double hoverSince, sizeCheck, pendingUntil;
 @property BOOL away, pttByHotkey;
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *overlay; // sid -> a panel state shown instead of its own
 @property(strong) Speaker *speaker;
 @property(strong) NSMutableDictionary<NSString *, NSArray *> *seen; // sid -> @[last reply time, last NEEDS YOU time] already handled
 @property(strong) NSMutableSet<NSString *> *summarizing;             // sids waiting for claude -p
+@property(strong) Listener *listener;
+@property(copy) NSString *pendingSid, *pendingText; // a recognized reply waiting to be sent
+@property BOOL pendingHeld;                         // the core was touched: wait for what the click means
+@property(strong) NSMutableDictionary<NSString *, NSNumber *> *errorUntil; // sid -> show ERROR until
+@property(strong) NSPanel *preview;                 // the recognized text, under the core
+@property(strong) TipView *previewView;
 @property unsigned short paneCols, paneRows;
 @end
 
@@ -525,8 +543,11 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     self.overlay = [NSMutableDictionary dictionary];
     self.seen = [NSMutableDictionary dictionary];
     self.summarizing = [NSMutableSet set];
+    self.errorUntil = [NSMutableDictionary dictionary];
     if (g_voice) {
         self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
+        self.listener = [[Listener alloc] initWithLocale:g_listen_locale mic:g_mic];
+        if (g_debug) self.listener.log = ^(NSString *line) { DBG("%s", line.UTF8String); };
         [self registerHotkeys];
     }
     p.contentView = self.view;
@@ -570,6 +591,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     }
     [self trackMouse:now];
     [self watchForNews:now];
+    if (self.pendingSid && !self.pendingHeld && now > self.pendingUntil) {
+        if (g_confirm_send) [self dropPending]; // not confirmed in time
+        else [self sendPending];
+    }
     [self updateOverlays:now];
     if (g_launcher_pid > 0 && g_tty >= 0 && now - self.sizeCheck > 0.5) { // no SIGWINCH outside the pane's process group
         struct winsize ws = {0};
@@ -614,20 +639,28 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
 }
 
+// a small floating box that never takes clicks (the hover tooltip, the recognized-text preview)
+- (NSPanel *)newTipPanel:(TipView **)view {
+    NSPanel *t = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 40)
+                                            styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                              backing:NSBackingStoreBuffered defer:NO];
+    t.opaque = NO;
+    t.backgroundColor = [NSColor clearColor];
+    t.hasShadow = YES;
+    t.ignoresMouseEvents = YES;
+    t.level = NSFloatingWindowLevel;
+    t.collectionBehavior = self.panel.collectionBehavior;
+    *view = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+    t.contentView = *view;
+    return t;
+}
+
 - (void)showTipFor:(const Session *)s at:(NSPoint)center now:(double)now {
+    if (self.preview.visible) { [self.tip orderOut:nil]; return; } // the preview has the floor
     if (!self.tip) {
-        NSPanel *t = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 40)
-                                                styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
-                                                  backing:NSBackingStoreBuffered defer:NO];
-        t.opaque = NO;
-        t.backgroundColor = [NSColor clearColor];
-        t.hasShadow = YES;
-        t.ignoresMouseEvents = YES;
-        t.level = NSFloatingWindowLevel;
-        t.collectionBehavior = self.panel.collectionBehavior;
-        self.tipView = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
-        t.contentView = self.tipView;
-        self.tip = t;
+        TipView *v;
+        self.tip = [self newTipPanel:&v];
+        self.tipView = v;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
     NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
@@ -659,6 +692,11 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 - (void)coreClicked:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s) return;
+    if ([sid isEqualToString:self.pendingSid]) { // a recognized reply is waiting: the click sends or cancels it
+        if (g_confirm_send) [self sendPending];
+        else [self dropPending];
+        return;
+    }
     s->unread = 0;
     self.hoverSince = 0; // the tooltip shows without the usual pause
     if (!g_voice) return;
@@ -731,6 +769,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 - (void)coreDoubleClicked:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s) return;
+    if ([sid isEqualToString:self.pendingSid]) { [self dropPending]; return; } // counts as a click: cancel
     s->ring_at = wall();
     s->unread = 0;
     NSString *iterm = msg_text(s, @"iterm");
@@ -765,29 +804,238 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     [task launchAndReturnError:NULL]; // asynchronous: the panel never waits for iTerm2
 }
 
-// long press (or the hotkey): push-to-talk. Without voice input it only shows LISTENING, then TRANSCRIBING.
+// ---- voice input: hold, speak, release; the text is shown for a moment, then typed into that session --
+
+// long press (or the hotkey): start listening, or say why it cannot
 - (void)corePressBegan:(NSString *)sid {
     if (!g_voice || !session_by_sid(sid)) return;
     if (self.pttSid) [self cancelPtt];
+    [self dropPending];
+    NSString *why = [self.listener unavailableReason];
+    DBG("press began on %s: %s", sid.UTF8String, why ? why.UTF8String : "listening");
+    if (why) { [self fail:sid because:why]; return; }
+    [self.speaker stop:self.speaker.speakingSid]; // don't talk over you
     self.pttSid = sid;
     self.overlay[sid] = @(ST_LISTEN);
     [self setEscapeHotkey:YES];
+    __weak AppDelegate *me = self;
+    BOOL ok = [self.listener start:^(NSString *partial) {
+        [me showPreview:partial forSid:sid hint:@"…"];
+    }];
+    DBG("recording %s", ok ? "started" : "FAILED to start");
+    if (!ok) { [self cancelPtt]; [self fail:sid because:@"麥克風沒辦法開始錄音"]; return; }
+    [self showPreview:@"" forSid:sid hint:@"說吧，放開就結束（Esc 取消）"];
 }
 
 - (void)corePressEnded:(NSString *)sid {
+    DBG("press ended on %s (recording for %s)", sid.UTF8String, self.pttSid.UTF8String ?: "nothing");
     if (![sid isEqualToString:self.pttSid]) return;
     [self setEscapeHotkey:NO];
     self.overlay[sid] = @(ST_TRANSCRIBE);
-    self.pttEndedAt = wall();
+    __weak AppDelegate *me = self;
+    [self.listener finish:^(NSString *text) {
+        AppDelegate *d = me;
+        DBG("recognized %lu characters%s", (unsigned long)text.length, d && [d.pttSid isEqualToString:sid] ? "" : " (cancelled meanwhile)");
+        if (!d || ![d.pttSid isEqualToString:sid]) return; // cancelled meanwhile
+        [d.overlay removeObjectForKey:sid];
+        d.pttSid = nil;
+        if (!text) {
+            [d.preview orderOut:nil];
+            NSString *dev = d.listener.silentDevice;
+            if (dev) [d fail:sid because:[NSString stringWithFormat:@"麥克風完全沒有聲音，用的是 %@。可以用 --mic 指定別的輸入裝置", dev]];
+            return;
+        }
+        d.pendingSid = sid;
+        d.pendingText = text;
+        d.pendingHeld = NO;
+        d.pendingUntil = wall() + (g_confirm_send ? 15 : PREVIEW_FOR);
+        [d showPreview:text forSid:sid hint:g_confirm_send ? @"再點一下核心送出" : @"點核心取消"];
+    }];
 }
 
 // Esc while recording: nothing is sent, the glow shrinks and fades back
 - (void)cancelPtt {
     if (!self.pttSid) return;
+    [self.listener cancel];
     [self.overlay removeObjectForKey:self.pttSid];
     self.pttSid = nil;
     [self setEscapeHotkey:NO];
     [self.view cancelPress];
+    [self.preview orderOut:nil];
+}
+
+- (void)coreTouched:(NSString *)sid {
+    if ([sid isEqualToString:self.pendingSid]) self.pendingHeld = YES; // decided when the click is known
+}
+
+- (void)dropPending {
+    self.pendingSid = self.pendingText = nil;
+    [self.preview orderOut:nil];
+}
+
+// the recognized text under the core it is for, with a hint of what a click does
+- (void)showPreview:(NSString *)text forSid:(NSString *)sid hint:(NSString *)hint {
+    Session *s = session_by_sid(sid);
+    const Room *room = shown_room();
+    if (!s) return;
+    if (!self.preview) {
+        TipView *v;
+        self.preview = [self newTipPanel:&v];
+        self.previewView = v;
+    }
+    NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
+    self.previewView.title = [NSString stringWithFormat:@"→ %@ · %@", name, hint];
+    self.previewView.body = text.length ? text : @" ";
+    Col c = s->cur.eh;
+    self.previewView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+    NSRect core = [self.view coreRect:(int)(s - room->s)];
+    NSRect inScreen = [self.panel convertRectToScreen:[self.view convertRect:core toView:nil]];
+    NSSize sz = [self.previewView fit];
+    NSRect pf = self.panel.frame;
+    if (sz.width > pf.size.width - 8) sz.width = pf.size.width - 8;
+    NSRect f = NSMakeRect(NSMidX(inScreen) - sz.width / 2, NSMinY(inScreen) + inScreen.size.height * 0.08 - sz.height, sz.width, sz.height);
+    if (NSMaxX(f) > NSMaxX(pf) - 4) f.origin.x = NSMaxX(pf) - 4 - sz.width;
+    if (NSMinX(f) < NSMinX(pf) + 4) f.origin.x = NSMinX(pf) + 4;
+    [self.preview setFrame:f display:YES];
+    [self.previewView setNeedsDisplay:YES];
+    [self.preview orderFrontRegardless];
+    [self.tip orderOut:nil];
+}
+
+// Sends the recognized reply, unless Claude is busy: then it asks first, since a reply typed while it works
+// waits until the current step is done, and interrupting means pressing Esc in that session.
+- (void)sendPending {
+    NSString *sid = self.pendingSid, *text = self.pendingText;
+    DBG("sending to %s", sid.UTF8String);
+    [self dropPending];
+    Session *s = session_by_sid(sid);
+    if (!s || !text) return;
+    if (s->state == ST_WORK || s->state == ST_THINK) {
+        [self.speaker say:@"還在工作中，要打斷嗎？" sid:sid volume:s->vol urgent:YES];
+        NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+        m.autoenablesItems = NO;
+        NSArray *items = @[@[@"Send after this step (no interrupt)", @0], @[@"Interrupt and send", @1], @[@"Cancel", @2]];
+        for (NSArray *it in items) {
+            NSMenuItem *i = [m addItemWithTitle:it[0] action:@selector(menuSendChoice:) keyEquivalent:@""];
+            i.target = self;
+            i.tag = [it[1] integerValue];
+            i.representedObject = @[sid, text];
+        }
+        const Room *room = shown_room();
+        NSRect core = [self.view coreRect:(int)(s - room->s)];
+        [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMidX(core), NSMidY(core)) inView:self.view];
+        return;
+    }
+    [self send:text to:sid interrupt:NO];
+}
+
+- (void)menuSendChoice:(NSMenuItem *)i {
+    NSArray *a = i.representedObject;
+    if (i.tag == 2) return;
+    [self send:a[1] to:a[0] interrupt:i.tag == 1];
+}
+
+// The ERROR look for a few seconds, and the reason out loud
+- (void)fail:(NSString *)sid because:(NSString *)why {
+    DBG("ERROR on %s: %s", sid.UTF8String, why.UTF8String);
+    Session *s = session_by_sid(sid);
+    self.errorUntil[sid] = @(wall() + 3);
+    [self.speaker say:why sid:sid volume:s ? s->vol : 0.8f urgent:YES];
+}
+
+// Types text + Return into the session's iTerm2 pane. AppleScript first (it answers at once); if macOS
+// does not let the panel control iTerm2, iTerm2's Python API through pane_api.py.
+- (void)send:(NSString *)text to:(NSString *)sid interrupt:(BOOL)interrupt {
+    Session *s = session_by_sid(sid);
+    if (!s) return;
+    NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
+    NSCharacterSet *ctl = [NSCharacterSet controlCharacterSet];
+    text = [[text componentsSeparatedByCharactersInSet:ctl] componentsJoinedByString:@" "]; // one line, no escapes
+    if (g_demo_n) { // made-up sessions have no pane: pretend
+        s->ring_at = wall();
+        [self.speaker say:[NSString stringWithFormat:@"示範：已送給 %@：%@", name, text] sid:sid volume:s->vol urgent:NO];
+        return;
+    }
+    NSString *iterm = msg_text(s, @"iterm");
+    NSRange colon = [iterm rangeOfString:@":"];
+    if (colon.location != NSNotFound) iterm = [iterm substringFromIndex:colon.location + 1];
+    if (!iterm.length) { [self fail:sid because:@"不知道這個 session 在哪個 iTerm2 窗格，需要用 DODECA_RICH 啟動 hook"]; return; }
+    static NSString *script =
+        @"on run argv\n"
+         "  tell application \"iTerm2\"\n"
+         "    repeat with w in windows\n"
+         "      repeat with t in tabs of w\n"
+         "        repeat with s in sessions of t\n"
+         "          if (id of s as text) is (item 1 of argv) then\n"
+         "            if (item 3 of argv) is \"1\" then\n"
+         "              tell s to write text (ASCII character 27) newline no\n"
+         "              delay 0.4\n"
+         "            end if\n"
+         "            tell s to write text (item 2 of argv) newline no\n"
+         "            delay 0.15\n"
+         "            tell s to write text (ASCII character 13) newline no\n"
+         "            return \"ok\"\n"
+         "          end if\n"
+         "        end repeat\n"
+         "      end repeat\n"
+         "    end repeat\n"
+         "  end tell\n"
+         "  return \"missing\"\n"
+         "end run\n";
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    task.arguments = @[@"-e", script, iterm, text, interrupt ? @"1" : @"0"];
+    NSPipe *out = [NSPipe pipe];
+    task.standardOutput = out;
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    __weak AppDelegate *me = self;
+    task.terminationHandler = ^(NSTask *t) {
+        NSString *r = [[[NSString alloc] initWithData:[out.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        int status = t.terminationStatus;
+        DBG("osascript exit %d, answer \"%s\"", status, r.UTF8String ?: "");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (status == 0) [me sent:r to:sid];
+            else [me sendWithPythonApi:text iterm:iterm to:sid interrupt:interrupt]; // e.g. Automation not allowed
+        });
+    };
+    if (![task launchAndReturnError:NULL]) [self sendWithPythonApi:text iterm:iterm to:sid interrupt:interrupt];
+}
+
+- (void)sendWithPythonApi:(NSString *)text iterm:(NSString *)iterm to:(NSString *)sid interrupt:(BOOL)interrupt {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *it2run = @"/Applications/iTerm.app/Contents/Resources/it2run";
+    NSString *scripts = [@"~/Library/Application Support/iTerm2/Scripts" stringByExpandingTildeInPath];
+    NSString *mine = [[[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"pane_api.py"];
+    NSString *copy = [scripts stringByAppendingPathComponent:@"dodeca_pane.py"];
+    if (![fm isExecutableFileAtPath:it2run] || ![fm fileExistsAtPath:scripts] || ![fm fileExistsAtPath:mine]) {
+        [self fail:sid because:@"沒辦法控制 iTerm2：請允許面板控制 iTerm2，或打開 iTerm2 的 Python API"];
+        return;
+    }
+    if (![fm contentsEqualAtPath:mine andPath:copy]) { [fm removeItemAtPath:copy error:NULL]; [fm copyItemAtPath:mine toPath:copy error:NULL]; }
+    NSString *result = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"dodeca-send-%d-%u", (int)getpid(), arc4random()]];
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:it2run];
+    task.arguments = @[@"dodeca_pane.py", @"send", iterm, text, result, interrupt ? @"1" : @"0"];
+    task.standardOutput = task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    if (![task launchAndReturnError:NULL]) { [self fail:sid because:@"沒辦法啟動 iTerm2 的 Python API"]; return; }
+    [self waitForResult:result sid:sid tries:25]; // it2run returns at once: the script writes its answer to a file
+}
+
+- (void)waitForResult:(NSString *)path sid:(NSString *)sid tries:(int)tries {
+    NSString *r = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
+    if (r) { [[NSFileManager defaultManager] removeItemAtPath:path error:NULL]; [self sent:r to:sid]; return; }
+    if (tries <= 0) { [self fail:sid because:@"iTerm2 的 Python API 沒有回應，請確認已經打開"]; return; }
+    __weak AppDelegate *me = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [me waitForResult:path sid:sid tries:tries - 1];
+    });
+}
+
+- (void)sent:(NSString *)result to:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if ([result isEqualToString:@"ok"]) { if (s) s->ring_at = wall(); return; }
+    [self fail:sid because:[result isEqualToString:@"missing"] ? @"找不到這個 session 的 iTerm2 窗格，可能已經關掉了" : @"送出失敗"];
 }
 
 - (NSMenu *)menuForCore:(NSString *)sid {
@@ -835,10 +1083,6 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (self.away && !away)
         for (int i = 0; i < room->n; i++) if (room->s[i].unread) room->s[i].burst_at = now;
     self.away = away;
-    if (self.pttSid && self.overlay[self.pttSid].intValue == ST_TRANSCRIBE && now - self.pttEndedAt > 1.2) {
-        [self.overlay removeObjectForKey:self.pttSid]; // (voice input replaces this with the real recognition)
-        self.pttSid = nil;
-    }
     for (int i = 0; i < room->n; i++) {
         Session *s = &room->s[i];
         NSNumber *ov = self.overlay[sid_of(s)];
@@ -846,12 +1090,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         int own = session_shown(s, now);
         s->overlay = ov ? ov.intValue : away && own != ST_WAIT ? ST_STANDBY : 0;
         if (!ov && [self.speaker.speakingSid isEqualToString:sid_of(s)]) s->overlay = ST_SPEAK;
+        if ([self.errorUntil[sid_of(s)] doubleValue] > now) s->overlay = ST_ERROR;
         float lvl = 0;
         if (s->overlay == ST_SPEAK) lvl = self.speaker.level;
-        else if (s->overlay == ST_LISTEN) { // a stand-in for the microphone level until voice input is there
-            double t = now * 7.0 + i;
-            lvl = (float)(0.45 + 0.3 * sin(t) * sin(t * 0.37 + 1.1) + 0.15 * sin(t * 2.9));
-        }
+        else if (s->overlay == ST_LISTEN) lvl = self.listener.level;
         s->level += (fmaxf(0, fminf(1, lvl)) - s->level) * 0.35f;
     }
     for (NSString *sid in self.overlay.allKeys) if (!session_by_sid(sid)) [self.overlay removeObjectForKey:sid];
@@ -968,10 +1210,15 @@ static void usage(void) {
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
          "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
-         "  --voice-id ID      voice for spoken reports: an identifier or a language (default zh-TW)\n"
+         "  --voice-id ID      voice: system (default: the System Voice of Spoken Content, Siri works), a language or an identifier\n"
          "  --rate X           speaking rate 0..1 (default 0.5)\n"
          "  --auto-speak       read a new reply out on its own if you were active in the last 60 s\n"
          "  --summarize claude summarize replies with claude -p (15 s timeout) instead of the first sentences\n"
+         "  --listen-locale L  the language push-to-talk understands (default zh-TW; on-device only)\n"
+         "  --mic NAME         input device to listen with (part of its name; default: the system input, skipping\n"
+         "                     virtual ones like BlackHole)\n"
+         "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
+         "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
          "  --tty PATH --launcher-pid N --claude PATH   (set by the ./dodeca-panel launcher)");
 }
 
@@ -1000,6 +1247,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--voice-id") && v) { g_voice_id = @(v); i++; }
             else if (!strcmp(a, "--rate") && v) { g_rate = (float)atof(v); i++; }
             else if (!strcmp(a, "--voice")) g_voice = 1;
+            else if (!strcmp(a, "--listen-locale") && v) { g_listen_locale = @(v); i++; }
+            else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
+            else if (!strcmp(a, "--debug")) g_debug = 1;
+            else if (!strcmp(a, "--mic") && v) { g_mic = @(v); i++; }
             else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
             else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
             else if (!strcmp(a, "--claude") && v) { g_claude = @(v); i++; }

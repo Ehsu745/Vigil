@@ -10,7 +10,7 @@
 #define SLEEP_AFTER 90.0
 #define DROP_AFTER 1800.0 /* a session silent this long is forgotten */
 
-const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "SLEEP", "SPEAKING", "LISTENING", "TRANSCRIBING", "STANDBY"};
+const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "SLEEP", "SPEAKING", "LISTENING", "TRANSCRIBING", "STANDBY", "ERROR"};
 
 #define C(r, g, b) {(r) / 255.0f, (g) / 255.0f, (b) / 255.0f}
 #define PURE C(255, 255, 255)
@@ -24,6 +24,7 @@ const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "S
 #define GREEN C(110, 255, 160)
 #define VIOLET C(175, 135, 255)
 #define INDIGO C(110, 105, 215)
+#define ORANGE C(255, 120, 30)
 
 /*                rot   core  hz    depth edge  flow  hr   glitch  core body  core glow  line   line halo  lc    lh
  * lc / lh: how much the speech or microphone level drives core brightness / glow size (panel states only) */
@@ -34,11 +35,12 @@ const Look LOOKS[ST_N] = {
     [ST_WAIT]  = {0.10f, 1.00f, 1.00f, 0.60f, 0.60f, 0.45f, 6.0f, 1, NEARWHITE, RED, PINK, RED, 0, 0},
     [ST_CHEER] = {1.60f, 1.60f, 0.00f, 0.00f, 1.20f, 1.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     [ST_SLEEP] = {0.04f, 0.26f, 0.08f, 0.30f, 0.30f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
-    /* the panel's own states: reporting by voice, push-to-talk, turning speech into text, you are away */
+    /* the panel's own states: reporting by voice, push-to-talk, turning speech into text, you are away, sending failed */
     [ST_SPEAK]      = {0.12f, 0.90f, 0.00f, 0.00f, 0.85f, 0.00f, 6.0f, 0, PURE, TEAL, PURE, TEAL, 0.9f, 0.0f},
     [ST_LISTEN]     = {0.00f, 0.80f, 0.00f, 0.00f, 0.90f, 0.00f, 4.5f, 0, PURE, GREEN, GREEN, GREEN, 0.3f, 4.0f},
     [ST_TRANSCRIBE] = {0.20f, 0.90f, 1.60f, 0.25f, 0.90f, 2.60f, 5.0f, 0, PURE, VIOLET, VIOLET, VIOLET, 0, 0},
     [ST_STANDBY]    = {0.03f, 0.20f, 0.05f, 0.40f, 0.22f, 0.00f, 4.0f, 0, PURE, INDIGO, PURE, INDIGO, 0, 0},
+    [ST_ERROR]      = {0.05f, 0.95f, 0.80f, 0.50f, 0.75f, 0.00f, 5.0f, 1, NEARWHITE, ORANGE, ORANGE, ORANGE, 0, 0}, /* a voice reply could not be sent */
 };
 
 /* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
@@ -175,13 +177,13 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
 }
 
 const char *STATE_TEXT[ST_N] = {"Idle", "Thinking", "Working", "Needs approval", "Done", "Sleeping",
-                               "Speaking", "Listening", "Transcribing", "Standby"};
+                               "Speaking", "Listening", "Transcribing", "Standby", "Error"};
 
 /* How often a session's picture is redrawn. A calm session moves slowly, so it needs far fewer frames.
  * A state change gets the full rate for a moment so the colours ease smoothly. */
 double session_rate(const Session *s, double now, int fps) {
     static const double RATE[ST_N] = {[ST_IDLE] = 10, [ST_THINK] = 15, [ST_WORK] = 20, [ST_WAIT] = 20, [ST_CHEER] = 20, [ST_SLEEP] = 4,
-                                      [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4};
+                                      [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20};
     int busy = s->hover_to > 0 || s->hover > 0.01f || s->held || fabsf(s->spin_x) + fabsf(s->spin_y) > 0.02f
                || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for; /* the mouse is doing something */
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];

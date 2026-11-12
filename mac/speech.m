@@ -58,12 +58,48 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
 }
 
 // ---- the speaker -----------------------------------------------------------------------------------
-@interface Speaker () <AVSpeechSynthesizerDelegate>
+
+// The best installed voice for a language: Premium, then Enhanced, then the regular one; never the
+// novelty or Eloquence voices (robotic) unless nothing else is there. Downloading a better voice in System
+// Settings is enough for it to be used.
+static AVSpeechSynthesisVoice *best_voice(NSString *language) {
+    AVSpeechSynthesisVoice *best = nil;
+    int bestScore = -1;
+    for (AVSpeechSynthesisVoice *v in [AVSpeechSynthesisVoice speechVoices]) {
+        if (![v.language isEqualToString:language]) continue;
+        NSString *id = v.identifier;
+        int score = (int)v.quality * 10;
+        if ([id containsString:@".premium."]) score += 5;
+        else if ([id containsString:@".enhanced."]) score += 4;
+        else if ([id containsString:@".compact."]) score += 3;
+        else if ([id containsString:@".super-compact."]) score += 2;
+        else if ([id containsString:@"eloquence"] || [id containsString:@"speech.synthesis"]) score += 0;
+        else score += 1;
+        if (score > bestScore) { bestScore = score; best = v; }
+    }
+    return best ?: [AVSpeechSynthesisVoice voiceWithLanguage:language];
+}
+@interface Speaker () <AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate>
 @end
 
+// Two ways to speak:
+//  - a named voice (--voice-id zh-TW, or an identifier): AVSpeechSynthesizer, starts at once.
+//  - "system" (the default): the voice chosen in System Settings > Accessibility > Spoken Content > System
+//    Voice. Only /usr/bin/say reaches it, and it is the only way to use a Siri voice, which reads Chinese
+//    with English words in it far better than any voice an app may pick. Each sentence is rendered to a
+//    file by say and played here (so the volume and the real loudness are known); the next sentence
+//    renders while one plays, so only the first one is waited for.
 @implementation Speaker {
     AVSpeechSynthesizer *_synth;
     AVSpeechSynthesisVoice *_voice;
+    BOOL _system;
+    NSString *_tmp;                         // folder for the rendered sentences
+    NSMutableArray<NSString *> *_chunks;    // sentences still to render, for the item being spoken
+    NSMutableArray<NSString *> *_ready;     // rendered files waiting to play
+    NSTask *_render;
+    AVAudioPlayer *_player;
+    float _volume;
+    unsigned _gen;                          // bumped on stop: late callbacks of an old item are ignored
     float _rate;
     NSMutableArray<NSDictionary *> *_queue; // {sid, text, volume}
     NSString *_speaking;
@@ -73,19 +109,29 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
 
 - (instancetype)initWithVoice:(NSString *)voiceId rate:(float)rate {
     if (!(self = [super init])) return nil;
+    _rate = rate;
+    _queue = [NSMutableArray array];
+    _wordAt = -1e9;
+    if ([voiceId isEqualToString:@"system"] && [[NSFileManager defaultManager] isExecutableFileAtPath:@"/usr/bin/say"]) {
+        _system = YES;
+        _chinese = [[NSLocale preferredLanguages].firstObject hasPrefix:@"zh"];
+        _tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"dodeca-say-%d", (int)getpid()]];
+        [[NSFileManager defaultManager] createDirectoryAtPath:_tmp withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
+        return self;
+    }
+    if ([voiceId isEqualToString:@"system"]) voiceId = @"zh-TW";
     _synth = [[AVSpeechSynthesizer alloc] init];
     _synth.delegate = self;
-    _voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voiceId] ?: [AVSpeechSynthesisVoice voiceWithLanguage:voiceId];
+    _voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voiceId] ?: best_voice(voiceId);
     if (!_voice) {
         fprintf(stderr, "dodeca-panel: no voice \"%s\"; using the system voice\n", voiceId.UTF8String);
         _voice = [AVSpeechSynthesisVoice voiceWithLanguage:nil];
     }
     _chinese = [_voice.language hasPrefix:@"zh"];
-    _rate = rate;
-    _queue = [NSMutableArray array];
-    _wordAt = -1e9;
     return self;
 }
+
+- (void)dealloc { if (_tmp) [[NSFileManager defaultManager] removeItemAtPath:_tmp error:NULL]; }
 
 - (NSString *)speakingSid { return _speaking; }
 
@@ -104,7 +150,9 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
 
 - (void)stop:(NSString *)sid {
     [self dropQueued:sid];
-    if ([_speaking isEqualToString:sid]) [_synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate]; // didCancel follows
+    if (![_speaking isEqualToString:sid]) return;
+    if (_system) { [self systemStop]; [self done]; }
+    else [_synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate]; // didCancel follows
 }
 
 - (BOOL)has:(NSString *)sid {
@@ -118,6 +166,7 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
     NSDictionary *d = _queue.firstObject;
     [_queue removeObjectAtIndex:0];
     _speaking = d[@"sid"];
+    if (_system) { [self systemSpeak:d[@"text"] volume:[d[@"volume"] floatValue]]; return; }
     AVSpeechUtterance *u = [AVSpeechUtterance speechUtteranceWithString:d[@"text"]];
     u.voice = _voice;
     u.rate = _rate;
@@ -130,6 +179,12 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
 // higher for longer words, and decays between them.
 - (float)level {
     if (!_speaking) return 0;
+    if (_system) { // the real loudness of what is playing
+        if (!_player.playing) return 0.12f;
+        [_player updateMeters];
+        float db = [_player averagePowerForChannel:0]; // about -50 (quiet) .. -8 (loud)
+        return fmaxf(0.12f, fminf(1, (db + 45) / 35));
+    }
     double since = now_s() - _wordAt;
     float peak = 0.55f + fminf(0.45f, _wordLen * 0.06f);
     float v = peak * (float)exp(-since * 3.5);
@@ -148,6 +203,101 @@ NSString *speech_local_summary(NSString *md, BOOL chinese) {
     if (self.finished && sid) self.finished(sid);
     [self next];
 }
+// ---- the system voice through say --------------------------------------------------------------------
+
+// sentences of a sensible length: split after 。！？!? (and . before a space), short ones joined
+static NSArray<NSString *> *sentences(NSString *text) {
+    NSMutableArray *out = [NSMutableArray array];
+    // "notes 完成了：…": the short lead-in plays on its own, so the first sound comes almost at once
+    NSRange colon = [text rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"：:"]];
+    if (colon.location != NSNotFound && colon.location < 30 && NSMaxRange(colon) < text.length) {
+        [out addObject:[text substringToIndex:NSMaxRange(colon)]];
+        text = [text substringFromIndex:NSMaxRange(colon)];
+    }
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"[^。！？!?.]*(?:[。！？!?]+|\\.(?=\\s|$)|$)" options:0 error:NULL];
+    NSMutableString *cur = [NSMutableString string];
+    for (NSTextCheckingResult *m in [re matchesInString:text options:0 range:NSMakeRange(0, text.length)]) {
+        NSString *part = [[text substringWithRange:m.range] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!part.length) continue;
+        [cur appendString:cur.length ? [@" " stringByAppendingString:part] : part];
+        if (cur.length >= 24) { [out addObject:[cur copy]]; [cur setString:@""]; }
+    }
+    if (cur.length) [out addObject:cur];
+    return out;
+}
+
+- (void)systemSpeak:(NSString *)text volume:(float)volume {
+    _volume = volume;
+    _chunks = [sentences(text) mutableCopy];
+    _ready = [NSMutableArray array];
+    if (!_chunks.count) { [self done]; return; }
+    [self renderNext];
+}
+
+- (void)renderNext {
+    if (_render || !_chunks.count) return;
+    NSString *text = _chunks.firstObject;
+    [_chunks removeObjectAtIndex:0];
+    NSString *file = [_tmp stringByAppendingPathComponent:[NSString stringWithFormat:@"%u-%u.aiff", _gen, arc4random()]];
+    NSTask *t = [[NSTask alloc] init];
+    t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/say"];
+    NSMutableArray *args = [NSMutableArray arrayWithObjects:@"-o", file, nil];
+    if (fabsf(_rate - 0.5f) > 0.01f) [args addObjectsFromArray:@[@"-r", [NSString stringWithFormat:@"%d", (int)(180 * _rate / 0.5f)]]];
+    [args addObjectsFromArray:@[@"--", text]];
+    t.arguments = args;
+    t.standardOutput = t.standardError = [NSFileHandle fileHandleWithNullDevice];
+    unsigned gen = _gen;
+    __weak Speaker *me = self;
+    t.terminationHandler = ^(NSTask *task) {
+        int ok = task.terminationStatus == 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Speaker *sp = me;
+            if (!sp || gen != sp->_gen) { [[NSFileManager defaultManager] removeItemAtPath:file error:NULL]; return; }
+            sp->_render = nil;
+            if (ok) [sp->_ready addObject:file];
+            [sp playNext];
+            [sp renderNext];
+        });
+    };
+    _render = t;
+    if (![t launchAndReturnError:NULL]) { _render = nil; [self done]; }
+}
+
+- (void)playNext {
+    if (_player.playing) return;
+    if (!_ready.count) {
+        if (!_render && !_chunks.count) [self done]; // everything has been played
+        return;
+    }
+    NSString *file = _ready.firstObject;
+    [_ready removeObjectAtIndex:0];
+    _player = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:file] error:NULL];
+    [[NSFileManager defaultManager] removeItemAtPath:file error:NULL]; // already loaded
+    if (!_player) { [self playNext]; return; }
+    _player.delegate = self;
+    _player.volume = _volume;
+    _player.meteringEnabled = YES;
+    [_player play];
+}
+
+- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)p successfully:(BOOL)ok {
+    (void)ok;
+    if (p != _player) return;
+    _player = nil;
+    [self playNext];
+}
+
+- (void)systemStop {
+    _gen++;
+    [_render terminate];
+    _render = nil;
+    [_player stop];
+    _player = nil;
+    for (NSString *f in _ready) [[NSFileManager defaultManager] removeItemAtPath:f error:NULL];
+    [_ready removeAllObjects];
+    [_chunks removeAllObjects];
+}
+
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)s didFinishSpeechUtterance:(AVSpeechUtterance *)u { (void)s; (void)u; [self done]; }
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)s didCancelSpeechUtterance:(AVSpeechUtterance *)u { (void)s; (void)u; [self done]; }
 @end

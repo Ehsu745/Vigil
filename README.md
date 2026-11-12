@@ -92,7 +92,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 | Point at it | Tooltip after 0.3 s: folder, state, first two lines of the last reply (the notification text while NEEDS YOU) | Brightens, spins slower, turns toward the cursor |
 | Unread reply | — | A slow, soft flash until you click it or send a new prompt |
 | Click | Speaks the report, or stops it; marks the reply as read | SPEAKING (teal): brightness follows the voice |
-| Hold (> 0.35 s), release | Push-to-talk | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
+| Hold (> 0.35 s), release | Push-to-talk: what you say is shown under the core for 1.5 s, then typed into that session with Return; click the core in that time to cancel | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
 | Double-click | Brings that session's iTerm2 pane to the front | One shockwave ring |
 | Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front | — |
 | Drag | Turns the polyhedron by hand; let go while moving and it spins on, slowing back to its own rotation | — |
@@ -111,8 +111,27 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 - By default the panel speaks only when you click a core or choose Replay. With `--auto-speak` it also reads a new reply out on its own if you used the keyboard or mouse in the last 60 seconds, and reads a new permission request out at once. Muted sessions never speak on their own.
 - What is read is a summary. By default the first paragraph of the reply, at most 3 sentences or 150 characters (no cost, no delay). With `--summarize claude` the panel asks `claude -p` (model haiku, hooks and tools off) in the background for two or three conversational sentences in Traditional Chinese; if that takes more than 15 seconds it uses the local summary. The summary is kept in the msg file, so Replay doesn't ask again. This sends the reply text to Anthropic once more and uses your Claude Code quota.
 - Before reading, code blocks become "（略過一段程式碼）", and Markdown symbols and URLs are removed (links keep their text).
-- `--voice-id` picks the voice: a language (`zh-TW`, the default, or `en-US`) or a voice identifier. `--rate` sets the speed (0 to 1, default 0.5). The built-in zh-TW voice is basic; better ones can be downloaded in System Settings > Accessibility > Spoken Content > System Voice > Manage Voices. With a non-Chinese voice the panel's own words are in English.
+- The voice is the **System Voice** of System Settings > Accessibility > Spoken Content. Set it to a **Siri** voice: it is the only kind that reads Chinese with English words in it naturally, and apps can reach it only this way (the panel renders each sentence with `say` and plays it, so the first sound comes about a second after the click). `--voice-id zh-TW` (or `en-US`, or a voice identifier) uses a voice apps may choose directly instead: it starts at once, and the best installed one is picked (download **Meijia (Premium)** under Manage Voices for zh-TW), but English words inside Chinese sound poor. `--rate` sets the speed (0 to 1, default 0.5). The panel's own words are in Chinese when your macOS language is Chinese.
 - Speaking needs no permission.
+
+**Voice replies.** Hold a core (or `⌃⌥V`), speak, let go.
+
+- Recognition runs on this Mac only (`SFSpeechRecognizer` with on-device recognition required): the recording is never uploaded. If the language has no on-device model, push-to-talk is turned off and the core says why. `--listen-locale` sets the language (default `zh-TW`).
+- The recognized text appears under the core. After 1.5 seconds it is typed into that session's iTerm2 pane, followed by Return; click the core before then to cancel. With `--confirm-send` it waits instead, and a second click sends it.
+- If Claude is still working, the panel asks first ("還在工作中，要打斷嗎？") with a menu: send after this step (Claude Code reads it when the current step ends), interrupt and send (Esc first), or cancel.
+- If the pane can't be found, the core turns orange (ERROR) and says why.
+- It listens with the system's input device, except a virtual one (BlackHole, Loopback, Soundflower, Teams or Zoom audio), which carries other apps' sound rather than your voice: then it uses the built-in microphone. `--mic NAME` picks a device by part of its name. If a recording is completely silent, the core says which device it used.
+- `--debug` writes each voice step to stderr (device, levels, recognizer errors, send result; never what you said).
+- Sending needs `DODECA_RICH` (the session's `ITERM_SESSION_ID` is kept in the msg file). It uses AppleScript, which asks once for permission to control iTerm2; if that is not allowed, it falls back to iTerm2's Python API (`pane_api.py send`).
+- In `--demo` nothing is typed anywhere; the core only says what it would have sent.
+
+**One-time setup for voice:**
+
+1. `sh mac/build.sh`, then start the panel with `--voice` (`DODECA_PANE_ARGS="--voice"` for the pane opened by `open_pane.sh`).
+2. `python3 install_hooks.py --rich --apply`, so replies and the iTerm2 session id are kept (start new Claude Code sessions afterwards).
+3. The first time you hold a core, macOS asks for the microphone and for speech recognition: allow both, then hold again.
+4. The first time a reply is sent or you double-click a core, macOS asks whether DodecaPanel may control iTerm2: allow it (System Settings > Privacy & Security > Automation).
+5. Optional: a better zh-TW voice (System Settings > Accessibility > Spoken Content > System Voice > Manage Voices); iTerm2 > Settings > General > Magic > Enable Python API, as the fallback for sending.
 - How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 
 ## Output modes
@@ -167,6 +186,8 @@ To change colors or motion, just edit the `LOOKS` table in `src/session.c`.
 The event file contains only time, session id, event name, folder name (no path), tool name and notification type. Prompts and tool input/output are never recorded. No network connections, no background daemon, and the file's permissions are 600.
 
 With `DODECA_RICH=1` (`install_hooks.py --rich`) the hook also keeps one file per session in `~/.dodeca-core/msg/<session id>.json` (mode 600, folder 700): **the text of Claude's last reply** and of the last notification (e.g. a permission prompt), at most 4000 characters each, and the `ITERM_SESSION_ID` of the terminal it runs in. Each new reply or notice replaces the old one, the file is deleted when the session ends, and files left by sessions that never ended are deleted after 24 hours. The event file stays the same apart from `"m": 1` on a `Stop` line. Since reply text is written to disk, turn this on only on your own machine.
+
+Voice (`dodeca-panel --voice`): speech is synthesized on this Mac, and push-to-talk recognition is on-device only, so recordings never leave the Mac and are not kept. The recognized text is typed into the Claude Code session it was meant for, like anything you type. The one network use is `--summarize claude`, which sends the reply text to Anthropic through `claude -p` to shorten it.
 
 ## Known limitations
 
