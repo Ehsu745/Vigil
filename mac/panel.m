@@ -19,6 +19,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include "../src/dodeca.h"
+#import "speech.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -37,6 +38,11 @@ static int g_launcher_pid;      // --launcher-pid: quit when this process ends
 static const char *g_tty_path;  // --tty
 static double g_away_after = 120;               // --away: seconds without keyboard or mouse input until "away"
 static const char *g_hotkey = "ctrl+opt+v";     // --hotkey: push-to-talk to the session that most needs you
+static NSString *g_voice_id = @"zh-TW";          // --voice-id: a voice identifier or a language
+static float g_rate = 0.5f;                     // --rate: 0 (slowest) .. 1 (fastest), 0.5 is normal
+static int g_voice;                             // --voice: spoken reports and push-to-talk (off: the panel stays silent)
+static int g_auto_speak, g_summarize_claude;    // --auto-speak, --summarize claude (both imply --voice)
+static NSString *g_claude;                      // --claude PATH (the launcher passes it), else found below
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
 
@@ -112,6 +118,32 @@ static NSDictionary *msg_of(const Session *s) {
 static NSString *msg_text(const Session *s, NSString *field) {
     id v = msg_of(s)[field];
     return [v isKindOfClass:[NSString class]] && [v length] ? v : nil;
+}
+
+// Keeps a Claude summary in the msg file, so replaying does not ask again. Written only if the reply is
+// still the one that was summarized (the hook clears "summary" whenever a new reply comes in).
+static NSMutableDictionary *g_demo_summary; // --demo has no msg files: kept in memory
+static void msg_save_summary(const Session *s, NSString *reply, NSString *summary) {
+    NSString *sid = sid_of(s);
+    if (g_demo_n) { if (!g_demo_summary) g_demo_summary = [NSMutableDictionary dictionary]; g_demo_summary[sid] = @[reply, summary]; return; }
+    if (!g_msg_dir[0]) return;
+    NSString *path = [NSString stringWithFormat:@"%s/%@.json", g_msg_dir, sid];
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSMutableDictionary *d = data ? [[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:NULL] mutableCopy] : nil;
+    if (![d isKindOfClass:[NSMutableDictionary class]] || ![d[@"reply"] isEqual:reply]) return;
+    d[@"summary"] = summary;
+    NSData *out = [NSJSONSerialization dataWithJSONObject:d options:0 error:NULL];
+    NSString *tmp = [path stringByAppendingFormat:@".%d.tmp", (int)getpid()];
+    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    BOOL ok = write(fd, out.bytes, out.length) == (ssize_t)out.length;
+    close(fd);
+    if (ok) rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation); else unlink(tmp.fileSystemRepresentation);
+}
+
+static NSString *saved_summary(const Session *s, NSString *reply) {
+    if (g_demo_n) { NSArray *a = g_demo_summary[sid_of(s)]; return [a[0] isEqual:reply] ? a[1] : nil; }
+    return [msg_text(s, @"reply") isEqual:reply] ? msg_text(s, @"summary") : nil;
 }
 
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
@@ -422,6 +454,9 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 @property double hoverSince, sizeCheck, pttEndedAt;
 @property BOOL away, pttByHotkey;
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *overlay; // sid -> a panel state shown instead of its own
+@property(strong) Speaker *speaker;
+@property(strong) NSMutableDictionary<NSString *, NSArray *> *seen; // sid -> @[last reply time, last NEEDS YOU time] already handled
+@property(strong) NSMutableSet<NSString *> *summarizing;             // sids waiting for claude -p
 @property unsigned short paneCols, paneRows;
 @end
 
@@ -488,7 +523,12 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     self.view = [[PanelView alloc] initWithFrame:NSMakeRect(0, 0, 290, 600)];
     self.view.actions = self;
     self.overlay = [NSMutableDictionary dictionary];
-    [self registerHotkeys];
+    self.seen = [NSMutableDictionary dictionary];
+    self.summarizing = [NSMutableSet set];
+    if (g_voice) {
+        self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
+        [self registerHotkeys];
+    }
     p.contentView = self.view;
     self.panel = p;
     [self place];
@@ -529,6 +569,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
     }
     [self trackMouse:now];
+    [self watchForNews:now];
     [self updateOverlays:now];
     if (g_launcher_pid > 0 && g_tty >= 0 && now - self.sizeCheck > 0.5) { // no SIGWINCH outside the pane's process group
         struct winsize ws = {0};
@@ -614,12 +655,76 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 
 // ---- what clicks, presses and keys do ------------------------------------------------------------------
 
-// single click: mark the reply as read and show it at once (with voice output: play / stop it)
+// single click: play the spoken report, or stop it; the reply counts as read
 - (void)coreClicked:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s) return;
     s->unread = 0;
     self.hoverSince = 0; // the tooltip shows without the usual pause
+    if (!g_voice) return;
+    if ([self.speaker has:sid] || [self.summarizing containsObject:sid]) {
+        [self.speaker stop:sid];
+        [self.summarizing removeObject:sid];
+    } else [self report:s urgent:NO];
+}
+
+// ---- voice output -------------------------------------------------------------------------------------
+
+// Says what a session has to report: the permission request while it needs you, else its last reply,
+// summed up. Starts with where it comes from: "notes 完成了：…".
+- (void)report:(Session *)s urgent:(BOOL)urgent {
+    BOOL zh = self.speaker.chinese;
+    NSString *sid = sid_of(s), *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
+    float vol = s->vol;
+    NSString *notice = msg_text(s, @"notice"), *reply = msg_text(s, @"reply");
+    if (session_shown(s, wall()) == ST_WAIT || (s->overlay && s->state == ST_WAIT)) {
+        NSString *what = notice ? speech_clean(notice, zh) : (zh ? @"正在等你核准" : @"is waiting for your approval");
+        [self.speaker say:[NSString stringWithFormat:zh ? @"%@ 需要你：%@" : @"%@ needs you: %@", name, what] sid:sid volume:vol urgent:YES];
+        return;
+    }
+    if (!reply) {
+        [self.speaker say:[NSString stringWithFormat:zh ? @"%@ 還沒有回覆" : @"%@ has no reply yet", name] sid:sid volume:vol urgent:urgent];
+        return;
+    }
+    NSString *(^line)(NSString *) = ^NSString *(NSString *summary) {
+        return [NSString stringWithFormat:zh ? @"%@ 完成了：%@" : @"%@ finished: %@", name, summary];
+    };
+    NSString *saved = g_summarize_claude ? saved_summary(s, reply) : nil;
+    if (!g_summarize_claude || saved) {
+        [self.speaker say:line(saved ?: speech_local_summary(reply, zh)) sid:sid volume:vol urgent:urgent];
+        return;
+    }
+    // ask claude -p in the background; the local summary if it fails or takes longer than 15 s
+    [self.summarizing addObject:sid];
+    __weak AppDelegate *me = self;
+    speech_claude_summary(g_claude, reply, zh, 15, ^(NSString *summary) {
+        AppDelegate *d = me;
+        if (!d || ![d.summarizing containsObject:sid]) return; // stopped meanwhile
+        [d.summarizing removeObject:sid];
+        Session *now = session_by_sid(sid);
+        if (!now) return;
+        if (summary) msg_save_summary(now, reply, summary);
+        [d.speaker say:line(summary ?: speech_local_summary(reply, zh)) sid:sid volume:now->vol urgent:urgent];
+    });
+}
+
+// New replies and new permission requests. With --auto-speak a reply is read out if you were at the
+// keyboard or mouse in the last 60 seconds, and a permission request jumps the queue. What was already
+// there when the panel started is never read out.
+- (void)watchForNews:(double)now {
+    Room *room = &g_room;
+    double idle = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
+    for (int i = 0; i < room->n; i++) {
+        Session *s = &room->s[i];
+        NSString *sid = sid_of(s);
+        double replyAt = s->unread ? s->burst_at : 0, waitAt = s->state == ST_WAIT ? s->state_t : 0;
+        NSArray *was = self.seen[sid];
+        self.seen[sid] = @[@(fmax(replyAt, [was[0] doubleValue])), @(fmax(waitAt, [was[1] doubleValue]))];
+        if (!was || !g_auto_speak || s->muted) continue;
+        if (waitAt > [was[1] doubleValue]) [self report:s urgent:YES];
+        else if (replyAt > [was[0] doubleValue] && idle < 60) { s->unread = 0; [self report:s urgent:NO]; }
+    }
+    (void)now;
 }
 
 // double click: a shockwave ring, and the iTerm2 pane of that session comes to the front
@@ -662,7 +767,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 
 // long press (or the hotkey): push-to-talk. Without voice input it only shows LISTENING, then TRANSCRIBING.
 - (void)corePressBegan:(NSString *)sid {
-    if (!session_by_sid(sid)) return;
+    if (!g_voice || !session_by_sid(sid)) return;
     if (self.pttSid) [self cancelPtt];
     self.pttSid = sid;
     self.overlay[sid] = @(ST_LISTEN);
@@ -692,7 +797,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     m.autoenablesItems = NO;
     NSString *reply = msg_text(s, @"reply");
     NSMenuItem *replay = [m addItemWithTitle:@"Replay" action:@selector(menuReplay:) keyEquivalent:@""];
-    replay.enabled = NO; // needs voice output
+    replay.enabled = g_voice && (reply != nil || msg_text(s, @"notice") != nil);
     NSMenuItem *copy = [m addItemWithTitle:@"Copy reply" action:@selector(menuCopy:) keyEquivalent:@""];
     copy.enabled = reply != nil;
     NSMenuItem *mute = [m addItemWithTitle:@"Mute this session" action:@selector(menuMute:) keyEquivalent:@""];
@@ -703,7 +808,13 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     return m;
 }
 
-- (void)menuReplay:(NSMenuItem *)i { (void)i; }
+- (void)menuReplay:(NSMenuItem *)i {
+    Session *s = session_by_sid(i.representedObject);
+    if (!s) return;
+    [self.speaker stop:i.representedObject];
+    s->unread = 0;
+    [self report:s urgent:NO];
+}
 - (void)menuCopy:(NSMenuItem *)i {
     Session *s = session_by_sid(i.representedObject);
     NSString *reply = s ? msg_text(s, @"reply") : nil;
@@ -734,8 +845,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         s->overlay = 0;
         int own = session_shown(s, now);
         s->overlay = ov ? ov.intValue : away && own != ST_WAIT ? ST_STANDBY : 0;
+        if (!ov && [self.speaker.speakingSid isEqualToString:sid_of(s)]) s->overlay = ST_SPEAK;
         float lvl = 0;
-        if (s->overlay == ST_LISTEN) { // a stand-in for the microphone level until voice input is there
+        if (s->overlay == ST_SPEAK) lvl = self.speaker.level;
+        else if (s->overlay == ST_LISTEN) { // a stand-in for the microphone level until voice input is there
             double t = now * 7.0 + i;
             lvl = (float)(0.45 + 0.3 * sin(t) * sin(t * 0.37 + 1.1) + 0.15 * sin(t * 2.9));
         }
@@ -854,7 +967,12 @@ static void usage(void) {
          "  --glow X  --core X  --events PATH   as in dodeca-core\n"
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
-         "  --tty PATH --launcher-pid N         (set by the ./dodeca-panel launcher)");
+         "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
+         "  --voice-id ID      voice for spoken reports: an identifier or a language (default zh-TW)\n"
+         "  --rate X           speaking rate 0..1 (default 0.5)\n"
+         "  --auto-speak       read a new reply out on its own if you were active in the last 60 s\n"
+         "  --summarize claude summarize replies with claude -p (15 s timeout) instead of the first sentences\n"
+         "  --tty PATH --launcher-pid N --claude PATH   (set by the ./dodeca-panel launcher)");
 }
 
 int main(int argc, char **argv) {
@@ -879,6 +997,12 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--events") && v) { events = v; i++; }
             else if (!strcmp(a, "--tty") && v) { g_tty_path = v; i++; }
             else if (!strcmp(a, "--hotkey") && v) { g_hotkey = v; i++; }
+            else if (!strcmp(a, "--voice-id") && v) { g_voice_id = @(v); i++; }
+            else if (!strcmp(a, "--rate") && v) { g_rate = (float)atof(v); i++; }
+            else if (!strcmp(a, "--voice")) g_voice = 1;
+            else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
+            else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
+            else if (!strcmp(a, "--claude") && v) { g_claude = @(v); i++; }
             else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
             else if (!strcmp(a, "--launcher-pid") && v) { g_launcher_pid = atoi(v); i++; }
             else if (!strcmp(a, "--bg") && v) {
@@ -890,6 +1014,11 @@ int main(int argc, char **argv) {
             else { usage(); return strcmp(a, "--help") && strcmp(a, "-h") ? 2 : 0; }
         }
         if (g_font_size < 6) g_font_size = 6;
+        if (g_summarize_claude && !g_claude) { // started without the launcher: look where it is usually installed
+            for (NSString *c in @[@"~/.local/bin/claude", @"/opt/homebrew/bin/claude", @"/usr/local/bin/claude"])
+                if ([[NSFileManager defaultManager] isExecutableFileAtPath:c.stringByExpandingTildeInPath]) { g_claude = c.stringByExpandingTildeInPath; break; }
+        }
+        if (g_summarize_claude && !g_claude) { fprintf(stderr, "dodeca-panel: claude not found, using the local summary\n"); g_summarize_claude = 0; }
         if (!shape_make(&g_shape, shape)) { fprintf(stderr, "unknown shape: %s\n", shape); return 2; }
         if (!events) {
             snprintf(events_default, sizeof events_default, "%s/.dodeca-core/events.jsonl", home);

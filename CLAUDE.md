@@ -37,6 +37,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `src/render.c`: draws into a float RGB `Canvas`.
 - `src/main.c`: terminal main loop, the output modes (kitty / iTerm2 inline PNG / half-block cells), options, `--snapshot`.
 - `mac/panel.m`: the floating panel. It reuses `events.c`, `geom.c`, `session.c` and `render.c`, but not `main.c`.
+- `mac/speech.m`: the panel's voice output: Markdown cleanup, the local summary, the one-at-a-time `Speaker` (`AVSpeechSynthesizer`), and the background `claude -p` summary (hooks off via `--settings`, so it never shows up as a session). Never call `claude` from the hook.
 - `hook.py`, `install_hooks.py`: the Claude Code hook and its installer (`--rich` sets `DODECA_RICH=1`).
 - `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`.
 
