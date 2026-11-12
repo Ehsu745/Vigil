@@ -94,7 +94,7 @@ extern const Carry CARRY;
 
 /* Left alone, a core is not still: now and then it does something small on its own, like a living thing.
  * Each behaviour ("whim") is a row of WHIMS in session.c. */
-enum { W_NONE, W_LOOK, W_PEEK, W_HOP, W_TWIRL, W_SHIVER, W_BLINK, W_YAWN, W_SIGH,
+enum { W_NONE, W_LOOK, W_PEEK, W_TWIRL, W_SHIVER, W_BLINK,
        W_ALIGN, W_STEP, W_UNFOLD, W_SCAN, W_SPIKE, W_CRAZY, /* geometric ones, played by motion.c */
        W_N };
 typedef struct {
