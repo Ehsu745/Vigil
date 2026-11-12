@@ -313,15 +313,18 @@ static void draw_trail(Canvas *c, Clip cl, const Proj *P, const Motion *mo, floa
 }
 /* the void, its dust disc, nebula light and a few stars, drawn over the collapsed shell */
 static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, float R, float ks, double t) {
-    /* rh0: the void as it opens; once the shell is swallowed (grow) it widens until its edge (1.3 rh) is 0.85 of the
-     * shell, and the dust disc's inner rim widens with it while its outer rim stays (so it stays inside the tile) */
+    /* rh0: the void as it opens; once the shell is swallowed (grow) the whole picture grows with it, the same tilt
+     * and proportions, until the void's edge (1.3 rh) is 0.85 of the shell. Only the dust disc's faint outer tail is
+     * drawn in, so it ends before the tile's edge (a full-size disc would be cut off square) */
     float hb = mo->hole, g0 = clamp01(mo->rs.hole.grow), gr = g0 * g0 * (3 - 2 * g0), rh0 = R * 0.3f * (1 + 0.25f * hb), rh = rh0 + (R * 0.85f / 1.3f - rh0) * gr;
     float tilt = 0.36f, rotA = -0.42f, ca = cosf(rotA), sa = sinf(rotA);
+    float dmax = R * 1.3f / rh, knee = 1.6f; /* the dust's reach, in rh: 3.2 as it opens; beyond the knee squeezed to fit */
+    float neb = fminf(rh, R * 0.5f);         /* the nebula light grows too, but stays inside the tile */
     const Col VIOLET = {0.56f, 0.32f, 1}, MAGENTA = {1, 0.3f, 0.82f}, PALE = {0.86f, 0.8f, 1}, DEEP = {0.28f, 0.16f, 0.7f};
     for (int i = 0; i < 3; i++) { /* nebula light, slowly drifting round */
         float a = (float)t * 0.05f + i * 2.1f;
         Col col = i == 1 ? MAGENTA : i == 2 ? DEEP : VIOLET;
-        blob(c, cl, ox + cosf(a) * rh0 * 0.8f, oy + sinf(a) * rh0 * 0.6f, rh0 * (1.9f + 0.3f * i), col, 0.13f * hb, col, 0.12f * hb, 0.02f); /* (kept inside the tile) */
+        blob(c, cl, ox + cosf(a) * neb * 0.8f, oy + sinf(a) * neb * 0.6f, neb * (1.9f + 0.3f * i), col, 0.13f * hb, col, 0.12f * hb, 0.02f); /* (kept inside the tile) */
     }
     for (int front = 0; front < 2; front++) {
         if (front) { /* the void (light taken away: see-through on the desktop), then its violet haze */
@@ -343,7 +346,9 @@ static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, 
             const Dust *d = &mo->rs.hole.dust[i];
             float sn = sinf(d->a);
             if ((sn > 0) != front) continue;
-            float rin = 1.05f * rh, rout = fmaxf(3.2f * rh0, rin * 1.15f), rr = d->r * rh0 * (1 - gr) + (rin + (d->r - 1.05f) / 2.15f * (rout - rin)) * gr;
+            float dr = d->r;
+            if (dmax < 3.2f && dr > knee) dr = knee + (dr - knee) * fmaxf(0, dmax - knee) / (3.2f - knee);
+            float rr = dr * rh;
             float x = cosf(d->a) * rr, y = sn * rr * tilt;
             float al = hb * 0.8f * clamp01((3.2f - d->r) / 1.2f) * (front ? 0.9f : 0.55f);
             Col col = d->r < 1.6f ? mix(PALE, VIOLET, clamp01((d->r - 1.15f) / 0.45f)) : mix(VIOLET, MAGENTA, clamp01((d->r - 1.6f) / 1.2f));
@@ -353,7 +358,7 @@ static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, 
     for (int i = 0; i < NSTAR; i++) { /* a few faint stars, holding still */
         const float *st = mo->rs.hole.star[i];
         float x = st[0] * R, y = st[1] * R;
-        if (sqrtf(x * x + y * y) < fmaxf(rh0 * 2, rh * 1.5f)) continue;
+        if (sqrtf(x * x + y * y) < rh * 2) continue;
         disc(c, cl, ox + x, oy + y, st[2] * 0.8f * ks, PALE, hb * (0.4f + 0.1f * sinf((float)t * 0.4f + st[3])) * 0.6f);
     }
 }
