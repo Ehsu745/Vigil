@@ -87,6 +87,21 @@ sh mac/build.sh
 - 想退回終端機窗格版：`export DODECA_PANE_MODE=terminal`。
 - 核心會對滑鼠和快捷鍵起反應：見[互動與語音](#互動與語音浮動面板)。
 
+## Windows（WSL）
+
+在 Windows 上，請在 WSL 裡跑 Claude Code；hook 和終端機版本在那裡跟 Linux 一樣能用（`sudo apt install build-essential zlib1g-dev`，然後在 WSL 裡 `make` 和 `python3 install_hooks.py --rich --apply`）。浮動面板是原生的 Windows 程式，透過 WSL 的 `\\wsl.localhost` 共用讀同一個事件檔：
+
+```sh
+sudo apt install mingw-w64      # 只要一次，在 WSL 裡
+sh win/build.sh                 # 產生 vigil-panel.exe 和啟動腳本 ./vigil-win
+./vigil-win                     # 在 WSL 裡：用 ~/.dodeca-core/events.jsonl 啟動面板；Ctrl-C 結束
+./vigil-win --demo              # 假的 session
+```
+
+預設是單核心模式，跟 Mac 一樣：焦點 session 是一顆大核心，其他 session 以小衛星繞著它，放在一個小小的半透明視窗裡，永遠在最上層，不會搶焦點，點在核心以外的地方會傳到後面的視窗。核心會像 macOS 的單核心模式一樣跟著消息走（先是需要你的 session，否則是最新回覆的那個）；點一下核心，或用右鍵選單的 **Session**，可以把它固定住。關掉 **Show other sessions**（或 `--no-others`）就只剩大核心。`--all` 或 **Ctrl+Alt+C** 切換成所有核心：每顆核心是自己的小視窗，一開始排在右緣一列，每顆都可以各自放到任何地方。
+
+Alt 等於 Mac 上的 ⌥：**Alt 拖曳**可以把整團（單核心）或那一顆核心（所有核心）移到螢幕任何地方；**Alt 點一下**把它拿起來，下一次在任何地方點擊就放下。位置依螢幕大小記在 `~/.dodeca-core/panel-position-win.json`（每顆核心依資料夾名稱），選單裡的 **Reset position(s)** 會把它們忘掉。指著核心一下會出現文字框：名稱和狀態，接著是最後一則回覆，需要你的時候則是權限通知（要用 `--rich` 的 hook）。指著核心停 2 秒，或拿著它走，會畫出對焦框（六種樣式，跟 Mac 一樣）。一段時間沒有輸入（預設 2 分鐘），每顆核心都顯示 STANDBY，需要你的那顆除外；回來時，有未讀回覆的會閃一下。滑鼠滾輪在核心上可以捲動文字框裡較長的回覆（核心也會跟著轉）。**雙擊**核心可以在文字框下方輸入回覆：Enter 送出，Shift+Enter 換行，Esc 關閉並保留草稿。把圖片檔（png、jpg、gif、webp）拖到核心或那個輸入框上就會一起送出：它們以 WSL 路徑（`/mnt/c/...`）送進去，Claude Code 會當成圖片讀取；輸入框空著時按 Backspace 會拿掉最後一張。如果 Claude Code 在 WSL 的 tmux 裡執行，回覆會送進那個 tmux pane（`--rich` 的 hook 會記下 pane）；否則終端機會被叫到最前面，文字以一行打進去。右鍵點核心有 **Reply**、**Copy reply** 和 **Bring to front**：這裡沒有 iTerm2，所以它會叫出標題裡有資料夾名稱的終端機或 VS Code 視窗，否則是最近用過的 Windows Terminal 視窗，但無法選到分頁。**Settings** 有文字框的位置（核心旁邊，或螢幕中間）和字型（預設是終端機的等寬字型，讓回覆的排列和 Claude Code 裡一樣，或 Segoe UI）、標籤（所有核心模式下每顆核心上方的名稱和狀態）、文字大小、核心大小（中間亮的核心）、面板大小（核心在螢幕上多大）、光暈、形狀、對焦框、離開時間、重力（主核心把小核心拉在軌道上的力道：搬動時它們沿著軌道滑到後方跟著走）和 Show other sessions；選了立刻生效，記在 `~/.dodeca-core/panel-settings-win.json`，在按 **Use launch options again** 之前優先於啟動選項。其他也都有：所有動作、鎖定、衝撞防禦、按壓、拖曳轉動、雙擊光圈。還沒有：語音；iTerm2 相關功能在 Windows 上沒有對應。Windows Terminal 無法顯示 kitty 或 iTerm2 的影像，所以終端機版本在那裡用半格字元繪製。
+
 ## 互動與語音（浮動面板）
 
 `vigil-panel` 裡的核心會對滑鼠和一個全域快捷鍵起反應。面板仍然不會搶走 iTerm2 的鍵盤焦點，點在核心圓形外殼以外的地方也照樣傳到終端機。說話和按住說話要加 `--voice` 才會開；沒加的話，單擊只會把回覆標成已讀，長按核心沒有作用。`./vigil-panel --demo --voice` 可以用假的 session 試下面每一項（加 `--away 10` 可以很快看到待命狀態）。

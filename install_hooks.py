@@ -29,7 +29,8 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse"}
 
 def is_ours(entry):
     cmds = [h.get("command", "") for h in entry.get("hooks", [])]
-    return any(c in (COMMAND, RICH_COMMAND, PANE_COMMAND) or (("vigil" in c or "dodeca-core" in c) and ("hook.py" in c or "open_pane.sh" in c))  # (dodeca-core: the old name) for c in cmds)
+    # ours: one of our commands, or any hook.py / open_pane.sh under vigil (or dodeca-core, the old name)
+    return any(c in (COMMAND, RICH_COMMAND, PANE_COMMAND) or (("vigil" in c or "dodeca-core" in c) and ("hook.py" in c or "open_pane.sh" in c)) for c in cmds)
 
 
 def merge(cfg, remove, pane, rich):

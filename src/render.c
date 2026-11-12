@@ -30,15 +30,26 @@ void canvas_bytes(const Canvas *c, uint8_t *rgb, Col bg) {
 }
 
 /* For a see-through window: alpha is the brightest channel, so dark pixels let what is behind show and the
- * glow lies over it. The colour is at most alpha, which is what "premultiplied" asks for. */
+ * glow lies over it. The colour is at most alpha, which is what "premultiplied" asks for.
+ * The faint outer glow spans only a few of the 256 steps, so plain rounding draws it as rings; a 4×4 ordered
+ * dither (the same offset for all three channels, so alpha stays the brightest of them) turns the steps into
+ * a smooth fall-off. */
 void canvas_rgba(const Canvas *c, uint8_t *rgba) {
-    size_t n = (size_t)c->w * (size_t)c->h;
-    for (size_t i = 0; i < n; i++) {
-        float r = c->p[i * 3], g = c->p[i * 3 + 1], b = c->p[i * 3 + 2];
-        r = r < 0 ? 0 : r > 1 ? 1 : r; g = g < 0 ? 0 : g > 1 ? 1 : g; b = b < 0 ? 0 : b > 1 ? 1 : b;
-        float a = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        rgba[i * 4] = (uint8_t)(r * 255.0f + 0.5f); rgba[i * 4 + 1] = (uint8_t)(g * 255.0f + 0.5f);
-        rgba[i * 4 + 2] = (uint8_t)(b * 255.0f + 0.5f); rgba[i * 4 + 3] = (uint8_t)(a * 255.0f + 0.5f);
+    static const float BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    for (int y = 0; y < c->h; y++) {
+        const float *p = c->p + (size_t)y * c->w * 3;
+        uint8_t *o = rgba + (size_t)y * c->w * 4;
+        const float *row = BAYER + (y & 3) * 4;
+        for (int x = 0; x < c->w; x++, p += 3, o += 4) {
+            float d = (row[x & 3] + 0.5f) / 16.0f, v[3];
+            for (int k = 0; k < 3; k++) {
+                float q = p[k] * 255.0f + d;
+                v[k] = q < 0 ? 0 : q > 255 ? 255 : q;
+            }
+            uint8_t r = (uint8_t)v[0], g = (uint8_t)v[1], b = (uint8_t)v[2];
+            o[0] = r; o[1] = g; o[2] = b;
+            o[3] = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        }
     }
 }
 
