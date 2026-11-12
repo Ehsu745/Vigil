@@ -34,12 +34,17 @@ typedef struct {
 int shape_make(Shape *s, const char *name); /* "dodeca" "bucky" "geo2" "geo3"; 0 if the name is unknown */
 
 /* ---- session.c: one polyhedron per Claude Code session ---------------------------------------- */
-enum { ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_N };
+enum {
+    ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP,  /* from the events */
+    ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY,           /* overlays only the panel sets (Session.overlay) */
+    ST_N
+};
 extern const char *STATE_NAME[ST_N];
 
 typedef struct {
     float rot, core, hz, depth, edge, flow, hr, glitch;
     Col col, halo, line, eh; /* core body, glow around the core, thin edge line, edge halo */
+    float lc, lh;            /* how much Session.level (speech or microphone) drives core brightness / glow size */
 } Look;
 extern const Look LOOKS[ST_N];
 
@@ -52,6 +57,15 @@ typedef struct {
     float ease;   /* how fast it reacts (1/s) */
 } Hover;
 extern const Hover HOVER;
+
+/* the other mouse reactions (panel only) */
+typedef struct {
+    float unread_hz, unread_amp; /* the soft, regular flash of a core whose reply is not read yet */
+    float ring_for;              /* seconds the double-click shockwave ring takes */
+    float vol_for;               /* seconds the shell shows the speech volume after a scroll */
+    float coast;                 /* how fast a flung shell slows back to its own rotation (1/s) */
+} Touch;
+extern const Touch TOUCH;
 
 typedef struct { int e, dir; float t, sp; } Pulse;
 
@@ -68,6 +82,13 @@ typedef struct {
     float hover_to, look_x_to, look_y_to; /* 1 while pointed at; cursor offset from the centre, -1..1, y down */
     float hover, look_x, look_y;
     int unread; /* a reply arrived since the last prompt (only with DODECA_RICH; the panel reads the text) */
+    /* set by the panel only */
+    int overlay;           /* a panel state (ST_SPEAK, ...) shown instead of the event state; 0 = none */
+    float level;           /* 0..1 speech or microphone level, see Look.lc / Look.lh */
+    double ring_at, vol_at;/* when the double-click ring started / the volume last changed */
+    float vol;             /* speech volume 0..1 */
+    int muted, held;       /* never speaks on its own / being dragged by the mouse */
+    float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */
 } Session;
 
 typedef struct { Session s[MAX_SESS]; int n; } Room;

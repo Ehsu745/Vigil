@@ -1,8 +1,8 @@
 // dodeca-panel: the same polyhedra as dodeca-core, in a floating panel on the right edge of the screen.
 //
 // The panel has no title bar, never takes the keyboard, lets clicks through (except on a core, see
-// trackMouse:), and is see-through where the picture is dark, so it can sit over a full-screen iTerm2 window: an empty terminal pane underneath keeps
-// that part of the screen free. When started inside that pane (open_pane.sh does this) it sizes itself to
+// trackMouse:), and is see-through where the picture is dark, so it can sit over a full-screen iTerm2
+// window: an empty terminal pane underneath keeps that part of the screen free. When started inside that pane (open_pane.sh does this) it sizes itself to
 // the pane and quits when the pane is closed.
 //
 // Build: sh mac/build.sh. That makes DodecaPanel.app and the launcher script ./dodeca-panel, which starts the
@@ -10,6 +10,7 @@
 // the terminal) and stays in the pane: it passes the pane's terminal with --tty and its own pid with
 // --launcher-pid, and the app quits when the launcher does (the pane was closed, or Ctrl-C).
 #import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h> // RegisterEventHotKey: global hotkeys without the Accessibility permission
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -34,6 +35,18 @@ static struct termios g_old_tty;
 static int g_tty = -1;          // the pane's terminal while we keep it blank (stdout, or --tty), else -1
 static int g_launcher_pid;      // --launcher-pid: quit when this process ends
 static const char *g_tty_path;  // --tty
+static double g_away_after = 120;               // --away: seconds without keyboard or mouse input until "away"
+static const char *g_hotkey = "ctrl+opt+v";     // --hotkey: push-to-talk to the session that most needs you
+
+static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
+
+static Session *session_by_sid(NSString *sid) {
+    Room *r = g_room.n ? &g_room : &g_ghost;
+    for (int i = 0; sid && i < r->n; i++) if ([sid isEqualToString:@(r->s[i].sid)]) return &r->s[i];
+    return NULL;
+}
+
+static NSString *sid_of(const Session *s) { return [NSString stringWithUTF8String:s->sid] ?: @""; }
 
 static double wall(void) {
     struct timeval tv;
@@ -102,9 +115,25 @@ static NSString *msg_text(const Session *s, NSString *field) {
 }
 
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
+// what the panel does when a core is clicked, held, ... (AppDelegate)
+@protocol CoreActions
+- (void)coreClicked:(NSString *)sid;
+- (void)coreDoubleClicked:(NSString *)sid;
+- (void)corePressBegan:(NSString *)sid; // held down longer than PRESS_AFTER: push-to-talk
+- (void)corePressEnded:(NSString *)sid;
+- (NSMenu *)menuForCore:(NSString *)sid;
+@end
+
+static const double PRESS_AFTER = 0.35; // seconds: a press held longer is push-to-talk, not a click
+static const CGFloat DRAG_AFTER = 4;    // points the mouse moves before a press becomes a drag
+static const float DRAG_TURN = 0.012f;  // radians per point dragged
+
 @interface PanelView : NSView
+@property(weak) id<CoreActions> actions;
+@property(readonly) BOOL busy; // in the middle of a press or drag: keep taking mouse events
 - (BOOL)anythingDue:(double)now;
 - (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center;
+- (void)cancelPress;
 @end
 
 @implementation PanelView {
@@ -114,11 +143,117 @@ static NSString *msg_text(const Session *s, NSString *field) {
     int _lastCount;
     NSRect _core[MAX_SESS + 1]; // where each polyhedron was last drawn, for coreAt:
     int _coreN;
+    // the gesture in progress
+    NSString *_downSid, *_clickSid;
+    NSPoint _downAt, _dragAt;
+    double _dragTime;
+    float _velX, _velY;
+    BOOL _dragging, _pressing;
+    NSTimer *_pressTimer, *_clickTimer;
 }
 
 - (BOOL)isOpaque { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; } // a click on a core never has to activate the app first
-- (void)mouseDown:(NSEvent *)e { (void)e; }                     // on a core: taken, not passed to the window below
+- (BOOL)busy { return _downSid != nil; }
+
+- (NSString *)sidAt:(NSEvent *)e {
+    int i = [self coreAt:[self convertPoint:e.locationInWindow fromView:nil] look:NULL center:NULL];
+    const Room *r = shown_room();
+    return i >= 0 && i < r->n ? sid_of(&r->s[i]) : nil;
+}
+
+// A press is told apart by what happens next: moved more than DRAG_AFTER = drag, held longer than
+// PRESS_AFTER = push-to-talk, released before that = click. A single click is only acted on once the
+// system's double-click time has passed without a second one, so a double click never starts with a single.
+- (void)mouseDown:(NSEvent *)e {
+    NSString *sid = [self sidAt:e];
+    if (!sid) return;
+    if (e.clickCount >= 2 && _clickTimer.valid && [sid isEqualToString:_clickSid]) {
+        [_clickTimer invalidate];
+        _clickTimer = nil;
+        [self.actions coreDoubleClicked:sid];
+        return;
+    }
+    [_clickTimer invalidate]; // a click on another core: the earlier single click still counts
+    if (_clickTimer) [self.actions coreClicked:_clickSid];
+    _clickTimer = nil;
+    _downSid = sid;
+    _downAt = _dragAt = e.locationInWindow;
+    _dragTime = e.timestamp;
+    _dragging = _pressing = NO;
+    __weak PanelView *me = self;
+    _pressTimer = [NSTimer scheduledTimerWithTimeInterval:PRESS_AFTER repeats:NO block:^(NSTimer *t) {
+        (void)t;
+        PanelView *v = me;
+        if (!v || v->_dragging || !v->_downSid) return;
+        v->_pressing = YES;
+        [v.actions corePressBegan:v->_downSid];
+    }];
+}
+
+- (void)mouseDragged:(NSEvent *)e {
+    if (!_downSid || _pressing) return;
+    NSPoint p = e.locationInWindow;
+    if (!_dragging && hypot(p.x - _downAt.x, p.y - _downAt.y) < DRAG_AFTER) return;
+    Session *s = session_by_sid(_downSid);
+    if (!s) return;
+    if (!_dragging) { _dragging = YES; [_pressTimer invalidate]; }
+    float dx = (float)(p.x - _dragAt.x), dy = (float)(p.y - _dragAt.y), dt = (float)(e.timestamp - _dragTime);
+    s->held = 1;
+    s->ay += dx * DRAG_TURN; // the shell follows the mouse like a ball under the hand
+    s->ax -= dy * DRAG_TURN;
+    if (dt > 0.001f) { _velX = -dy * DRAG_TURN / dt; _velY = dx * DRAG_TURN / dt; }
+    _dragAt = p;
+    _dragTime = e.timestamp;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent *)e {
+    [_pressTimer invalidate];
+    _pressTimer = nil;
+    NSString *sid = _downSid;
+    _downSid = nil;
+    if (!sid) return;
+    if (_pressing) { _pressing = NO; [self.actions corePressEnded:sid]; return; }
+    if (_dragging) { // let go: it keeps spinning the way it was thrown and slows back to its own rotation
+        _dragging = NO;
+        Session *s = session_by_sid(sid);
+        if (s) {
+            BOOL thrown = e.timestamp - _dragTime < 0.1;
+            s->held = 0;
+            s->spin_x = thrown ? fmaxf(-8, fminf(8, _velX)) : 0;
+            s->spin_y = thrown ? fmaxf(-8, fminf(8, _velY)) : 0;
+        }
+        return;
+    }
+    _clickSid = sid;
+    __weak PanelView *me = self;
+    _clickTimer = [NSTimer scheduledTimerWithTimeInterval:[NSEvent doubleClickInterval] repeats:NO block:^(NSTimer *t) {
+        (void)t;
+        PanelView *v = me;
+        if (!v) return;
+        v->_clickTimer = nil;
+        [v.actions coreClicked:v->_clickSid];
+    }];
+}
+
+- (void)rightMouseDown:(NSEvent *)e {
+    NSString *sid = [self sidAt:e];
+    NSMenu *menu = sid ? [self.actions menuForCore:sid] : nil;
+    if (menu) [NSMenu popUpContextMenu:menu withEvent:e forView:self];
+}
+
+// the wheel sets this core's speech volume; the shell shows it for a moment
+- (void)scrollWheel:(NSEvent *)e {
+    Session *s = session_by_sid([self sidAt:e]);
+    if (!s) return;
+    float step = (float)e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.004f : 0.05f);
+    s->vol = fmaxf(0, fminf(1, s->vol + step));
+    s->vol_at = wall();
+}
+
+// cancels a press in progress (Esc during push-to-talk)
+- (void)cancelPress { [_pressTimer invalidate]; _pressTimer = nil; _pressing = NO; _downSid = nil; }
 
 // The session whose core is under p (view coordinates), or -1. Only the round shell counts, not the
 // square it is drawn in, so clicks next to a core still reach the terminal. look gets the offset from the
@@ -135,7 +270,7 @@ static NSString *msg_text(const Session *s, NSString *field) {
     return -1;
 }
 
-- (const Room *)shown { return g_room.n ? &g_room : &g_ghost; }
+- (const Room *)shown { return shown_room(); }
 
 - (BOOL)anythingDue:(double)now {
     const Room *r = [self shown];
@@ -275,7 +410,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 @end
 
 // ---- the application ------------------------------------------------------------------------------------
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions>
 @property(strong) NSPanel *panel;
 @property(strong) PanelView *view;
 @property(strong) NSTimer *timer;
@@ -283,8 +418,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
 @property double last, emptySince;
 @property(strong) NSPanel *tip;
 @property(strong) TipView *tipView;
-@property(copy) NSString *hoverSid;
-@property double hoverSince, sizeCheck;
+@property(copy) NSString *hoverSid, *pttSid; // pttSid: the session push-to-talk is for
+@property double hoverSince, sizeCheck, pttEndedAt;
+@property BOOL away, pttByHotkey;
+@property(strong) NSMutableDictionary<NSString *, NSNumber *> *overlay; // sid -> a panel state shown instead of its own
 @property unsigned short paneCols, paneRows;
 @end
 
@@ -349,6 +486,9 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     p.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle; // may sit in a full-screen Space
     if (g_all_spaces) p.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
     self.view = [[PanelView alloc] initWithFrame:NSMakeRect(0, 0, 290, 600)];
+    self.view.actions = self;
+    self.overlay = [NSMutableDictionary dictionary];
+    [self registerHotkeys];
     p.contentView = self.view;
     self.panel = p;
     [self place];
@@ -389,6 +529,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
     }
     [self trackMouse:now];
+    [self updateOverlays:now];
     if (g_launcher_pid > 0 && g_tty >= 0 && now - self.sizeCheck > 0.5) { // no SIGWINCH outside the pane's process group
         struct winsize ws = {0};
         self.sizeCheck = now;
@@ -423,7 +564,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
         s->hover_to = i == hit;
         if (i == hit) { s->look_x_to = (float)look.x; s->look_y_to = (float)look.y; }
     }
-    BOOL ignore = hit < 0;
+    BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
 
     NSString *sid = hit >= 0 ? [NSString stringWithUTF8String:room->s[hit].sid] : nil;
@@ -471,6 +612,228 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 340;
     if (!self.tip.visible) [self.tip orderFrontRegardless];
 }
 
+// ---- what clicks, presses and keys do ------------------------------------------------------------------
+
+// single click: mark the reply as read and show it at once (with voice output: play / stop it)
+- (void)coreClicked:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (!s) return;
+    s->unread = 0;
+    self.hoverSince = 0; // the tooltip shows without the usual pause
+}
+
+// double click: a shockwave ring, and the iTerm2 pane of that session comes to the front
+- (void)coreDoubleClicked:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (!s) return;
+    s->ring_at = wall();
+    s->unread = 0;
+    NSString *iterm = msg_text(s, @"iterm");
+    NSRange colon = [iterm rangeOfString:@":"];
+    if (colon.location != NSNotFound) iterm = [iterm substringFromIndex:colon.location + 1]; // "w0t0p1:UUID" -> UUID
+    if (iterm.length) [self focusItermSession:iterm];
+}
+
+- (void)focusItermSession:(NSString *)uuid {
+    static NSString *script =
+        @"on run argv\n"
+         "  tell application \"iTerm2\"\n"
+         "    repeat with w in windows\n"
+         "      repeat with t in tabs of w\n"
+         "        repeat with s in sessions of t\n"
+         "          if (id of s as text) is (item 1 of argv) then\n"
+         "            select w\n"
+         "            tell t to select\n"
+         "            tell s to select\n"
+         "            activate\n"
+         "            return\n"
+         "          end if\n"
+         "        end repeat\n"
+         "      end repeat\n"
+         "    end repeat\n"
+         "  end tell\n"
+         "end run\n";
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    task.arguments = @[@"-e", script, uuid];
+    task.standardOutput = task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    [task launchAndReturnError:NULL]; // asynchronous: the panel never waits for iTerm2
+}
+
+// long press (or the hotkey): push-to-talk. Without voice input it only shows LISTENING, then TRANSCRIBING.
+- (void)corePressBegan:(NSString *)sid {
+    if (!session_by_sid(sid)) return;
+    if (self.pttSid) [self cancelPtt];
+    self.pttSid = sid;
+    self.overlay[sid] = @(ST_LISTEN);
+    [self setEscapeHotkey:YES];
+}
+
+- (void)corePressEnded:(NSString *)sid {
+    if (![sid isEqualToString:self.pttSid]) return;
+    [self setEscapeHotkey:NO];
+    self.overlay[sid] = @(ST_TRANSCRIBE);
+    self.pttEndedAt = wall();
+}
+
+// Esc while recording: nothing is sent, the glow shrinks and fades back
+- (void)cancelPtt {
+    if (!self.pttSid) return;
+    [self.overlay removeObjectForKey:self.pttSid];
+    self.pttSid = nil;
+    [self setEscapeHotkey:NO];
+    [self.view cancelPress];
+}
+
+- (NSMenu *)menuForCore:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (!s || !strcmp(s->sid, "ghost")) return nil;
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    m.autoenablesItems = NO;
+    NSString *reply = msg_text(s, @"reply");
+    NSMenuItem *replay = [m addItemWithTitle:@"Replay" action:@selector(menuReplay:) keyEquivalent:@""];
+    replay.enabled = NO; // needs voice output
+    NSMenuItem *copy = [m addItemWithTitle:@"Copy reply" action:@selector(menuCopy:) keyEquivalent:@""];
+    copy.enabled = reply != nil;
+    NSMenuItem *mute = [m addItemWithTitle:@"Mute this session" action:@selector(menuMute:) keyEquivalent:@""];
+    mute.state = s->muted ? NSControlStateValueOn : NSControlStateValueOff;
+    [m addItem:[NSMenuItem separatorItem]];
+    [m addItemWithTitle:@"Bring to front" action:@selector(menuFront:) keyEquivalent:@""];
+    for (NSMenuItem *i in m.itemArray) { i.target = self; i.representedObject = sid; }
+    return m;
+}
+
+- (void)menuReplay:(NSMenuItem *)i { (void)i; }
+- (void)menuCopy:(NSMenuItem *)i {
+    Session *s = session_by_sid(i.representedObject);
+    NSString *reply = s ? msg_text(s, @"reply") : nil;
+    if (!reply) return;
+    [[NSPasteboard generalPasteboard] clearContents];
+    [[NSPasteboard generalPasteboard] setString:reply forType:NSPasteboardTypeString];
+}
+- (void)menuMute:(NSMenuItem *)i { Session *s = session_by_sid(i.representedObject); if (s) s->muted = !s->muted; }
+- (void)menuFront:(NSMenuItem *)i { [self coreDoubleClicked:i.representedObject]; }
+
+// The panel's own states for each session, and the level that drives them. Away (no keyboard or mouse
+// input for --away seconds, asked of the system, which needs no permission): every core shows STANDBY,
+// except one that needs you. Back again: cores with an unread reply flare up once to get your attention.
+- (void)updateOverlays:(double)now {
+    double idle = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
+    BOOL away = g_away_after > 0 && idle > g_away_after;
+    Room *room = g_room.n ? &g_room : &g_ghost;
+    if (self.away && !away)
+        for (int i = 0; i < room->n; i++) if (room->s[i].unread) room->s[i].burst_at = now;
+    self.away = away;
+    if (self.pttSid && self.overlay[self.pttSid].intValue == ST_TRANSCRIBE && now - self.pttEndedAt > 1.2) {
+        [self.overlay removeObjectForKey:self.pttSid]; // (voice input replaces this with the real recognition)
+        self.pttSid = nil;
+    }
+    for (int i = 0; i < room->n; i++) {
+        Session *s = &room->s[i];
+        NSNumber *ov = self.overlay[sid_of(s)];
+        s->overlay = 0;
+        int own = session_shown(s, now);
+        s->overlay = ov ? ov.intValue : away && own != ST_WAIT ? ST_STANDBY : 0;
+        float lvl = 0;
+        if (s->overlay == ST_LISTEN) { // a stand-in for the microphone level until voice input is there
+            double t = now * 7.0 + i;
+            lvl = (float)(0.45 + 0.3 * sin(t) * sin(t * 0.37 + 1.1) + 0.15 * sin(t * 2.9));
+        }
+        s->level += (fmaxf(0, fminf(1, lvl)) - s->level) * 0.35f;
+    }
+    for (NSString *sid in self.overlay.allKeys) if (!session_by_sid(sid)) [self.overlay removeObjectForKey:sid];
+}
+
+// The session the hotkey talks to: one that needs you, else the one that finished last, else the one
+// active last.
+- (Session *)mostWanted {
+    Room *room = g_room.n ? &g_room : NULL;
+    Session *best = NULL;
+    for (int pass = 0; room && pass < 3 && !best; pass++) {
+        double bestT = -1e18;
+        for (int i = 0; i < room->n; i++) {
+            Session *s = &room->s[i];
+            double t = pass == 0 ? (s->state == ST_WAIT ? s->state_t : -1e19) : pass == 1 ? s->burst_at : s->last;
+            if (t > -1e8 && t > bestT) { bestT = t; best = s; }
+        }
+    }
+    return best;
+}
+
+// ---- global hotkeys (Carbon): push-to-talk, and Esc only while recording -----------------------------
+enum { HK_PTT = 1, HK_ESC = 2 };
+static EventHotKeyRef g_ptt_key, g_esc_key;
+
+static OSStatus hotkey_event(EventHandlerCallRef next, EventRef ev, void *user) {
+    (void)next;
+    EventHotKeyID id;
+    GetEventParameter(ev, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof id, NULL, &id);
+    AppDelegate *me = (__bridge AppDelegate *)user;
+    BOOL down = GetEventKind(ev) == kEventHotKeyPressed;
+    dispatch_async(dispatch_get_main_queue(), ^{ [me hotkey:(int)id.id down:down]; });
+    return noErr;
+}
+
+- (void)hotkey:(int)which down:(BOOL)down {
+    if (which == HK_ESC) { if (down) [self cancelPtt]; return; }
+    if (down) {
+        Session *s = [self mostWanted];
+        if (!s) { NSBeep(); return; }
+        self.pttByHotkey = YES;
+        [self corePressBegan:sid_of(s)];
+    } else if (self.pttByHotkey) {
+        self.pttByHotkey = NO;
+        if (self.pttSid) [self corePressEnded:self.pttSid];
+    }
+}
+
+// "ctrl+opt+v" -> modifiers and a virtual key code; NO if it does not parse
+static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
+    static const struct { const char *name; UInt32 code; } KEYS[] = {
+        {"space", kVK_Space}, {"return", kVK_Return}, {"enter", kVK_Return}, {"tab", kVK_Tab},
+        {"f1", kVK_F1}, {"f2", kVK_F2}, {"f3", kVK_F3}, {"f4", kVK_F4}, {"f5", kVK_F5}, {"f6", kVK_F6},
+        {"f7", kVK_F7}, {"f8", kVK_F8}, {"f9", kVK_F9}, {"f10", kVK_F10}, {"f11", kVK_F11}, {"f12", kVK_F12},
+        {"a", kVK_ANSI_A}, {"b", kVK_ANSI_B}, {"c", kVK_ANSI_C}, {"d", kVK_ANSI_D}, {"e", kVK_ANSI_E}, {"f", kVK_ANSI_F},
+        {"g", kVK_ANSI_G}, {"h", kVK_ANSI_H}, {"i", kVK_ANSI_I}, {"j", kVK_ANSI_J}, {"k", kVK_ANSI_K}, {"l", kVK_ANSI_L},
+        {"m", kVK_ANSI_M}, {"n", kVK_ANSI_N}, {"o", kVK_ANSI_O}, {"p", kVK_ANSI_P}, {"q", kVK_ANSI_Q}, {"r", kVK_ANSI_R},
+        {"s", kVK_ANSI_S}, {"t", kVK_ANSI_T}, {"u", kVK_ANSI_U}, {"v", kVK_ANSI_V}, {"w", kVK_ANSI_W}, {"x", kVK_ANSI_X},
+        {"y", kVK_ANSI_Y}, {"z", kVK_ANSI_Z}, {"0", kVK_ANSI_0}, {"1", kVK_ANSI_1}, {"2", kVK_ANSI_2}, {"3", kVK_ANSI_3},
+        {"4", kVK_ANSI_4}, {"5", kVK_ANSI_5}, {"6", kVK_ANSI_6}, {"7", kVK_ANSI_7}, {"8", kVK_ANSI_8}, {"9", kVK_ANSI_9},
+    };
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s", spec);
+    *mods = 0;
+    *key = UINT32_MAX;
+    for (char *tok = strtok(buf, "+"); tok; tok = strtok(NULL, "+")) {
+        for (char *c = tok; *c; c++) *c = (char)tolower((unsigned char)*c);
+        if (!strcmp(tok, "cmd") || !strcmp(tok, "command")) *mods |= cmdKey;
+        else if (!strcmp(tok, "opt") || !strcmp(tok, "option") || !strcmp(tok, "alt")) *mods |= optionKey;
+        else if (!strcmp(tok, "ctrl") || !strcmp(tok, "control")) *mods |= controlKey;
+        else if (!strcmp(tok, "shift")) *mods |= shiftKey;
+        else {
+            for (size_t i = 0; i < sizeof KEYS / sizeof KEYS[0]; i++) if (!strcmp(tok, KEYS[i].name)) *key = KEYS[i].code;
+            if (*key == UINT32_MAX) return NO;
+        }
+    }
+    return *key != UINT32_MAX && *mods != 0;
+}
+
+- (void)registerHotkeys {
+    EventTypeSpec types[] = {{kEventClassKeyboard, kEventHotKeyPressed}, {kEventClassKeyboard, kEventHotKeyReleased}};
+    InstallApplicationEventHandler(NewEventHandlerUPP(hotkey_event), 2, types, (__bridge void *)self, NULL);
+    if (!strcmp(g_hotkey, "none")) return;
+    UInt32 mods, key;
+    if (!parse_hotkey(g_hotkey, &mods, &key)) { fprintf(stderr, "dodeca-panel: cannot read --hotkey %s\n", g_hotkey); return; }
+    if (RegisterEventHotKey(key, mods, (EventHotKeyID){'dodc', HK_PTT}, GetApplicationEventTarget(), 0, &g_ptt_key) != noErr)
+        fprintf(stderr, "dodeca-panel: hotkey %s is taken by another app\n", g_hotkey);
+}
+
+// Esc is only ours while recording, so it never goes missing from the terminal otherwise
+- (void)setEscapeHotkey:(BOOL)on {
+    if (on && !g_esc_key) RegisterEventHotKey(kVK_Escape, 0, (EventHotKeyID){'dodc', HK_ESC}, GetApplicationEventTarget(), 0, &g_esc_key);
+    if (!on && g_esc_key) { UnregisterEventHotKey(g_esc_key); g_esc_key = NULL; }
+}
+
 - (void)applicationWillTerminate:(NSNotification *)note { (void)note; cleanup(); }
 @end
 
@@ -489,6 +852,8 @@ static void usage(void) {
          "  --all-spaces       follow you to every Space instead of staying in the one it was opened in\n"
          "  --always           with --all-spaces: stay visible when iTerm2 is not the app in front\n"
          "  --glow X  --core X  --events PATH   as in dodeca-core\n"
+         "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
+         "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
          "  --tty PATH --launcher-pid N         (set by the ./dodeca-panel launcher)");
 }
 
@@ -513,6 +878,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--core") && v) { g_core = (float)atof(v); i++; }
             else if (!strcmp(a, "--events") && v) { events = v; i++; }
             else if (!strcmp(a, "--tty") && v) { g_tty_path = v; i++; }
+            else if (!strcmp(a, "--hotkey") && v) { g_hotkey = v; i++; }
+            else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
             else if (!strcmp(a, "--launcher-pid") && v) { g_launcher_pid = atoi(v); i++; }
             else if (!strcmp(a, "--bg") && v) {
                 unsigned int rgb = 0;

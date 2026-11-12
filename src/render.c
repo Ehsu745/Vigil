@@ -190,8 +190,17 @@ static void text(Canvas *c, Clip cl, float cx, int y, const char *s, int fs, Col
 }
 
 static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, double now, float glow, float core_frac, int label) {
+    double t = now - s->created + s->phase; /* small numbers keep sin() precise */
     Look lit_look = s->cur; /* pointed at: a brighter shell */
     lit_look.edge *= 1 + HOVER.bright * 0.6f * s->hover;
+    lit_look.hr *= 1 + lit_look.lh * s->level * 0.15f; /* the glow grows with the microphone level */
+    float flash = 0, thick = 1;
+    if (s->unread && !s->overlay) { /* an unread reply: a slow, soft flash, as if waiting for leave to report */
+        flash = TOUCH.unread_amp * (0.5f - 0.5f * (float)cos(t * TOUCH.unread_hz * 6.283185));
+        lit_look.edge *= 1 + flash * 0.5f;
+    }
+    float vf = (float)(1 - (now - s->vol_at) / TOUCH.vol_for); /* after a scroll the shell shows the volume */
+    if (vf > 0) { thick = 1 + vf * (0.3f + 1.7f * s->vol - 1); lit_look.edge *= 1 + vf * (0.4f + 0.9f * s->vol - 1); }
     const Look *L = &lit_look;
     int tw = cl.x1 - cl.x0, th = cl.y1 - cl.y0;
     int fs = tw / 120 < 1 ? 1 : tw / 120, label_h = fs * 16;
@@ -199,7 +208,6 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float m = fminf((float)tw, (float)(th - label_h));
     float ox = cl.x0 + tw * 0.5f, oy = cl.y0 + (th - label_h) * 0.5f;
     float unit = m * SHELL_FRAC / CIRCUM, k = m / 600.0f;
-    double t = now - s->created + s->phase; /* small numbers keep sin() precise */
 
     /* the core */
     float gl = L->glitch;
@@ -207,11 +215,14 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float flick = 1 + 0.035f * (float)sin(t * 17.3) + 0.025f * (float)sin(t * 29.1 + 1.7);
     float burst = (float)(1 - (now - s->burst_at) / 1.4);
     if (burst < 0) burst = 0;
-    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) + burst * 0.8f;
+    float voice = (1 - L->lc) + L->lc * (0.35f + 1.3f * s->level); /* speaking: brightness follows the voice */
+    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
     float gx = ox + s->look_x * HOVER.gaze * CIRCUM * unit, gy = oy + s->look_y * HOVER.gaze * CIRCUM * unit; /* the core looks at the cursor */
     draw_core(c, cl, gx, gy, rc, L, inten);
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
+    float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
+    if (wave > 0 && wave <= 1) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
 
     /* the shell */
     float q[MAX_V][3];
@@ -229,7 +240,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     for (int i = 0; i < sh->ne; i++) {
         const float *a = q[sh->e[i][0]], *b = q[sh->e[i][1]];
         float depth = 0.3f + 0.7f * ((a[2] + b[2]) * 0.5f + CIRCUM) / (2 * CIRCUM); /* far edges are fainter */
-        float al = depth * L->edge, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f);
+        float al = depth * L->edge, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
         glow_line(c, cl, a[0], a[1], b[0], b[1], L->line, thin * al, L->eh, glow * sh->df * al, k);
     }
     for (int i = 0; i < sh->nv; i++) {

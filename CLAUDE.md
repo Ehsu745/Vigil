@@ -40,7 +40,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `hook.py`, `install_hooks.py`: the Claude Code hook and its installer (`--rich` sets `DODECA_RICH=1`).
 - `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`.
 
-To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts to the mouse (panel only) is the `HOVER` table next to it; the panel's hit test (`coreAt:` in `mac/panel.m`) uses the shell outline `SHELL_HIT` from `dodeca.h`. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
+To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts to the mouse (panel only) is the `HOVER` and `TOUCH` tables next to it, and the panel's own states (SPEAKING, LISTENING, TRANSCRIBING, STANDBY) are rows of `LOOKS` too: the panel sets them as `Session.overlay`, which `session_shown` puts first; the terminal never sets it. Don't hard-code looks in `panel.m`. The panel's hit test (`coreAt:`) uses the shell outline `SHELL_HIT` from `dodeca.h`; gestures are told apart in `PanelView` (press / drag / click / double-click) and acted on by `AppDelegate` through the `CoreActions` protocol. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
 
 ## Rules
 
