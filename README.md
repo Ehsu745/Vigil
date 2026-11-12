@@ -1,12 +1,14 @@
-# dodeca-core
+# Vigil
 
 **English** | [繁體中文](README.zh-TW.md)
+
+*Formerly dodeca-core. The data folder (`~/.dodeca-core`) and the `DODECA_*` variables keep their old names for now.*
 
 In your terminal, every running Claude Code session becomes a glowing polyhedron: a thin white wireframe shell, a blue glow, and a bright, sun-like core at the center. When a session's state changes, its color, spin speed and core brightness change with it.
 
 The approach and parts of the code (`hook.py`, `install_hooks.py`, and the event reading in `src/events.c`) are adapted from [zelvet-velvet/clawd-room](https://github.com/zelvet-velvet/clawd-room) (MIT License, Copyright (c) 2026 Zaviel). The polyhedron rendering, the macOS floating panel and the pane features are new to this project. See [LICENSE](LICENSE).
 
-![dodeca-core demo: three sessions changing state](assets/demo.gif)
+![Vigil demo: three sessions changing state](assets/demo.gif)
 
 ## States
 
@@ -53,10 +55,10 @@ python3 install_hooks.py --apply  # actually write it (makes a backup first)
 python3 install_hooks.py --pane --apply    # open the pane automatically whenever Claude Code starts
 ```
 
-When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits a pane off to the right of Claude Code's pane, runs `dodeca-core --pane --exit-when-empty` in it, shrinks it to 34 columns, and gives keyboard focus back to Claude Code. If a pane is already open it won't open another; the pane closes itself 15 seconds after the last session ends.
+When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits a pane off to the right of Claude Code's pane, runs `vigil --pane --exit-when-empty` in it, shrinks it to 34 columns, and gives keyboard focus back to Claude Code. If a pane is already open it won't open another; the pane closes itself 15 seconds after the last session ends.
 
 - Pane width: environment variable `DODECA_PANE_COLS` (default 34).
-- Shrinking the pane needs iTerm2's Python API (`pane_api.py`): AppleScript can split panes but can't resize them in a full-screen window. Two one-time steps: enable Settings > General > Magic > Enable Python API in iTerm2, then copy the script to iTerm2's scripts folder: `mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py` (after that, `open_pane.sh` keeps the copy up to date). Without this the pane is half the width; you can drag the divider yourself and the display follows.
+- Shrinking the pane needs iTerm2's Python API (`pane_api.py`): AppleScript can split panes but can't resize them in a full-screen window. Two one-time steps: enable Settings > General > Magic > Enable Python API in iTerm2, then copy the script to iTerm2's scripts folder: `mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py` (after that, `open_pane.sh` keeps the copy up to date). Without this the pane is half the width; you can drag the divider yourself and the display follows.
 - Debugging: `DODECA_PANE_DEBUG=1 sh open_pane.sh` runs in the foreground and shows iTerm2's responses.
 - Extra arguments: environment variable `DODECA_PANE_ARGS`, e.g. `"--shape geo2 --res 1200"`.
 - The first time it runs, macOS asks whether to allow controlling iTerm2; click Allow.
@@ -64,14 +66,14 @@ When installed with `--pane`, `SessionStart` also runs `open_pane.sh`: it splits
 
 ## Floating panel (macOS)
 
-`dodeca-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it (except on a core, see below), and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
+`vigil-panel` is a native-window version using the same rendering core: a borderless panel pinned to the right edge of the screen. It doesn't take keyboard focus, mouse clicks pass through it (except on a core, see below), and dark areas are transparent, so it can float over a full-screen iTerm2. The system composites it directly, without going through the terminal.
 
 ```sh
 sh mac/build.sh
-./dodeca-panel --demo              # try it on its own first, Ctrl-C to quit
+./vigil-panel --demo              # try it on its own first, Ctrl-C to quit
 ```
 
-`mac/build.sh` makes `DodecaPanel.app` and a small launcher script `./dodeca-panel`. The launcher starts the app through macOS (so the microphone and speech permissions used by the voice features belong to the app, not to your terminal), stays in the terminal until the app quits, and takes the same options. Ctrl-C or closing the terminal pane ends both. The app is signed ad-hoc, which changes with every build, so macOS asks for its permissions again after a rebuild; to avoid that, create a "Code Signing" certificate in Keychain Access once and build with `DODECA_SIGN_ID="certificate name" sh mac/build.sh`.
+`mac/build.sh` makes `Vigil.app` and a small launcher script `./vigil-panel`. The launcher starts the app through macOS (so the microphone and speech permissions used by the voice features belong to the app, not to your terminal), stays in the terminal until the app quits, and takes the same options. Ctrl-C or closing the terminal pane ends both. The app is signed ad-hoc, which changes with every build, so macOS asks for its permissions again after a rebuild; to avoid that, create a "Code Signing" certificate in Keychain Access once and build with `DODECA_SIGN_ID="certificate name" sh mac/build.sh`.
 
 Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to the right stays blank and just reserves the space; the panel starts inside it, measures the pane and sits right on top of it. Closing that pane ends the panel; 15 seconds after the last session ends, the panel and pane close together.
 
@@ -85,7 +87,7 @@ Once built, `open_pane.sh` uses it automatically: the iTerm2 pane split off to t
 
 ## Interaction and voice (floating panel)
 
-The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. Speaking and push-to-talk are off unless you start it with `--voice`; without it a click only marks the reply as read and holding a core does nothing. `./dodeca-panel --demo --voice` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
+The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel still never takes keyboard focus from iTerm2, and clicks outside a core's round shell still go through to the terminal. Speaking and push-to-talk are off unless you start it with `--voice`; without it a click only marks the reply as read and holding a core does nothing. `./vigil-panel --demo --voice` lets you try everything below with made-up sessions (add `--away 10` to see standby quickly).
 
 | Input | Does | The core |
 |---|---|---|
@@ -134,7 +136,7 @@ The cores in `dodeca-panel` react to the mouse and to a global hotkey. The panel
 1. `sh mac/build.sh`, then start the panel with `--voice` (`DODECA_PANE_ARGS="--voice"` for the pane opened by `open_pane.sh`).
 2. `python3 install_hooks.py --rich --apply`, so replies and the iTerm2 session id are kept (start new Claude Code sessions afterwards).
 3. The first time you hold a core, macOS asks for the microphone and for speech recognition: allow both, then hold again.
-4. The first time a reply is sent or you double-click a core, macOS asks whether DodecaPanel may control iTerm2: allow it (System Settings > Privacy & Security > Automation).
+4. The first time a reply is sent or you double-click a core, macOS asks whether Vigil may control iTerm2: allow it (System Settings > Privacy & Security > Automation).
 5. Optional: a better zh-TW voice (System Settings > Accessibility > Spoken Content > System Voice > Manage Voices); iTerm2 > Settings > General > Magic > Enable Python API, as the fallback for sending.
 - How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 
@@ -191,7 +193,7 @@ The event file contains only time, session id, event name, folder name (no path)
 
 With `DODECA_RICH=1` (`install_hooks.py --rich`) the hook also keeps one file per session in `~/.dodeca-core/msg/<session id>.json` (mode 600, folder 700): **the text of Claude's last reply** and of the last notification (e.g. a permission prompt), at most 4000 characters each, and the `ITERM_SESSION_ID` of the terminal it runs in. Each new reply or notice replaces the old one, the file is deleted when the session ends, and files left by sessions that never ended are deleted after 24 hours. The event file stays the same apart from `"m": 1` on a `Stop` line. Since reply text is written to disk, turn this on only on your own machine.
 
-Voice (`dodeca-panel --voice`): speech is synthesized on this Mac, and push-to-talk recognition is on-device only, so recordings never leave the Mac and are not kept. The recognized text is typed into the Claude Code session it was meant for, like anything you type. The one network use is `--summarize claude`, which sends the reply text to Anthropic through `claude -p` to shorten it.
+Voice (`vigil-panel --voice`): speech is synthesized on this Mac, and push-to-talk recognition is on-device only, so recordings never leave the Mac and are not kept. The recognized text is typed into the Claude Code session it was meant for, like anything you type. The one network use is `--summarize claude`, which sends the reply text to Anthropic through `claude -p` to shorten it.
 
 ## Known limitations
 

@@ -1,4 +1,4 @@
-/* dodeca-core: one glowing polyhedron per running Claude Code session, drawn in the terminal.
+/* vigil: one glowing polyhedron per running Claude Code session, drawn in the terminal.
  *
  * The picture is rendered in software and sent to the terminal one of three ways:
  *   kitty  - kitty graphics protocol (true pixels; kitty, Ghostty, WezTerm, recent iTerm2)
@@ -9,7 +9,7 @@
  *   grid   - the sessions side by side in one picture, labels drawn into it (a window of its own)
  *   list   - a narrow column: for each session two lines of terminal text, then its polyhedron (a side pane)
  */
-#include "dodeca.h"
+#include "vigil.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -263,9 +263,9 @@ static void list_text(Buf *b, const Session *s, double now, int row, int cols) {
 }
 
 static void usage(void) {
-    puts("dodeca-core: one glowing polyhedron per running Claude Code session\n"
+    puts("vigil: one glowing polyhedron per running Claude Code session\n"
          "\n"
-         "  dodeca-core [options]\n"
+         "  vigil [options]\n"
          "\n"
          "  --pane            side-pane layout: sessions top to bottom, text first, then the polyhedron\n"
          "  --exit-when-empty quit once no session has been running for 15 seconds\n"
@@ -345,7 +345,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (!isatty(STDOUT_FILENO) || !isatty(STDIN_FILENO)) { fprintf(stderr, "dodeca-core needs a terminal\n"); return 1; }
+    if (!isatty(STDOUT_FILENO) || !isatty(STDIN_FILENO)) { fprintf(stderr, "vigil needs a terminal\n"); return 1; }
     signal(SIGINT, on_quit);
     signal(SIGTERM, on_quit);
     signal(SIGHUP, on_quit);
@@ -470,7 +470,7 @@ int main(int argc, char **argv) {
     term_restore();
     double secs = wall() - started;
     if (secs < 0.001) secs = 0.001;
-    fprintf(stderr, "dodeca-core: mode %s, picture %dx%d\n", out == OUT_KITTY ? "kitty" : out == OUT_ITERM ? "iterm" : "cells", last_w, last_h);
+    fprintf(stderr, "vigil: mode %s, picture %dx%d\n", out == OUT_KITTY ? "kitty" : out == OUT_ITERM ? "iterm" : "cells", last_w, last_h);
     fprintf(stderr, "  %.1f loops/s, %.1f pictures/s, %.2f MB/s to the terminal\n", loops / secs, pictures / secs, bytes / secs / 1e6);
     fprintf(stderr, "  per picture: render %.1f ms; per loop: waiting on the terminal %.1f ms\n", pictures ? t_render / pictures * 1e3 : 0.0, loops ? t_write / loops * 1e3 : 0.0);
     return 0;

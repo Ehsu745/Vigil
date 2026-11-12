@@ -1,9 +1,9 @@
 #!/bin/sh
-# Claude Code SessionStart hook: open the dodeca-core side pane next to this session, once.
+# Claude Code SessionStart hook: open the vigil side pane next to this session, once.
 #
 # Splits the iTerm2 pane Claude Code is running in, narrows the new pane on the right, and gives the
 # keyboard back to Claude Code. If the floating panel has been built (mac/build.sh), the new pane stays
-# empty and the panel floats over it; otherwise the pane itself draws the sessions (dodeca-core --pane).
+# empty and the panel floats over it; otherwise the pane itself draws the sessions (vigil --pane).
 # Does nothing outside iTerm2 or when a pane is already open. Prints nothing and always exits 0, so it
 # cannot disturb Claude Code.
 #
@@ -12,7 +12,7 @@
 # To turn it on, once: enable the Python API in iTerm2 (Settings > General > Magic) and copy the script
 # to where iTerm2 looks for scripts:
 #   mkdir -p ~/Library/Application\ Support/iTerm2/Scripts
-#   cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py
+#   cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py
 #
 #   DODECA_PANE_COLS    width of the pane in characters (default 34)
 #   DODECA_PANE_ARGS    extra options for the program, e.g. "--shape bucky"
@@ -23,8 +23,8 @@
 [ -n "$ITERM_SESSION_ID" ] || exit 0
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-if [ -x "$DIR/dodeca-panel" ] && [ "$DODECA_PANE_MODE" != "terminal" ]; then
-    CMD="'$DIR/dodeca-panel' --fit-pane --exit-when-empty $DODECA_PANE_ARGS"
+if [ -x "$DIR/vigil-panel" ] && [ "$DODECA_PANE_MODE" != "terminal" ]; then
+    CMD="'$DIR/vigil-panel' --fit-pane --exit-when-empty $DODECA_PANE_ARGS"
 elif [ -x "$DIR/dodeca-core" ]; then
     CMD="'$DIR/dodeca-core' --pane --exit-when-empty $DODECA_PANE_ARGS"
 else
@@ -35,7 +35,7 @@ PIDFILE="$HOME/.dodeca-core/pane.pid"
 SID=${ITERM_SESSION_ID#*:} # "w0t0p0:UUID" -> the session's id
 COLS=${DODECA_PANE_COLS:-34}
 IT2RUN=/Applications/iTerm.app/Contents/Resources/it2run
-API_SCRIPT="$HOME/Library/Application Support/iTerm2/Scripts/dodeca_pane.py"
+API_SCRIPT="$HOME/Library/Application Support/iTerm2/Scripts/vigil_pane.py"
 
 pane_is_open() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
 
@@ -44,7 +44,7 @@ open_pane() {
     # from its own Scripts folder and returns at once, so wait and see whether the pane appears.
     if [ -x "$IT2RUN" ] && [ -f "$API_SCRIPT" ]; then
         cmp -s "$DIR/pane_api.py" "$API_SCRIPT" || cp "$DIR/pane_api.py" "$API_SCRIPT" # keep the copy current
-        "$IT2RUN" dodeca_pane.py "$SID" "$CMD" "$COLS"
+        "$IT2RUN" vigil_pane.py "$SID" "$CMD" "$COLS"
         i=0
         while [ "$i" -lt 20 ]; do
             sleep 0.5

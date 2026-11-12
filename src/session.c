@@ -1,6 +1,6 @@
 /* Session state machine and the per-state look. Events move a session between states; each frame the
  * drawn look eases toward the look of the state it is in. */
-#include "dodeca.h"
+#include "vigil.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

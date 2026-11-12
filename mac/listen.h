@@ -1,4 +1,4 @@
-// Voice input for dodeca-panel: push-to-talk speech recognition, on this Mac only. Used by mac/panel.m.
+// Voice input for vigil-panel: push-to-talk speech recognition, on this Mac only. Used by mac/panel.m.
 #import <Foundation/Foundation.h>
 
 @interface Listener : NSObject

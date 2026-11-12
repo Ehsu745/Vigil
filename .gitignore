@@ -1,6 +1,6 @@
-dodeca-core
+vigil
 *.ppm
 *.o
 .DS_Store
-dodeca-panel
-DodecaPanel.app/
+vigil-panel
+Vigil.app/

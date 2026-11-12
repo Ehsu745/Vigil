@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add or remove the dodeca-core hook in ~/.claude/settings.json.
+"""Add or remove the vigil hook in ~/.claude/settings.json.
 
   python3 install_hooks.py            # dry run: print the hooks section that would be written
   python3 install_hooks.py --apply    # back up settings.json, then merge the hook in
@@ -29,7 +29,7 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse"}
 
 def is_ours(entry):
     cmds = [h.get("command", "") for h in entry.get("hooks", [])]
-    return any(c in (COMMAND, RICH_COMMAND, PANE_COMMAND) or ("dodeca-core" in c and ("hook.py" in c or "open_pane.sh" in c)) for c in cmds)
+    return any(c in (COMMAND, RICH_COMMAND, PANE_COMMAND) or (("vigil" in c or "dodeca-core" in c) and ("hook.py" in c or "open_pane.sh" in c))  # (dodeca-core: the old name) for c in cmds)
 
 
 def merge(cfg, remove, pane, rich):
