@@ -11,6 +11,7 @@
 // --launcher-pid, and the app quits when the launcher does (the pane was closed, or Ctrl-C).
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h> // RegisterEventHotKey: global hotkeys without the Accessibility permission
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -21,6 +22,7 @@
 #include "../src/dodeca.h"
 #import "speech.h"
 #import "listen.h"
+#import "tip.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -49,7 +51,13 @@ static int g_confirm_send;                      // --confirm-send: a recognized 
 static NSString *g_mic;                         // --mic NAME: the input device to listen with
 static const double PREVIEW_FOR = 1.5;          // seconds a recognized reply is shown before it is sent
 static int g_debug;
-static int g_labels_hover;                      // --labels hover: no name / state lines, only the cores (and the tooltip)                             // --debug: log each voice step to stderr (never the words)
+static int g_labels_hover;                      // --labels hover: no name / state lines, only the cores (and the tooltip)
+// single-core mode (--single, or the mode hotkey): one big core for one session, the others float around it
+static int g_single;
+static const char *g_mode_hotkey = "ctrl+opt+c";  // --mode-hotkey: switch between single core and all cores
+static char g_shape_name[16] = "geo2";          // --shape
+static NSString *g_focus;                       // the session in the middle
+static BOOL g_focus_pinned;                     // chosen by a click: auto-follow is off until "Follow automatically"                             // --debug: log each voice step to stderr (never the words)
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dodeca] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 static const Room *shown_room(void) { return g_room.n ? &g_room : &g_ghost; }
@@ -61,6 +69,85 @@ static Session *session_by_sid(NSString *sid) {
 }
 
 static NSString *sid_of(const Session *s) { return [NSString stringWithUTF8String:s->sid] ?: @""; }
+
+// Single-core mode: where the cluster was put with ⌥-drag, kept in ~/.dodeca-core/panel-position.json per
+// screen size (another monitor setup has its own spot, so it never comes back off-screen).
+static NSString *position_file(void) { return [@"~/.dodeca-core/panel-position.json" stringByExpandingTildeInPath]; }
+static NSString *screen_key(NSScreen *sc) { return [NSString stringWithFormat:@"%.0fx%.0f", sc.frame.size.width, sc.frame.size.height]; }
+static NSMutableDictionary *positions(void) {
+    NSData *d = [NSData dataWithContentsOfFile:position_file()];
+    id j = d ? [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:NULL] : nil;
+    return [j isKindOfClass:[NSMutableDictionary class]] ? j : [NSMutableDictionary dictionary];
+}
+static void save_position(NSScreen *sc, NSPoint origin) {
+    NSMutableDictionary *all = positions();
+    if (sc) {
+        if (origin.x == CGFLOAT_MAX) [all removeObjectForKey:screen_key(sc)];
+        else all[screen_key(sc)] = @[@(origin.x), @(origin.y)];
+    }
+    [[NSFileManager defaultManager] createDirectoryAtPath:[position_file() stringByDeletingLastPathComponent]
+                              withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
+    NSData *out = [NSJSONSerialization dataWithJSONObject:all options:0 error:NULL];
+    [out writeToFile:position_file() atomically:YES];
+    chmod(position_file().fileSystemRepresentation, 0600);
+}
+
+// Hides the mouse pointer while a core is carried in its place. A background app may only do that once it
+// has asked the window server with the (private, but long-standing) SetsCursorInBackground property; looked
+// up at run time, so without it the pointer simply stays visible.
+static void pointer_visible(BOOL on) {
+    static BOOL hidden, asked;
+    if (on != hidden) return;
+    if (!asked) {
+        asked = YES;
+        int (*conn)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "_CGSDefaultConnection");
+        int (*prop)(int, int, CFStringRef, CFTypeRef) = (int (*)(int, int, CFStringRef, CFTypeRef))dlsym(RTLD_DEFAULT, "CGSSetConnectionProperty");
+        if (conn && prop) prop(conn(), conn(), CFSTR("SetsCursorInBackground"), kCFBooleanTrue);
+    }
+    if (on) CGDisplayShowCursor(kCGDirectMainDisplay);
+    else CGDisplayHideCursor(kCGDirectMainDisplay);
+    hidden = !on;
+}
+
+// The right-click Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings.json (600) and
+// wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
+static struct { int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16]; double away; } g_launch;
+static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
+static void remember_launch(void) {
+    g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
+    g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
+    snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
+}
+static void restore_launch(void) {
+    g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
+    g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
+    snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
+}
+static void load_settings(void) {
+    NSData *d = [NSData dataWithContentsOfFile:settings_file()];
+    NSDictionary *j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
+    if (![j isKindOfClass:[NSDictionary class]]) return;
+    NSNumber *n;
+    if ((n = j[@"voice"])) g_voice = n.boolValue;
+    if ((n = j[@"autoSpeak"])) g_auto_speak = n.boolValue;
+    if ((n = j[@"summarize"])) g_summarize_claude = n.boolValue;
+    if ((n = j[@"confirmSend"])) g_confirm_send = n.boolValue;
+    if ((n = j[@"labelsHover"])) g_labels_hover = n.boolValue;
+    if ((n = j[@"fontSize"]) && n.doubleValue >= 6) g_font_size = n.doubleValue;
+    if ((n = j[@"glow"]) && n.floatValue > 0) g_glow = n.floatValue;
+    if ((n = j[@"away"])) g_away_after = n.doubleValue;
+    NSString *sh = j[@"shape"];
+    if ([sh isKindOfClass:[NSString class]] && sh.length < sizeof g_shape_name) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh.UTF8String);
+}
+static void save_settings(void) {
+    NSDictionary *j = @{@"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
+                        @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
+                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after)};
+    [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
+                              withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
+    [[NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted error:NULL] writeToFile:settings_file() atomically:YES];
+    chmod(settings_file().fileSystemRepresentation, 0600);
+}
 
 static double wall(void) {
     struct timeval tv;
@@ -171,11 +258,13 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 
 @interface PanelView : NSView
 @property(weak) id<CoreActions> actions;
-@property(readonly) BOOL busy; // in the middle of a press or drag: keep taking mouse events
+@property(readonly) BOOL busy;   // in the middle of a press or drag: keep taking mouse events
+@property(readonly) BOOL moving; // a core is being dragged, or the cluster moved (the tooltip stays away)
 - (BOOL)anythingDue:(double)now;
 - (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center;
 - (void)cancelPress;
 - (NSRect)coreRect:(int)i;
+- (void)relayout;
 @end
 
 @implementation PanelView {
@@ -190,13 +279,25 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     NSPoint _downAt, _dragAt;
     double _dragTime;
     float _velX, _velY;
-    BOOL _dragging, _pressing;
+    BOOL _dragging, _pressing, _reordering;
     NSTimer *_pressTimer, *_clickTimer;
+    NSMutableDictionary<NSString *, NSValue *> *_place; // single-core mode: where each core is drawn now (eases to its spot)
+    CGFloat _grabY, _holdY; // ⌥-drag: where on the core it was grabbed, and where the mouse is now
+    BOOL _moving;           // single-core mode ⌥-drag: the whole cluster follows the mouse
+    NSPoint _moveMouse, _moveOrigin;
+    BOOL _carrying, _swallowUp; // ⌥-click: the core rides on the mouse, button up, until the next click
+    NSTimer *_followTimer;      // asks where the mouse is while a core rides on it
+    id _placeMonitor;
+    NSPoint _lastMouse;         // for the mouse speed the carried core reacts to
+    double _lastMouseT;
+    CGFloat _mvx, _mvy;         // points per second, smoothed
+    double _lastDraw;
 }
 
 - (BOOL)isOpaque { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; } // a click on a core never has to activate the app first
 - (BOOL)busy { return _downSid != nil; }
+- (BOOL)moving { return _dragging || _moving || _reordering; }
 - (NSRect)coreRect:(int)i { return i >= 0 && i < _coreN ? _core[i] : NSZeroRect; }
 
 - (NSString *)sidAt:(NSEvent *)e {
@@ -209,6 +310,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 // PRESS_AFTER = push-to-talk, released before that = click. A single click is only acted on once the
 // system's double-click time has passed without a second one, so a double click never starts with a single.
 - (void)mouseDown:(NSEvent *)e {
+    if (_carrying) { [self place]; _swallowUp = YES; return; } // the click that puts a carried core down
     NSString *sid = [self sidAt:e];
     if (!sid) return;
     if (e.clickCount >= 2 && _clickTimer.valid && [sid isEqualToString:_clickSid]) {
@@ -224,6 +326,24 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self.actions coreTouched:sid];
     _downSid = sid;
     _downAt = _dragAt = e.locationInWindow;
+    _moveMouse = [NSEvent mouseLocation];
+    if (e.modifierFlags & NSEventModifierFlagOption && g_single) { // ⌥-drag: the cluster goes anywhere on the screen
+        _moving = YES;
+        _moveOrigin = self.window.frame.origin;
+        _dragging = _pressing = NO;
+        [self startFollow];
+        return;
+    }
+    if (e.modifierFlags & NSEventModifierFlagOption && !g_single) { // ⌥-drag: move this core up or down the column
+        NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+        int i = [self coreAt:p look:NULL center:NULL];
+        _grabY = i >= 0 ? p.y - NSMidY(_core[i]) : 0;
+        _holdY = p.y;
+        _reordering = YES;
+        _dragging = _pressing = NO;
+        [self startFollow];
+        return;
+    }
     _dragTime = e.timestamp;
     _dragging = _pressing = NO;
     __weak PanelView *me = self;
@@ -236,7 +356,107 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }];
 }
 
+// ⌥-drag or ⌥-click: from here until the core is put down, a timer asks where the mouse is (with the
+// button up there are no drag events), so the core also notices when the mouse stops
+- (void)startFollow {
+    _lastMouse = [NSEvent mouseLocation];
+    _lastMouseT = wall();
+    _mvx = _mvy = 0;
+    Session *s = session_by_sid(_downSid);
+    if (s) s->carried = 1;
+    __weak PanelView *me = self;
+    [_followTimer invalidate];
+    _followTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer *t) { (void)t; [me follow]; }];
+    [[NSRunLoop currentRunLoop] addTimer:_followTimer forMode:NSEventTrackingRunLoopMode]; // also during the drag itself
+}
+
+// the index of the large core in single-core mode (as drawSingle picks it)
+- (int)focusIndex {
+    const Room *r = shown_room();
+    for (int i = 0; i < r->n; i++) if (g_focus && [g_focus isEqualToString:sid_of(&r->s[i])]) return i;
+    return 0;
+}
+
+// The cluster (single-core mode) or the held core goes where the mouse is, and the cores feel the motion:
+// the carried one leans and sloshes (CARRY in session.c), and the small cores lag behind on their way.
+- (void)follow {
+    NSPoint m = [NSEvent mouseLocation];
+    double now = wall(), dt = now - _lastMouseT;
+    if (dt >= 1.0 / 240) { // the mouse speed, smoothed a little
+        CGFloat a = 0.45;
+        _mvx += ((m.x - _lastMouse.x) / dt - _mvx) * a;
+        _mvy += ((m.y - _lastMouse.y) / dt - _mvy) * a;
+        _lastMouse = m;
+        _lastMouseT = now;
+    }
+    Room *room = (Room *)shown_room();
+    Session *held = session_by_sid(_downSid);
+    int hi = held ? (int)(held - room->s) : -1;
+    CGFloat w = hi >= 0 && hi < _coreN && _core[hi].size.width > 1 ? _core[hi].size.width : 100;
+    for (int i = 0; i < room->n; i++) { // in single-core mode the whole cluster moves; in the column only the held core
+        Session *s = &room->s[i];
+        BOOL moves = _moving || i == hi;
+        s->move_x = moves && _moving ? (float)(_mvx / w) : 0;
+        s->move_y = moves ? (float)(-_mvy / w) : 0;
+    }
+    if (_moving) {
+        if (_carrying || hypot(m.x - _moveMouse.x, m.y - _moveMouse.y) >= DRAG_AFTER) pointer_visible(NO); // the core is the pointer
+        NSPoint was = self.window.frame.origin, to = NSMakePoint(_moveOrigin.x + m.x - _moveMouse.x, _moveOrigin.y + m.y - _moveMouse.y);
+        if (to.x == was.x && to.y == was.y) return;
+        [self.window setFrameOrigin:to];
+        // the small cores stay where they were on the screen for a moment and then catch up: they trail behind
+        NSString *focus = room->n ? sid_of(&room->s[[self focusIndex]]) : nil;
+        NSSize b = self.bounds.size;
+        for (NSString *sid in _place.allKeys) {
+            if ([sid isEqualToString:focus]) continue;
+            NSRect r = _place[sid].rectValue;
+            r.origin.x = fmax(0, fmin(b.width - r.size.width, r.origin.x - (to.x - was.x)));
+            r.origin.y = fmax(0, fmin(b.height - r.size.height, r.origin.y - (to.y - was.y)));
+            _place[sid] = [NSValue valueWithRect:r];
+        }
+        [self setNeedsDisplay:YES];
+    } else if (_reordering) {
+        NSPoint p = [self convertPoint:[self.window convertPointFromScreen:m] fromView:nil];
+        _holdY = p.y;
+        [self reorderTo:p];
+        [self setNeedsDisplay:YES]; // the held core follows the mouse
+    }
+}
+
+// the end of an ⌥-drag, or the click that puts a carried core down: it lands with a little bounce
+- (void)endMove {
+    [_followTimer invalidate];
+    _followTimer = nil;
+    pointer_visible(YES);
+    Room *room = (Room *)shown_room();
+    for (int i = 0; i < room->n; i++) room->s[i].carried = 0, room->s[i].move_x = room->s[i].move_y = 0;
+    Session *s = session_by_sid(_downSid);
+    if (s) s->jig_vy += CARRY.drop;
+    _downSid = nil;
+    if (_reordering) { _reordering = NO; [self setNeedsDisplay:YES]; }
+    if (_moving) { _moving = NO; save_position(self.window.screen, self.window.frame.origin); }
+}
+
+// An ⌥-click that did not move picks the core up: it keeps following the mouse with the button up until the
+// next click anywhere puts it down.
+- (void)carry {
+    _carrying = YES;
+    __weak PanelView *me = self;
+    // a click outside the panel (it can leave the column) also puts it down; mouse monitors need no permission
+    _placeMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown
+                                                           handler:^(NSEvent *ev) { (void)ev; [me place]; }];
+}
+
+- (void)place {
+    if (!_carrying) return;
+    _carrying = NO;
+    if (_placeMonitor) { [NSEvent removeMonitor:_placeMonitor]; _placeMonitor = nil; }
+    [self follow];
+    [self endMove];
+}
+
 - (void)mouseDragged:(NSEvent *)e {
+    if (_moving || _reordering) return; // the follow timer moves it
     if (!_downSid || _pressing) return;
     NSPoint p = e.locationInWindow;
     if (!_dragging && hypot(p.x - _downAt.x, p.y - _downAt.y) < DRAG_AFTER) return;
@@ -256,6 +476,13 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (void)mouseUp:(NSEvent *)e {
     [_pressTimer invalidate];
     _pressTimer = nil;
+    if (_swallowUp) { _swallowUp = NO; return; }
+    if (_moving || _reordering) {
+        NSPoint m = [NSEvent mouseLocation];
+        if (!_carrying && hypot(m.x - _moveMouse.x, m.y - _moveMouse.y) < DRAG_AFTER) [self carry]; // ⌥-click
+        else if (!_carrying) [self endMove];
+        return;
+    }
     NSString *sid = _downSid;
     _downSid = nil;
     if (!sid) return;
@@ -283,6 +510,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 }
 
 - (void)rightMouseDown:(NSEvent *)e {
+    if (_carrying) { [self place]; return; }
     NSString *sid = [self sidAt:e];
     NSMenu *menu = sid ? [self.actions menuForCore:sid] : nil;
     if (menu) [NSMenu popUpContextMenu:menu withEvent:e forView:self];
@@ -295,6 +523,28 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     float step = (float)e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.004f : 0.05f);
     s->vol = fmaxf(0, fminf(1, s->vol + step));
     s->vol_at = wall();
+}
+
+// While ⌥-dragging, the dragged core takes the place of the core nearest the mouse, so the column
+// rearranges under the hand.
+- (void)reorderTo:(NSPoint)p {
+    Room *r = g_room.n && !g_single ? &g_room : NULL; // (single-core mode has no column)
+    Session *s = session_by_sid(_downSid);
+    if (!r || !s || s < r->s || s >= r->s + r->n) return;
+    int from = (int)(s - r->s), to = from;
+    CGFloat best = 1e9;
+    for (int i = 0; i < _coreN && i < r->n; i++) {
+        CGFloat d = fabs(p.y - NSMidY(_core[i]));
+        if (d < best) { best = d; to = i; }
+    }
+    if (to == from) return;
+    room_move(r, from, to);
+    CGImageRef a = _img[from]; // the pictures move with their sessions
+    if (from < to) memmove(&_img[from], &_img[from + 1], sizeof(CGImageRef) * (size_t)(to - from));
+    else memmove(&_img[to + 1], &_img[to], sizeof(CGImageRef) * (size_t)(from - to));
+    _img[to] = a;
+    for (int i = 0; i <= MAX_SESS; i++) _due[i] = 0;
+    [self setNeedsDisplay:YES];
 }
 
 // cancels a press in progress (Esc during push-to-talk)
@@ -320,9 +570,67 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (BOOL)anythingDue:(double)now {
     const Room *r = [self shown];
     if (r->n != _lastCount) return YES;
+    if (g_single && r->n > 1) return YES; // the small cores keep floating
     for (int i = 0; i < r->n && i <= MAX_SESS; i++) if (!_img[i] || now >= _due[i]) return YES;
     return NO;
 }
+
+// Single-core mode: the session in focus large near the top, the others small, floating around it on an
+// ellipse. Every core eases toward its spot, so when the focus changes the two swap places smoothly.
+- (void)drawSingle:(const Room *)room now:(double)now width:(CGFloat)W height:(CGFloat)H scale:(CGFloat)scale {
+    CGContextRef ctx = [NSGraphicsContext currentContext].CGContext;
+    int n = room->n, fi = 0;
+    for (int i = 0; i < n; i++) if (g_focus && [g_focus isEqualToString:sid_of(&room->s[i])]) fi = i;
+    if (room->n != _lastCount) { for (int i = 0; i <= MAX_SESS; i++) _due[i] = 0; _lastCount = room->n; }
+    if (!_place) _place = [NSMutableDictionary dictionary];
+    float dt = (float)fmin(0.25, now - _lastDraw);
+    _lastDraw = now;
+    CGFloat big = W * 0.6, rx = W / 2 - 8, ry = rx * 1.15;
+    CGFloat small = n > 1 ? fmin(W * 0.2, 2 * M_PI * rx / (n - 1) * 0.75) : 0;
+    rx -= small / 2;
+    ry -= small / 2;
+    CGFloat cx = W / 2, cy = H / 2; // the window is just the cluster
+    float ease = 1 - expf(-dt * 7);
+    NSRect at[MAX_SESS];
+    for (int i = 0, k = 0; i < n; i++) {
+        NSRect target;
+        if (i == fi) target = NSMakeRect(cx - big / 2, cy - big / 2, big, big);
+        else {
+            double a = M_PI / 2 + 2 * M_PI * k / (n - 1) + now * 0.10; // slowly around, starting at the top
+            CGFloat x = cx + rx * cos(a), y = cy + ry * sin(a) + 3 * sin(now * 0.8 + i * 1.7);
+            target = NSMakeRect(x - small / 2, y - small / 2, small, small);
+            k++;
+        }
+        NSString *sid = sid_of(&room->s[i]);
+        NSValue *was = _place[sid];
+        NSRect r = was ? was.rectValue : target;
+        r.origin.x += (target.origin.x - r.origin.x) * ease;
+        r.origin.y += (target.origin.y - r.origin.y) * ease;
+        r.size.width += (target.size.width - r.size.width) * ease;
+        r.size.height = r.size.width;
+        _place[sid] = [NSValue valueWithRect:r];
+        at[i] = r;
+    }
+    for (int pass = 0; pass < 2; pass++) // the small ones first, the one in focus on top
+        for (int i = 0; i < n; i++) {
+            if ((i == fi) != (pass == 1)) continue;
+            const Session *s = &room->s[i];
+            int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
+            if (px < 32) px = 32;
+            if (!_img[i] || now >= _due[i] || (int)CGImageGetWidth(_img[i]) != px) {
+                if (_img[i]) CGImageRelease(_img[i]);
+                _img[i] = [self newPictureOf:s pixels:px now:now];
+                double rate = session_rate(s, now, 20) * (i == fi ? 1.5 : 0.75); // the small ones need fewer frames
+                _due[i] = now + 1.0 / rate - 0.01;
+            }
+            _core[i] = at[i];
+            CGContextDrawImage(ctx, NSRectToCGRect(at[i]), _img[i]);
+        }
+    _coreN = n;
+}
+
+// forget where things were: the next frame lays everything out again (mode switch, reorder)
+- (void)relayout { _lastCount = -1; [_place removeAllObjects]; [self setNeedsDisplay:YES]; }
 
 // renders one session into a see-through picture of px by px pixels
 - (CGImageRef)newPictureOf:(const Session *)s pixels:(int)px now:(double)now {
@@ -349,6 +657,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height - g_inset; // the inset keeps the first line clear of the pane's title bar
     if (H < 60) H = 60;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 2.0;
+    if (g_single) { [self drawSingle:room now:now width:W height:self.bounds.size.height scale:scale]; return; }
     NSFont *font = [NSFont fontWithName:g_font_name size:g_font_size];
     if (!font) font = [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
     CGFloat lineH = ceil(font.ascender - font.descender) + 3, textH = g_labels_hover ? 0 : lineH * 2 + 4, gap = 10, left = 10;
@@ -367,6 +676,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.lineBreakMode = NSLineBreakByTruncatingTail;
     CGContextRef ctx = [NSGraphicsContext currentContext].CGContext;
+    int held = -1;
 
     for (int i = 0; i < n; i++) {
         const Session *s = &room->s[i];
@@ -400,79 +710,21 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             _due[i] = now + 1.0 / rate - 0.01;
         }
         _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
+        if (_reordering && [_downSid isEqualToString:sid_of(s)]) { held = i; continue; } // drawn last, at the mouse
         CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
     }
     _coreN = n;
+    if (held >= 0) { // ⌥-drag: the held core under the mouse, a little larger, above the others
+        NSRect r = NSInsetRect(_core[held], -side * 0.06, -side * 0.06);
+        r.origin.y = _holdY - _grabY - r.size.height / 2;
+        CGContextSetAlpha(ctx, 0.92);
+        CGContextDrawImage(ctx, NSRectToCGRect(r), _img[held]);
+        CGContextSetAlpha(ctx, 1);
+    }
 }
 @end
 
 // ---- the hover tooltip: name and state, then the first two lines of the last reply ----------------------
-@interface TipView : NSView
-@property(copy) NSString *title, *body;
-@property(strong) NSColor *accent;
-@property int maxBodyLines; // 0: as many as the text needs
-- (NSSize)fit;
-@end
-
-// The box wraps its text instead of cutting it: it only shows while you point at a core or talk to it, so it
-// may stretch over the terminal to the left of the panel.
-@implementation TipView
-static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
-- (BOOL)isOpaque { return NO; }
-- (NSFont *)font {
-    return [NSFont fontWithName:g_font_name size:g_font_size] ?: [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
-}
-- (CGFloat)lineH { return ceil([self font].ascender - [self font].descender + [self font].leading) + 2; }
-- (NSDictionary *)attr:(NSColor *)c {
-    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
-    para.lineBreakMode = NSLineBreakByWordWrapping;
-    para.minimumLineHeight = para.maximumLineHeight = [self lineH];
-    return @{NSFontAttributeName: [self font], NSForegroundColorAttributeName: c, NSParagraphStyleAttributeName: para};
-}
-// the body without blank lines or surrounding spaces
-- (NSString *)text {
-    NSMutableArray *a = [NSMutableArray array];
-    for (NSString *l in [self.body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-        NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (t.length) [a addObject:t];
-    }
-    return [a componentsJoinedByString:@"\n"];
-}
-- (CGFloat)heightOf:(NSString *)s width:(CGFloat)w maxLines:(int)n {
-    if (!s.length) return 0;
-    CGFloat h = ceil([s boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin attributes:[self attr:NSColor.whiteColor]].size.height);
-    return n > 0 ? fmin(h, n * [self lineH]) : h;
-}
-- (NSSize)fit {
-    CGFloat w = 0;
-    for (NSString *l in [[(self.title ?: @"") stringByAppendingFormat:@"\n%@", [self text]] componentsSeparatedByString:@"\n"])
-        w = fmax(w, ceil([l sizeWithAttributes:[self attr:NSColor.whiteColor]].width));
-    w = fmin(w + 1, TIP_MAX);
-    CGFloat body = [self heightOf:[self text] width:w maxLines:self.maxBodyLines];
-    CGFloat h = [self heightOf:self.title width:w maxLines:0] + (body > 0 ? TIP_GAP + body : 0);
-    return NSMakeSize(w + TIP_PAD * 2, h + TIP_PAD * 2);
-}
-- (void)drawRect:(NSRect)dirty {
-    (void)dirty;
-    NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
-    NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:b xRadius:7 yRadius:7];
-    [[NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.10 alpha:0.94] setFill];
-    [box fill];
-    [[self.accent colorWithAlphaComponent:0.7] setStroke];
-    [box stroke];
-    CGFloat w = self.bounds.size.width - TIP_PAD * 2, top = self.bounds.size.height - TIP_PAD;
-    CGFloat th = [self heightOf:self.title width:w maxLines:0];
-    NSStringDrawingOptions opt = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine;
-    [self.title ?: @"" drawWithRect:NSMakeRect(TIP_PAD, top - th, w, th) options:opt
-                         attributes:[self attr:[NSColor colorWithSRGBRed:0.97 green:0.97 blue:0.99 alpha:1]] context:nil];
-    NSString *text = [self text];
-    CGFloat bh = [self heightOf:text width:w maxLines:self.maxBodyLines];
-    if (bh > 0)
-        [text drawWithRect:NSMakeRect(TIP_PAD, top - th - TIP_GAP - bh, w, bh) options:opt
-                attributes:[self attr:[NSColor colorWithSRGBRed:0.80 green:0.82 blue:0.86 alpha:1]] context:nil];
-}
-@end
-
 // ---- the application ------------------------------------------------------------------------------------
 @interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions>
 @property(strong) NSPanel *panel;
@@ -494,6 +746,8 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 @property BOOL pendingHeld;                         // the core was touched: wait for what the click means
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *errorUntil; // sid -> show ERROR until
 @property(strong) NSPanel *preview;                 // the recognized text, under the core
+@property double focusSince;                        // when the focus last moved
+@property(strong) NSMutableDictionary<NSString *, NSNumber *> *hue; // sid -> index into HUES
 @property(strong) TipView *previewView;
 @property unsigned short paneCols, paneRows;
 @end
@@ -516,6 +770,17 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     }
     if (w > f.size.width * 0.6) w = f.size.width * 0.6;
     if (h > f.size.height) h = f.size.height;
+    if (g_single) { // just the cluster, where it was put last (else the top of the right edge)
+        CGFloat cw = fmax(200, fmin(320, w)), ch = ceil(cw * 1.2) + 8;
+        NSArray *at = positions()[screen_key(screen)];
+        NSRect vis = screen.visibleFrame;
+        NSRect r = NSMakeRect(NSMaxX(f) - cw, NSMaxY(vis) - ch, cw, ch);
+        if ([at isKindOfClass:[NSArray class]] && at.count == 2) r.origin = NSMakePoint([at[0] doubleValue], [at[1] doubleValue]);
+        r.origin.x = fmax(NSMinX(vis), fmin(r.origin.x, NSMaxX(vis) - cw));
+        r.origin.y = fmax(NSMinY(vis), fmin(r.origin.y, NSMaxY(vis) - ch));
+        [self.panel setFrame:r display:YES];
+        return;
+    }
     [self.panel setFrame:NSMakeRect(NSMaxX(f) - w, NSMinY(f), w, h) display:YES];
 }
 
@@ -564,12 +829,9 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     self.seen = [NSMutableDictionary dictionary];
     self.summarizing = [NSMutableSet set];
     self.errorUntil = [NSMutableDictionary dictionary];
-    if (g_voice) {
-        self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
-        self.listener = [[Listener alloc] initWithLocale:g_listen_locale mic:g_mic];
-        if (g_debug) self.listener.log = ^(NSString *line) { DBG("%s", line.UTF8String); };
-        [self registerHotkeys];
-    }
+    self.hue = [NSMutableDictionary dictionary];
+    [self registerHotkeys];
+    if (g_voice) [self setVoice:YES];
     p.contentView = self.view;
     self.panel = p;
     [self place];
@@ -596,6 +858,8 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     double now = wall();
     self.last = self.emptySince = now;
     self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+    // also while a menu is open or a drag is tracked (other run loop modes), so the cores never freeze
+    [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 
 - (void)tick:(NSTimer *)timer {
@@ -611,6 +875,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     }
     [self trackMouse:now];
     [self watchForNews:now];
+    [self updateFocus:now];
     if (self.pendingSid && !self.pendingHeld && now > self.pendingUntil) {
         if (g_confirm_send) [self dropPending]; // not confirmed in time
         else [self sendPending];
@@ -652,6 +917,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     }
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
+    if (self.view.moving) { self.hoverSince = now; [self.tip orderOut:nil]; return; } // no tooltip while dragging
 
     NSString *sid = hit >= 0 ? [NSString stringWithUTF8String:room->s[hit].sid] : nil;
     if (![sid isEqualToString:self.hoverSid]) { self.hoverSid = sid; self.hoverSince = now; }
@@ -671,6 +937,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     t.level = NSFloatingWindowLevel;
     t.collectionBehavior = self.panel.collectionBehavior;
     *view = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+    (*view).fontSize = g_font_size;
     t.contentView = *view;
     return t;
 }
@@ -680,15 +947,16 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     if (!self.tip) {
         TipView *v;
         self.tip = [self newTipPanel:&v];
-        v.maxBodyLines = 8;
+        v.maxBodyLines = 16;
         self.tipView = v;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
     NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
     if (s->unread) title = [title stringByAppendingString:@" · new reply"];
+    if (g_single && g_focus_pinned && [g_focus isEqualToString:sid_of(s)]) title = [title stringByAppendingString:@" · pinned"];
     int st = session_shown(s, now);
     NSString *body = (st == ST_WAIT ? msg_text(s, @"notice") : nil) ?: msg_text(s, @"reply") ?: @"(no reply yet)";
-    Col c = s->cur.eh;
+    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; // single core: the session's own colour, else its state colour
     self.tipView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
         self.tipView.title = title;
@@ -709,10 +977,17 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 
 // ---- what clicks, presses and keys do ------------------------------------------------------------------
 
-// single click: play the spoken report, or stop it; the reply counts as read
+// single click: play the spoken report, or stop it; the reply counts as read. In single-core mode a click
+// on one of the small cores brings it to the middle instead (and keeps it there).
 - (void)coreClicked:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s) return;
+    if (g_single && ![sid isEqualToString:g_focus]) {
+        g_focus = sid;
+        g_focus_pinned = YES;
+        self.focusSince = wall();
+        return;
+    }
     if ([sid isEqualToString:self.pendingSid]) { // a recognized reply is waiting: the click sends or cancels it
         if (g_confirm_send) [self sendPending];
         else [self dropPending];
@@ -908,7 +1183,7 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
     self.previewView.title = [NSString stringWithFormat:@"→ %@ · %@", name, hint];
     self.previewView.body = text.length ? text : @" ";
-    Col c = s->cur.eh;
+    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh;
     self.previewView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     NSRect core = [self.view coreRect:(int)(s - room->s)];
     NSRect inScreen = [self.panel convertRectToScreen:[self.view convertRect:core toView:nil]];
@@ -1064,9 +1339,10 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 
 - (NSMenu *)menuForCore:(NSString *)sid {
     Session *s = session_by_sid(sid);
-    if (!s || !strcmp(s->sid, "ghost")) return nil;
+    if (!s) return nil;
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
     m.autoenablesItems = NO;
+    if (!strcmp(s->sid, "ghost")) { [m addItem:[self settingsItem]]; return m; } // no session yet: only the settings
     NSString *reply = msg_text(s, @"reply");
     NSMenuItem *replay = [m addItemWithTitle:@"Replay" action:@selector(menuReplay:) keyEquivalent:@""];
     replay.enabled = g_voice && (reply != nil || msg_text(s, @"notice") != nil);
@@ -1076,8 +1352,98 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
     mute.state = s->muted ? NSControlStateValueOn : NSControlStateValueOff;
     [m addItem:[NSMenuItem separatorItem]];
     [m addItemWithTitle:@"Bring to front" action:@selector(menuFront:) keyEquivalent:@""];
+    [m addItemWithTitle:g_single ? @"All cores" : @"Single core" action:@selector(menuMode:) keyEquivalent:@""];
+    if (g_single && g_focus_pinned) [m addItemWithTitle:@"Follow automatically" action:@selector(menuFollow:) keyEquivalent:@""];
+    if (g_single && positions()[screen_key(self.panel.screen ?: [NSScreen mainScreen])]) [m addItemWithTitle:@"Reset position" action:@selector(menuResetPosition:) keyEquivalent:@""];
     for (NSMenuItem *i in m.itemArray) { i.target = self; i.representedObject = sid; }
+    [m addItem:[NSMenuItem separatorItem]];
+    [m addItem:[self settingsItem]];
     return m;
+}
+
+// ---- the Settings submenu: every choice applies at once and is remembered (see load_settings) ----------
+- (NSMenuItem *)settingsItem {
+    NSMenuItem *top = [[NSMenuItem alloc] initWithTitle:@"Settings" action:NULL keyEquivalent:@""];
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@"Settings"];
+    m.autoenablesItems = NO;
+    [self toggle:m title:@"Voice" key:@"voice" on:g_voice];
+    [self toggle:m title:@"Read new replies aloud" key:@"autoSpeak" on:g_auto_speak];
+    [self toggle:m title:@"Summaries by Claude" key:@"summarize" on:g_summarize_claude].enabled = g_claude != nil;
+    [self toggle:m title:@"Wait for a click before sending" key:@"confirmSend" on:g_confirm_send];
+    [m addItem:[NSMenuItem separatorItem]];
+    [self choice:m title:@"Labels" key:@"labels" current:@(g_labels_hover != 0) options:@[@[@"Always", @NO], @[@"On hover", @YES]]];
+    [self choice:m title:@"Text size" key:@"fontSize" current:@(g_font_size)
+         options:@[@[@"Small (12)", @12.0], @[@"Medium (16)", @16.0], @[@"Large (20)", @20.0], @[@"Extra large (24)", @24.0]]];
+    [self choice:m title:@"Glow" key:@"glow" current:@(g_glow) options:@[@[@"Soft", @0.7f], @[@"Normal", @1.0f], @[@"Bright", @1.4f]]];
+    [self choice:m title:@"Shape" key:@"shape" current:@(g_shape_name)
+         options:@[@[@"Dodecahedron", @"dodeca"], @[@"Buckyball", @"bucky"], @[@"Geodesic", @"geo2"], @[@"Fine geodesic", @"geo3"]]];
+    [self choice:m title:@"Away after" key:@"away" current:@(g_away_after)
+         options:@[@[@"1 minute", @60.0], @[@"2 minutes", @120.0], @[@"5 minutes", @300.0], @[@"Never", @0.0]]];
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *reset = [m addItemWithTitle:@"Use launch options again" action:@selector(menuResetSettings:) keyEquivalent:@""];
+    reset.target = self;
+    reset.enabled = [[NSFileManager defaultManager] fileExistsAtPath:settings_file()];
+    top.submenu = m;
+    return top;
+}
+- (NSMenuItem *)toggle:(NSMenu *)m title:(NSString *)title key:(NSString *)key on:(int)on {
+    NSMenuItem *i = [m addItemWithTitle:title action:@selector(menuSetting:) keyEquivalent:@""];
+    i.target = self;
+    i.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    i.representedObject = @[key, @(!on)];
+    return i;
+}
+- (void)choice:(NSMenu *)m title:(NSString *)title key:(NSString *)key current:(id)current options:(NSArray *)options {
+    NSMenuItem *top = [m addItemWithTitle:title action:NULL keyEquivalent:@""];
+    NSMenu *sub = [[NSMenu alloc] initWithTitle:title];
+    for (NSArray *o in options) {
+        NSMenuItem *i = [sub addItemWithTitle:o[0] action:@selector(menuSetting:) keyEquivalent:@""];
+        i.target = self;
+        i.representedObject = @[key, o[1]];
+        i.state = [o[1] isEqual:current] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    top.submenu = sub;
+}
+- (void)menuSetting:(NSMenuItem *)item {
+    NSString *key = item.representedObject[0];
+    id v = item.representedObject[1];
+    [self applySetting:key value:v];
+    save_settings();
+}
+- (void)applySetting:(NSString *)key value:(id)v {
+    if ([key isEqualToString:@"voice"]) [self setVoice:[v boolValue]];
+    else if ([key isEqualToString:@"autoSpeak"]) { if ([v boolValue] && !g_voice) [self setVoice:YES]; g_auto_speak = [v boolValue]; }
+    else if ([key isEqualToString:@"summarize"]) { if ([v boolValue] && !g_voice) [self setVoice:YES]; g_summarize_claude = [v boolValue] && g_claude; }
+    else if ([key isEqualToString:@"confirmSend"]) g_confirm_send = [v boolValue];
+    else if ([key isEqualToString:@"glow"]) g_glow = [v floatValue];
+    else if ([key isEqualToString:@"away"]) g_away_after = [v doubleValue];
+    else if ([key isEqualToString:@"shape"]) {
+        if (!shape_make(&g_shape, [v UTF8String])) return;
+        snprintf(g_shape_name, sizeof g_shape_name, "%s", [v UTF8String]);
+    } else if ([key isEqualToString:@"labels"] || [key isEqualToString:@"fontSize"]) {
+        if ([key isEqualToString:@"labels"]) g_labels_hover = [v boolValue];
+        else {
+            g_font_size = [v doubleValue];
+            self.tipView.fontSize = self.previewView.fontSize = g_font_size;
+            self.tipView.title = nil; // makes the tooltip measure itself again
+            [self.tip orderOut:nil];
+        }
+        [self place];
+    }
+    [self.view relayout]; // every picture is drawn again with the new setting
+}
+- (void)menuResetSettings:(NSMenuItem *)i {
+    (void)i;
+    [[NSFileManager defaultManager] removeItemAtPath:settings_file() error:NULL];
+    int voice = g_launch.voice;
+    restore_launch();
+    shape_make(&g_shape, g_shape_name);
+    g_voice = !voice; [self setVoice:voice];
+    g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize && g_claude;
+    self.tipView.fontSize = self.previewView.fontSize = g_font_size;
+    self.tipView.title = nil;
+    [self place];
+    [self.view relayout];
 }
 
 - (void)menuReplay:(NSMenuItem *)i {
@@ -1096,6 +1462,57 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 }
 - (void)menuMute:(NSMenuItem *)i { Session *s = session_by_sid(i.representedObject); if (s) s->muted = !s->muted; }
 - (void)menuFront:(NSMenuItem *)i { [self coreDoubleClicked:i.representedObject]; }
+- (void)menuMode:(NSMenuItem *)i { (void)i; [self toggleMode]; }
+- (void)menuFollow:(NSMenuItem *)i { (void)i; g_focus_pinned = NO; self.focusSince = wall(); }
+- (void)menuResetPosition:(NSMenuItem *)i {
+    (void)i;
+    save_position(self.panel.screen ?: [NSScreen mainScreen], NSMakePoint(CGFLOAT_MAX, 0)); // forget it
+    [self place];
+}
+
+- (void)toggleMode {
+    g_single = !g_single;
+    g_focus_pinned = NO;
+    [self place];
+    [self.view relayout];
+}
+
+// Single-core mode: which session is in the middle. Pinned by a click, it stays. Otherwise it moves only
+// when there is news, so it does not jump around while several sessions work: to a session that needs you,
+// else to one with a reply newer than the current focus; a session that ended is replaced by the one
+// active last. Every core gets its own aura colour.
+- (void)updateFocus:(double)now {
+    Room *room = g_room.n ? &g_room : &g_ghost;
+    for (int i = 0; i < room->n; i++) { // colours: the first free one, starting from one picked by the folder name
+        Session *s = &room->s[i];
+        NSString *sid = sid_of(s);
+        if (!self.hue[sid]) {
+            NSMutableSet *used = [NSMutableSet set];
+            for (int j = 0; j < room->n; j++) { NSNumber *h = self.hue[sid_of(&room->s[j])]; if (h) [used addObject:h]; }
+            unsigned start = 0;
+            for (const char *c = s->name; *c; c++) start = start * 31 + (unsigned char)*c;
+            int pick = (int)(start % NHUE);
+            for (int k = 0; k < NHUE; k++) if (![used containsObject:@((start + k) % NHUE)]) { pick = (int)((start + k) % NHUE); break; }
+            self.hue[sid] = @(pick);
+        }
+        s->aura = HUES[self.hue[sid].intValue];
+        s->aura_a = g_single && room->n > 1 ? TOUCH.aura : 0; // one core alone needs no name tag
+    }
+    if (!g_single) return;
+    Session *cur = session_by_sid(g_focus);
+    if (!cur) { g_focus_pinned = NO; g_focus = nil; }
+    if (g_focus_pinned) return;
+    Session *pick = NULL, *fresh = NULL, *recent = NULL;
+    for (int i = 0; i < room->n; i++) {
+        Session *s = &room->s[i];
+        if (s->state == ST_WAIT && (!pick || s->state_t > pick->state_t)) pick = s;
+        if (!fresh || s->burst_at > fresh->burst_at) fresh = s;
+        if (!recent || s->last > recent->last) recent = s;
+    }
+    if (!pick && fresh && fresh->burst_at > self.focusSince) pick = fresh;
+    if (!pick) pick = cur ?: recent;
+    if (pick && ![sid_of(pick) isEqualToString:g_focus]) { g_focus = sid_of(pick); self.focusSince = now; }
+}
 
 // The panel's own states for each session, and the level that drives them. Away (no keyboard or mouse
 // input for --away seconds, asked of the system, which needs no permission): every core shows STANDBY,
@@ -1140,8 +1557,8 @@ static const CGFloat TIP_PAD = 9, TIP_MAX = 420, TIP_GAP = 5;
 }
 
 // ---- global hotkeys (Carbon): push-to-talk, and Esc only while recording -----------------------------
-enum { HK_PTT = 1, HK_ESC = 2 };
-static EventHotKeyRef g_ptt_key, g_esc_key;
+enum { HK_PTT = 1, HK_ESC = 2, HK_MODE = 3 };
+static EventHotKeyRef g_ptt_key, g_esc_key, g_mode_key;
 
 static OSStatus hotkey_event(EventHandlerCallRef next, EventRef ev, void *user) {
     (void)next;
@@ -1155,8 +1572,10 @@ static OSStatus hotkey_event(EventHandlerCallRef next, EventRef ev, void *user) 
 
 - (void)hotkey:(int)which down:(BOOL)down {
     if (which == HK_ESC) { if (down) [self cancelPtt]; return; }
+    if (which == HK_MODE) { if (down) [self toggleMode]; return; }
     if (down) {
-        Session *s = [self mostWanted];
+        Session *s = g_single ? session_by_sid(g_focus) : NULL; // single core: talk to the one in the middle
+        if (!s) s = [self mostWanted];
         if (!s) { NSBeep(); return; }
         self.pttByHotkey = YES;
         [self corePressBegan:sid_of(s)];
@@ -1200,11 +1619,38 @@ static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
 - (void)registerHotkeys {
     EventTypeSpec types[] = {{kEventClassKeyboard, kEventHotKeyPressed}, {kEventClassKeyboard, kEventHotKeyReleased}};
     InstallApplicationEventHandler(NewEventHandlerUPP(hotkey_event), 2, types, (__bridge void *)self, NULL);
-    if (!strcmp(g_hotkey, "none")) return;
     UInt32 mods, key;
+    if (strcmp(g_mode_hotkey, "none")) {
+        if (!parse_hotkey(g_mode_hotkey, &mods, &key)) fprintf(stderr, "dodeca-panel: cannot read --mode-hotkey %s\n", g_mode_hotkey);
+        else if (RegisterEventHotKey(key, mods, (EventHotKeyID){'dodc', HK_MODE}, GetApplicationEventTarget(), 0, &g_mode_key) != noErr)
+            fprintf(stderr, "dodeca-panel: hotkey %s is taken by another app\n", g_mode_hotkey);
+    }
+}
+
+// push-to-talk's hotkey is only ours while voice is on
+- (void)setPttHotkey:(BOOL)on {
+    UInt32 mods, key;
+    if (!on) { if (g_ptt_key) { UnregisterEventHotKey(g_ptt_key); g_ptt_key = NULL; } return; }
+    if (g_ptt_key || !strcmp(g_hotkey, "none")) return;
     if (!parse_hotkey(g_hotkey, &mods, &key)) { fprintf(stderr, "dodeca-panel: cannot read --hotkey %s\n", g_hotkey); return; }
     if (RegisterEventHotKey(key, mods, (EventHotKeyID){'dodc', HK_PTT}, GetApplicationEventTarget(), 0, &g_ptt_key) != noErr)
         fprintf(stderr, "dodeca-panel: hotkey %s is taken by another app\n", g_hotkey);
+}
+
+// voice on or off while running: the speaker and the listener are made the first time they are needed
+- (void)setVoice:(BOOL)on {
+    g_voice = on;
+    if (on && !self.speaker) {
+        self.speaker = [[Speaker alloc] initWithVoice:g_voice_id rate:g_rate];
+        self.listener = [[Listener alloc] initWithLocale:g_listen_locale mic:g_mic];
+        if (g_debug) self.listener.log = ^(NSString *line) { DBG("%s", line.UTF8String); };
+    }
+    if (!on) {
+        g_auto_speak = g_summarize_claude = 0;
+        [self cancelPtt];
+        if (self.speaker.speakingSid) [self.speaker stop:self.speaker.speakingSid];
+    }
+    [self setPttHotkey:on];
 }
 
 // Esc is only ours while recording, so it never goes missing from the terminal otherwise
@@ -1213,7 +1659,7 @@ static BOOL parse_hotkey(const char *spec, UInt32 *mods, UInt32 *key) {
     if (!on && g_esc_key) { UnregisterEventHotKey(g_esc_key); g_esc_key = NULL; }
 }
 
-- (void)applicationWillTerminate:(NSNotification *)note { (void)note; cleanup(); }
+- (void)applicationWillTerminate:(NSNotification *)note { (void)note; pointer_visible(YES); cleanup(); }
 @end
 
 static void usage(void) {
@@ -1241,6 +1687,8 @@ static void usage(void) {
          "  --listen-locale L  the language push-to-talk understands (default zh-TW; on-device only)\n"
          "  --mic NAME         input device to listen with (part of its name; default: the system input, skipping\n"
          "                     virtual ones like BlackHole)\n"
+         "  --single           single-core mode: one big core, the other sessions small around it (aura = who)\n"
+         "  --mode-hotkey KEYS switch between single core and all cores (default ctrl+opt+c; none = off)\n"
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
@@ -1276,6 +1724,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
             else if (!strcmp(a, "--debug")) g_debug = 1;
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
+            else if (!strcmp(a, "--single")) g_single = 1;
+            else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }
             else if (!strcmp(a, "--mic") && v) { g_mic = @(v); i++; }
             else if (!strcmp(a, "--auto-speak")) g_auto_speak = g_voice = 1;
             else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
@@ -1290,13 +1740,16 @@ int main(int argc, char **argv) {
             }
             else { usage(); return strcmp(a, "--help") && strcmp(a, "-h") ? 2 : 0; }
         }
+        snprintf(g_shape_name, sizeof g_shape_name, "%s", shape);
+        remember_launch();
+        load_settings();
         if (g_font_size < 6) g_font_size = 6;
         if (g_summarize_claude && !g_claude) { // started without the launcher: look where it is usually installed
             for (NSString *c in @[@"~/.local/bin/claude", @"/opt/homebrew/bin/claude", @"/usr/local/bin/claude"])
                 if ([[NSFileManager defaultManager] isExecutableFileAtPath:c.stringByExpandingTildeInPath]) { g_claude = c.stringByExpandingTildeInPath; break; }
         }
         if (g_summarize_claude && !g_claude) { fprintf(stderr, "dodeca-panel: claude not found, using the local summary\n"); g_summarize_claude = 0; }
-        if (!shape_make(&g_shape, shape)) { fprintf(stderr, "unknown shape: %s\n", shape); return 2; }
+        if (!shape_make(&g_shape, g_shape_name)) { fprintf(stderr, "unknown shape: %s\n", g_shape_name); return 2; }
         if (!events) {
             snprintf(events_default, sizeof events_default, "%s/.dodeca-core/events.jsonl", home);
             events = events_default;

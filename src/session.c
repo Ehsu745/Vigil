@@ -32,7 +32,7 @@ const Look LOOKS[ST_N] = {
     [ST_IDLE]  = {0.16f, 0.72f, 0.15f, 0.08f, 0.78f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     [ST_THINK] = {0.36f, 0.92f, 0.70f, 0.32f, 0.86f, 0.00f, 6.0f, 0, PALE, AMBER, AMBER, AMBER, 0, 0},
     [ST_WORK]  = {0.95f, 1.15f, 2.20f, 0.12f, 1.00f, 1.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
-    [ST_WAIT]  = {0.10f, 1.00f, 1.00f, 0.60f, 0.60f, 0.45f, 6.0f, 1, NEARWHITE, RED, PINK, RED, 0, 0},
+    [ST_WAIT]  = {0.10f, 1.00f, 1.00f, 0.60f, 0.60f, 0.45f, 6.0f, 1, NEARWHITE, ORANGE, ORANGE, ORANGE, 0, 0},
     [ST_CHEER] = {1.60f, 1.60f, 0.00f, 0.00f, 1.20f, 1.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     [ST_SLEEP] = {0.04f, 0.26f, 0.08f, 0.30f, 0.30f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     /* the panel's own states: reporting by voice, push-to-talk, turning speech into text, you are away, sending failed */
@@ -40,12 +40,33 @@ const Look LOOKS[ST_N] = {
     [ST_LISTEN]     = {0.00f, 0.80f, 0.00f, 0.00f, 0.90f, 0.00f, 4.5f, 0, PURE, GREEN, GREEN, GREEN, 0.3f, 4.0f},
     [ST_TRANSCRIBE] = {0.20f, 0.90f, 1.60f, 0.25f, 0.90f, 2.60f, 5.0f, 0, PURE, VIOLET, VIOLET, VIOLET, 0, 0},
     [ST_STANDBY]    = {0.03f, 0.20f, 0.05f, 0.40f, 0.22f, 0.00f, 4.0f, 0, PURE, INDIGO, PURE, INDIGO, 0, 0},
-    [ST_ERROR]      = {0.05f, 0.95f, 0.80f, 0.50f, 0.75f, 0.00f, 5.0f, 1, NEARWHITE, ORANGE, ORANGE, ORANGE, 0, 0}, /* a voice reply could not be sent */
+    [ST_ERROR]      = {0.05f, 0.95f, 0.80f, 0.50f, 0.75f, 0.00f, 5.0f, 1, NEARWHITE, RED, PINK, RED, 0, 0}, /* a voice reply could not be sent */
 };
 
 /* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
 const Hover HOVER = {.bright = 0.35f, .slow = 0.7f, .tilt = 0.32f, .gaze = 0.10f, .ease = 7.0f};
-const Touch TOUCH = {.unread_hz = 0.5f, .unread_amp = 0.45f, .ring_for = 1.0f, .vol_for = 1.2f, .coast = 1.2f};
+/* carried: it lights up, leans into the motion, the core sloshes behind, and a hard shake makes it dizzy */
+const Carry CARRY = {.lift = 0.35f, .ease = 10.0f, .lean = 0.035f, .lean_max = 0.55f, .stretch = 0.12f,
+                     .spring = 170.0f, .damp = 5.5f, .lag = 0.10f, .jig_max = 0.42f,
+                     .shake_gain = 0.0022f, .shake_fade = 1.4f, .shake_spin = 9.0f, .shake_glitch = 0.7f, .drop = 2.6f};
+/* idle whims: name, seconds, weight while idle, weight while asleep */
+const Whim WHIMS[W_N] = {
+    [W_LOOK] = {"look", 2.6f, 3, 0},    /* glances one way, then another */
+    [W_PEEK] = {"peek", 2.2f, 2, 0},    /* leans to one side as if to see past something */
+    [W_HOP] = {"hop", 1.0f, 1.5f, 0},   /* a little jump (sometimes two), squashes on landing */
+    [W_TWIRL] = {"twirl", 1.5f, 1, 0},  /* spins round once, fast */
+    [W_SHIVER] = {"shiver", 0.8f, 1, 0.6f},
+    [W_BLINK] = {"blink", 0.45f, 2.5f, 0},
+    [W_YAWN] = {"yawn", 3.0f, 1, 0.5f}, /* stretches up, glows, sinks back */
+    [W_SIGH] = {"sigh", 2.6f, 1.5f, 2}, /* swells and brightens slowly: a breath; asleep, a snore */
+};
+const WhimGap WHIM_GAP = {.idle_min = 3, .idle_max = 10, .sleep_min = 7, .sleep_max = 18};
+
+const Touch TOUCH = {.unread_hz = 0.5f, .unread_amp = 0.45f, .ring_for = 1.0f, .vol_for = 1.2f, .coast = 1.2f, .aura = 0.6f};
+
+/* single-core mode: who is who, by the colour of the core (the shell keeps the state colours) */
+const Col HUES[NHUE] = {C(80, 200, 255), C(255, 120, 200), C(140, 235, 110), C(255, 190, 70),
+                        C(170, 140, 255), C(70, 230, 200), C(255, 110, 90), C(230, 230, 120)};
 
 static uint32_t hash_str(const char *s) {
     uint32_t h = 2166136261u;
@@ -93,6 +114,14 @@ static void drop(Room *r, Session *s) {
 
 static void set_state(Session *s, int st, double t) { s->state = st; s->state_t = t; }
 
+void room_move(Room *r, int from, int to) {
+    if (from < 0 || to < 0 || from >= r->n || to >= r->n || from == to) return;
+    Session tmp = r->s[from];
+    if (from < to) memmove(&r->s[from], &r->s[from + 1], sizeof(Session) * (size_t)(to - from));
+    else memmove(&r->s[to + 1], &r->s[to], sizeof(Session) * (size_t)(from - to));
+    r->s[to] = tmp;
+}
+
 void room_apply(Room *r, const Event *e) {
     Session *s = find(r, e->sid);
     const char *ev = e->ev;
@@ -132,6 +161,138 @@ int session_shown(const Session *s, double now) {
 
 static void ease(float *a, float b, float k) { *a += (b - *a) * k; }
 static void ease_col(Col *a, Col b, float k) { ease(&a->r, b.r, k); ease(&a->g, b.g, k); ease(&a->b, b.b, k); }
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static float bump(float u) { return u <= 0 || u >= 1 ? 0 : sinf(u * 3.14159265f); }      /* 0 → 1 → 0 */
+static float hold(float u, float in) {                                                   /* up, stay, down */
+    if (u <= 0 || u >= 1) return 0;
+    float e = u < in ? u / in : u > 1 - in ? (1 - u) / in : 1;
+    return e * e * (3 - 2 * e);
+}
+
+/* Whims: left alone (idle, or asleep, and not touched), a core now and then does something small on its
+ * own. Most only shape the picture through the w_* fields; a twirl or a landing also nudges the spin and
+ * the core's spring, so they flow on into the usual motion. */
+static void whims(Session *s, int shown, double now, float dt) {
+    int free = (shown == ST_IDLE || shown == ST_SLEEP) && !s->overlay && !s->carried && !s->held
+               && s->hover_to <= 0 && s->hover < 0.05f;
+    ease(&s->whim_k, free ? 1.0f : 0.0f, 1.0f - expf(-dt * (free ? 2.0f : 8.0f)));
+    int asleep = shown == ST_SLEEP;
+    if (!s->whim_next || (!free && s->whim == W_NONE)) /* (re)arm: the first one comes a while after the core settles */
+        s->whim_next = now + WHIM_GAP.idle_min + frand(&s->rng) * (WHIM_GAP.idle_max - WHIM_GAP.idle_min);
+    if (s->whim == W_NONE && free && now >= s->whim_next) {
+        float total = 0, pick;
+        for (int w = 1; w < W_N; w++) total += asleep ? WHIMS[w].sleep : WHIMS[w].idle;
+        pick = frand(&s->rng) * total;
+        for (int w = 1; w < W_N; w++) {
+            pick -= asleep ? WHIMS[w].sleep : WHIMS[w].idle;
+            if (pick < 0 && (asleep ? WHIMS[w].sleep : WHIMS[w].idle) > 0) { s->whim = w; break; }
+        }
+        s->whim_at = now;
+        s->whim_a = frand(&s->rng) * 2 - 1;
+        s->whim_b = frand(&s->rng) * 2 - 1;
+        if (s->whim == W_TWIRL) s->spin_y += (s->whim_a < 0 ? -1 : 1) * (5.5f + 2.5f * fabsf(s->whim_b));
+        if (s->whim == W_SHIVER) s->spin_x += 1.2f * s->whim_a;
+    }
+    s->w_lx = s->w_ly = s->w_lean_x = s->w_lean_y = s->w_off_x = s->w_off_y = s->w_tall = 0;
+    s->w_scale = s->w_bright = 1;
+    if (s->whim == W_NONE) return;
+    float d = WHIMS[s->whim].dur, el = (float)(now - s->whim_at), u = el / d, k = s->whim_k, a = s->whim_a, b = s->whim_b;
+    if (u >= 1) { /* done: the next one after a pause */
+        s->whim = W_NONE;
+        float lo = asleep ? WHIM_GAP.sleep_min : WHIM_GAP.idle_min, hi = asleep ? WHIM_GAP.sleep_max : WHIM_GAP.idle_max;
+        s->whim_next = now + lo + frand(&s->rng) * (hi - lo);
+        return;
+    }
+    switch (s->whim) {
+    case W_LOOK: { /* two glances: (a, b·0.6) then the other way */
+        float g1 = hold(u * 2, 0.3f), g2 = hold(u * 2 - 1, 0.3f);
+        s->w_lx = 1.3f * (a * g1 - (a > 0 ? 1 : -1) * (0.5f + 0.5f * fabsf(b)) * g2);
+        s->w_ly = 0.7f * (b * g1 + a * 0.5f * g2);
+        break;
+    }
+    case W_PEEK: {
+        float e = hold(u, 0.25f), side = a < 0 ? -1.0f : 1.0f;
+        s->w_lean_x = 0.38f * side * e;
+        s->w_lx = 1.1f * side * e;
+        s->w_off_x = 0.05f * side * e;
+        s->w_tall = 0.03f * e;
+        break;
+    }
+    case W_HOP: { /* one hop, or two smaller ones */
+        int two = b > 0.2f;
+        float uu = two ? fmodf(u * 2, 1) : u, h = two ? 0.12f : 0.2f;
+        float air = uu < 0.55f ? bump(uu / 0.55f) : 0, land = uu >= 0.55f ? bump((uu - 0.55f) / 0.45f) : 0;
+        float prev = (el - dt) / d;
+        float pu = two ? fmodf(prev * 2, 1) : prev;
+        if (pu < 0.55f && uu >= 0.55f) s->jig_vy += 1.6f; /* the core keeps falling for a moment inside */
+        s->w_off_y = -h * air;
+        s->w_tall = 0.07f * air - 0.11f * land;
+        break;
+    }
+    case W_TWIRL:
+        s->w_ly = -0.4f * bump(u);
+        s->w_bright = 1 + 0.2f * bump(u);
+        break;
+    case W_SHIVER: {
+        float e = bump(u);
+        s->w_off_x = 0.025f * e * sinf(el * 70);
+        s->w_off_y = 0.012f * e * sinf(el * 53 + 1);
+        s->w_bright = 1 - 0.15f * e;
+        break;
+    }
+    case W_BLINK: { /* once, or twice quickly */
+        float uu = b > 0.3f ? fmodf(u * 2, 1) : u;
+        s->w_bright = 1 - 0.8f * bump(uu);
+        s->w_scale = 1 - 0.03f * bump(uu);
+        break;
+    }
+    case W_YAWN: {
+        float up = hold(u / 0.8f, 0.35f), after = u > 0.8f ? bump((u - 0.8f) / 0.2f) : 0;
+        s->w_tall = 0.13f * up - 0.05f * after;
+        s->w_ly = -0.7f * up;
+        s->w_bright = 1 + 0.45f * up;
+        s->w_off_y = -0.03f * up;
+        break;
+    }
+    case W_SIGH: {
+        float e = bump(u);
+        s->w_scale = 1 + (asleep ? 0.05f : 0.07f) * e;
+        s->w_bright = 1 + (asleep ? 0.35f : 0.3f) * e;
+        s->w_off_y = (asleep ? 0.02f : -0.02f) * e;
+        break;
+    }
+    }
+    /* touched in the middle of a whim: it fades out instead of stopping dead */
+    s->w_lx *= k; s->w_ly *= k; s->w_lean_x *= k; s->w_lean_y *= k; s->w_off_x *= k; s->w_off_y *= k; s->w_tall *= k;
+    s->w_scale = 1 + (s->w_scale - 1) * k;
+    s->w_bright = 1 + (s->w_bright - 1) * k;
+}
+
+/* Carried by the mouse (the panel sets carried and move_*): the shell leans into the motion, the core hangs
+ * on a spring and sloshes when the mouse speeds up, stops or turns, and shaking builds up into a dizzy spin. */
+static void carried(Session *s, double now, float dt) {
+    float k = 1.0f - expf(-dt * CARRY.ease);
+    ease(&s->carry, (float)s->carried, k);
+    float ix = (s->move_x - s->last_mx) / fmaxf(dt, 0.005f), iy = (s->move_y - s->last_my) / fmaxf(dt, 0.005f);
+    s->last_mx = s->move_x;
+    s->last_my = s->move_y;
+    ix = clampf(ix, -3000, 3000);
+    iy = clampf(iy, -3000, 3000);
+    ease(&s->lean_x, clampf(s->move_x * CARRY.lean, -CARRY.lean_max, CARRY.lean_max), k);
+    ease(&s->lean_y, clampf(s->move_y * CARRY.lean, -CARRY.lean_max, CARRY.lean_max), k);
+    int steps = (int)ceilf(dt / 0.008f); /* small steps keep the stiff spring stable */
+    float h = dt / (float)(steps > 0 ? steps : 1);
+    for (int i = 0; i < steps; i++) {
+        s->jig_vx += (-CARRY.spring * s->jig_x - CARRY.damp * s->jig_vx - CARRY.lag * ix) * h;
+        s->jig_vy += (-CARRY.spring * s->jig_y - CARRY.damp * s->jig_vy - CARRY.lag * iy) * h;
+        s->jig_x = clampf(s->jig_x + s->jig_vx * h, -CARRY.jig_max, CARRY.jig_max);
+        s->jig_y = clampf(s->jig_y + s->jig_vy * h, -CARRY.jig_max, CARRY.jig_max);
+    }
+    s->shake = fminf(1, s->shake * expf(-dt * CARRY.shake_fade) + hypotf(ix, iy) * CARRY.shake_gain * dt);
+    if (s->shake > 0.92f && now - s->burst_at > 2.0) s->burst_at = now; /* shaken hard: one flare */
+    if (!s->held) s->ay += s->shake * s->shake * CARRY.shake_spin * dt;
+}
 
 void room_tick(Room *r, const Shape *sh, double now, float dt) {
     for (int i = 0; i < r->n;) {
@@ -150,8 +311,10 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
         ease(&c->lc, L->lc, k); ease(&c->lh, L->lh, k);
         float kh = 1.0f - expf(-dt * HOVER.ease);
         ease(&s->hover, s->hover_to, kh);
-        ease(&s->look_x, s->look_x_to * s->hover_to, kh);
-        ease(&s->look_y, s->look_y_to * s->hover_to, kh);
+        whims(s, session_shown(s, now), now, dt);
+        ease(&s->look_x, s->look_x_to * s->hover_to + s->w_lx, kh);
+        ease(&s->look_y, s->look_y_to * s->hover_to + s->w_ly, kh);
+        carried(s, now, dt);
         float spin = c->rot * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
         if (!s->held) { /* while dragged the panel turns it; after that a fling fades back into its own spin */
             s->ay += (spin + s->spin_y) * dt;
@@ -185,6 +348,9 @@ double session_rate(const Session *s, double now, int fps) {
     static const double RATE[ST_N] = {[ST_IDLE] = 10, [ST_THINK] = 15, [ST_WORK] = 20, [ST_WAIT] = 20, [ST_CHEER] = 20, [ST_SLEEP] = 4,
                                       [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20};
     int busy = s->hover_to > 0 || s->hover > 0.01f || s->held || fabsf(s->spin_x) + fabsf(s->spin_y) > 0.02f
+               || s->carried || s->carry > 0.01f || s->shake > 0.01f || s->whim
+               || fabsf(s->look_x) + fabsf(s->look_y) > 0.01f
+               || fabsf(s->jig_x) + fabsf(s->jig_y) + 0.05f * (fabsf(s->jig_vx) + fabsf(s->jig_vy)) > 0.003f
                || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for; /* the mouse is doing something */
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
