@@ -417,11 +417,12 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
     if (wave > 0 && wave <= 1) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
-    for (int i = 0; i < MAX_RING; i++) { /* the rings a routine sends out (a click, a blow, a beacon facing you) */
-        const MRing *r = &s->mo.ring[i];
+    for (int i = 0; i < MAX_RING; i++) { /* the pulses a routine sends out (a click, a blow, a beacon facing you): thin, */
+        const MRing *r = &s->mo.ring[i];  /* from the shell's edge outward, fading as they go, so none stays round the core like a frame */
         if (r->a <= 0) continue;
-        float u = clamp01((float)(now - r->at) / 1.1f), e = 1 - (1 - u) * (1 - u) * (1 - u);
-        ring_col(c, cl, ox, oy, rc + e * m * 0.42f, (1 + (1 - u) * 4) * (k > 0.5f ? k : 0.5f) * 2, L->halo, (1 - u) * 0.6f * r->a);
+        float u = clamp01((float)(now - r->at) / 1.1f), e = 1 - (1 - u) * (1 - u) * (1 - u), sr = CIRCUM * unit * s->mo.scale;
+        float rad = sr * 1.02f + e * fmaxf(0, m * 0.5f - sr * 1.02f);
+        ring_col(c, cl, ox, oy, rad, (0.6f + 0.8f * (1 - u)) * (k > 0.5f ? k : 0.5f) * 2, L->halo, (1 - u) * (1 - u) * 0.45f * r->a);
     }
 
     /* the shell: the snap turns (mo.q), the drift (ax, ay), then turned toward the cursor or into the motion */

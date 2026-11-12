@@ -1063,7 +1063,7 @@ static void r_unlock(Ctx *c) {
     else c->w->rate = .15f;
     if (e >= .3f && !(U->flags & 2)) { /* burst */
         U->flags |= 2;
-        s->ring_at = now;
+        ring(m, now, 1);
         flash(m, sh->nv, 1);
         for (int i = 0; i < 5; i++) spike_pair(s, sh, c->M, rnd(s, .28f, .4f), rnd(s, .25f, .4f), rnd(s, .2f, .4f), NULL, .07f, .16f, now);
         float ax[3]; rand_dir(s, ax);
@@ -1075,7 +1075,7 @@ static void r_unlock(Ctx *c) {
         c->w->grp[g] += .2f * a / fmaxf(.45f, m->gw[g]);
         if (e >= close + .08f && !U->clicked[g]) { U->clicked[g] = 1; glow_patch(m, sh, g, .9f); } /* click: this patch is home */
     }
-    if (e > 2.32f && !(U->flags & 4)) { U->flags |= 4; s->ring_at = now; flash(m, sh->nv, .8f); s->spin_y += 3; }
+    if (e > 2.32f && !(U->flags & 4)) { U->flags |= 4; ring(m, now, .7f); flash(m, sh->nv, .8f); s->spin_y += 3; }
 }
 
 /* Bloom: anticipation, release, joy, a satisfying close. It curls in and gathers light; bursts open ring by ring

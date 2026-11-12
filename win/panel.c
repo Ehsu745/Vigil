@@ -30,6 +30,8 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <ole2.h>
+#include <richedit.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -373,6 +375,8 @@ static void pane_create(Pane *p) {
                           L"VigilPanel", L"Vigil", WS_POPUP, 0, 0, 1, 1, NULL, NULL, GetModuleHandle(NULL), NULL);
     p->mem = CreateCompatibleDC(NULL);
     p->transparent = 1;
+    extern IDropTarget g_dt_ref;
+    RegisterDragDrop(p->w, &g_dt_ref); /* an image dragged over the core: it reads it */
 }
 
 static void pane_size(Pane *p, int w, int h) {
@@ -1168,6 +1172,70 @@ static const wchar_t *mono_face(void) {
     return face;
 }
 
+/* Chinese, Japanese and Korean text. The monospaced faces have no CJK glyphs, and GDI's own fallback (font
+ * linking) puts in a serif face with 1-em characters, smaller and narrower than in the terminal. Windows Terminal
+ * (where Claude Code runs) falls back to Microsoft JhengHei and gives each such character two cells; so does this:
+ * CJK runs are drawn with that face at the same size and baseline, two cells wide when the text is monospaced. */
+static int cjk_char(wchar_t c) { return (c >= 0x2E80 && c < 0xD800) || (c >= 0xF900 && c < 0xFFF0 && !(c >= 0xFF61 && c <= 0xFFDC)); }
+static const wchar_t *cjk_face(void) {
+    static wchar_t face[LF_FACESIZE];
+    static int tried;
+    if (tried) return face[0] ? face : NULL;
+    tried = 1;
+    static const wchar_t *TRY[] = {L"Microsoft JhengHei UI", L"Microsoft JhengHei", L"Microsoft YaHei UI", L"Yu Gothic UI", L"Malgun Gothic"};
+    HDC sdc = GetDC(NULL);
+    for (int i = 0; i < 5 && !face[0]; i++) {
+        HFONT f = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, TRY[i]);
+        HGDIOBJ old = SelectObject(sdc, f);
+        wchar_t got[LF_FACESIZE];
+        GetTextFaceW(sdc, LF_FACESIZE, got);
+        SelectObject(sdc, old);
+        DeleteObject(f);
+        if (!wcscmp(got, TRY[i])) wcscpy(face, TRY[i]);
+    }
+    ReleaseDC(NULL, sdc);
+    return face[0] ? face : NULL;
+}
+/* the CJK face matching font f (same height, weight, slant), made once per size */
+static HFONT cjk_for(HFONT f) {
+    static struct { LONG h, w; BYTE it; HFONT f; } cache[24];
+    static int n;
+    if (!cjk_face()) return f;
+    LOGFONTW lf;
+    if (!GetObjectW(f, sizeof lf, &lf)) return f;
+    for (int i = 0; i < n; i++) if (cache[i].h == lf.lfHeight && cache[i].w == lf.lfWeight && cache[i].it == lf.lfItalic) return cache[i].f;
+    HFONT c = CreateFontW(lf.lfHeight, 0, 0, 0, lf.lfWeight, lf.lfItalic, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, cjk_face());
+    if (n < 24) { cache[n].h = lf.lfHeight; cache[n].w = lf.lfWeight; cache[n].it = lf.lfItalic; cache[n].f = c; n++; }
+    return c;
+}
+static int font_mono(HFONT f) { LOGFONTW lf; return GetObjectW(f, sizeof lf, &lf) && (lf.lfPitchAndFamily & 3) == FIXED_PITCH; }
+/* text in font f with its CJK runs in the CJK face: the width, or drawn at (x, y) when draw is set */
+static int mix_text(HDC dc, HFONT f, const wchar_t *t, int n, int draw, int x, int y) {
+    int w = 0, mono = font_mono(f), cell = 0;
+    SIZE sz;
+    if (mono) { SelectObject(dc, f); GetTextExtentPoint32W(dc, L"M", 1, &sz); cell = sz.cx; }
+    for (int i = 0; i < n;) {
+        int j = i, cjk = cjk_char(t[i]);
+        while (j < n && cjk_char(t[j]) == cjk) j++;
+        HFONT use = cjk ? cjk_for(f) : f;
+        SelectObject(dc, use);
+        if (cjk && mono) { /* two cells each, the glyph centred in them, as in the terminal */
+            for (int k = i; k < j; k++) {
+                GetTextExtentPoint32W(dc, t + k, 1, &sz);
+                if (draw) TextOutW(dc, x + w + (2 * cell - sz.cx) / 2, y, t + k, 1);
+                w += 2 * cell;
+            }
+        } else {
+            GetTextExtentPoint32W(dc, t + i, j - i, &sz);
+            if (draw) TextOutW(dc, x + w, y, t + i, j - i);
+            w += sz.cx;
+        }
+        i = j;
+    }
+    SelectObject(dc, f);
+    return w;
+}
+
 static void tip_fonts(void) {
     if (g_tip_tf) return;
     int h = -(int)(g_font * g_dpi + 0.5);
@@ -1229,12 +1297,7 @@ static void lay_put(int x, int base, int f, COLORREF c, const wchar_t *t, int n,
 }
 static void lay_shape(int kind, int x, int y, int len, COLORREF c) { lay_add((Run){.x = x, .y = y, .f = kind, .n = kind == SH_BAR ? len : 0, .w = kind == SH_RULE ? len : 0, .url = -1, .c = c}, NULL); }
 
-static int text_w(HDC dc, int f, const wchar_t *t, int n) {
-    SIZE sz;
-    SelectObject(dc, lay_font(f));
-    GetTextExtentPoint32W(dc, t, n, &sz);
-    return sz.cx;
-}
+static int text_w(HDC dc, int f, const wchar_t *t, int n) { return mix_text(dc, lay_font(f), t, n, 0, 0, 0); }
 
 static int wide_char(wchar_t c) { return c >= 0x2E80 && !(c >= 0xFF61 && c <= 0xFFDC); } /* CJK and full-width: a line may break before any */
 
@@ -1584,9 +1647,8 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 DeleteObject(br);
                 continue;
             }
-            SelectObject(dc, lay_font(rn->f));
             SetTextColor(dc, rn->c);
-            TextOutW(dc, x, by, g_lay_text + rn->at, rn->n);
+            mix_text(dc, lay_font(rn->f), g_lay_text + rn->at, rn->n, 1, x, by);
             if (rn->deco) { /* a link's underline, a strike through */
                 HBRUSH br = CreateSolidBrush(rn->c);
                 if (rn->deco & DECO_UNDER) { RECT ur = {x, by + 2 * th, x + rn->w, by + 3 * th}; FillRect(dc, &ur, br); }
@@ -1730,10 +1792,14 @@ static wchar_t *g_draft;            /* what was typed for g_draft_sid, kept when
 static char g_draft_sid[72];
 static wchar_t *g_keys;             /* the fallback: text waiting to be typed into the terminal */
 static HFONT g_input_tf, g_input_sf;  /* the reply box's title and hint line */
+/* Images dropped on a core or on the reply box, as Claude Code shows them: each one puts an "[Image #N]" token
+ * where the cursor is, which can be moved or deleted like any text (Backspace takes a whole token); on send each
+ * token becomes the image's WSL path in its place, and an image whose token was deleted is not sent. */
 #define MAX_ATTACH 8
-static wchar_t g_attach[MAX_ATTACH][600]; /* images dropped on the core or the box, as WSL paths */
+static wchar_t g_attach[MAX_ATTACH][600]; /* as WSL paths */
 static wchar_t g_attach_name[MAX_ATTACH][120];
-static int g_attach_n;
+static int g_attach_id[MAX_ATTACH];       /* the N of its token */
+static int g_attach_n, g_attach_next;     /* g_attach_next: the last N given out for this reply */
 
 static int input_open(void) { return g_input && IsWindowVisible(g_input); }
 
@@ -1815,27 +1881,128 @@ static int send_tmux(const char *pane, const wchar_t *text) {
     return ok;
 }
 
+/* "[Image #N]" at c: the attachment it stands for (or -1), its N, and how many characters it takes */
+static int token_at(const wchar_t *c, int *id, int *used) {
+    int n = 0;
+    if (wcsncmp(c, L"[Image #", 8)) return -1;
+    if (swscanf(c + 8, L"%d]%n", id, &n) != 1 || n < 2 || c[8 + n - 1] != L']') return -1;
+    *used = 8 + n;
+    for (int k = 0; k < g_attach_n; k++) if (g_attach_id[k] == *id) return k;
+    return -1;
+}
+/* is attachment k still in the text (its token not deleted)? */
+static int attach_used(const wchar_t *text, int k) {
+    wchar_t tok[32];
+    swprintf(tok, 32, L"[Image #%d]", g_attach_id[k]);
+    return wcsstr(text, tok) != NULL;
+}
+/* the text as the selection counts it (a line break is one \r) */
+static wchar_t *edit_text(void) {
+    GETTEXTLENGTHEX gl = {GTL_NUMCHARS | GTL_PRECISE, 1200};
+    int n = (int)SendMessageW(g_edit, EM_GETTEXTLENGTHEX, (WPARAM)&gl, 0);
+    wchar_t *t = malloc(sizeof(wchar_t) * (size_t)(n + 1));
+    GETTEXTEX gt = {(DWORD)(sizeof(wchar_t) * (size_t)(n + 1)), GT_DEFAULT, 1200, NULL, NULL};
+    LRESULT got = SendMessageW(g_edit, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)t);
+    t[got >= 0 && got <= n ? got : 0] = 0;
+    return t;
+}
+/* the reply box's look: the CLI's face and colour, CJK runs in the CJK face (set again after each change) */
+static int g_styling;
+static void edit_style(void) {
+    if (!g_edit || g_styling) return;
+    g_styling = 1;
+    CHARFORMAT2W cf;
+    memset(&cf, 0, sizeof cf);
+    cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_COLOR | CFM_FACE | CFM_CHARSET;
+    cf.crTextColor = RGB(232, 234, 242);
+    cf.bCharSet = DEFAULT_CHARSET;
+    wcsncpy(cf.szFaceName, mono_face(), LF_FACESIZE - 1);
+    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+    const wchar_t *cj = cjk_face();
+    wchar_t *t = edit_text();
+    int n = (int)wcslen(t), any = 0;
+    for (int i = 0; i < n && !any; i++) any = cjk_char(t[i]);
+    if (any && cj) {
+        DWORD a = 0, b = 0;
+        SendMessageW(g_edit, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+        SendMessageW(g_edit, WM_SETREDRAW, FALSE, 0);
+        for (int i = 0; i < n;) {
+            int j = i, cjk = cjk_char(t[i]);
+            while (j < n && cjk_char(t[j]) == cjk) j++;
+            wcsncpy(cf.szFaceName, cjk ? cj : mono_face(), LF_FACESIZE - 1);
+            cf.bCharSet = cjk ? CHINESEBIG5_CHARSET : DEFAULT_CHARSET;
+            SendMessageW(g_edit, EM_SETSEL, i, j);
+            SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+            i = j;
+        }
+        SendMessageW(g_edit, EM_SETSEL, a, b);
+        SendMessageW(g_edit, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(g_edit, NULL, FALSE);
+    }
+    free(t);
+    g_styling = 0;
+}
+/* the tokens for attachments first..g_attach_n-1, typed in at the cursor */
+static void insert_tokens(int first) {
+    if (!g_edit || first >= g_attach_n) return;
+    DWORD a = 0, b = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+    wchar_t *t = edit_text(), ins[400] = L"";
+    if (a > 0 && t[a - 1] != L' ' && t[a - 1] != L'\n') wcscat(ins, L" ");
+    for (int k = first; k < g_attach_n; k++) { wchar_t tok[32]; swprintf(tok, 32, L"[Image #%d] ", g_attach_id[k]); wcscat(ins, tok); }
+    free(t);
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)ins);
+    InvalidateRect(g_input, NULL, FALSE);
+}
+/* Backspace just after a token, or Delete just before one: the whole token goes */
+static int token_key(HWND w, int back) {
+    DWORD a = 0, b = 0;
+    SendMessageW(w, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+    if (a != b) return 0;
+    wchar_t *t = edit_text();
+    int len = (int)wcslen(t), done = 0;
+    for (int st = (int)a - 20 < 0 ? 0 : (int)a - 20; st <= (int)a && st < len && !done; st++) {
+        int id, used = 0;
+        if (wcsncmp(t + st, L"[Image #", 8) || swscanf(t + st + 8, L"%d]%n", &id, &used) != 1) continue;
+        int end = st + 8 + used;
+        if ((back && end == (int)a) || (!back && st == (int)a)) {
+            if (end < len && t[end] == L' ') end++; /* and the space after it */
+            SendMessageW(w, EM_SETSEL, st, end);
+            SendMessageW(w, EM_REPLACESEL, TRUE, (LPARAM)L"");
+            done = 1;
+        }
+    }
+    free(t);
+    if (done) InvalidateRect(g_input, NULL, FALSE);
+    return done;
+}
+
 static void bring_to_front(const Session *s);
 
 static void send_reply(void) {
     int i = index_of(g_input_sid);
-    int n = GetWindowTextLengthW(g_edit);
-    wchar_t *text = malloc(sizeof(wchar_t) * (size_t)(n + 1));
-    GetWindowTextW(g_edit, text, n + 1);
+    wchar_t *text = edit_text();
+    int n = (int)wcslen(text);
+    for (int k = 0; k < n; k++) if (text[k] == L'\r') text[k] = L'\n'; /* the rich edit's line breaks */
     while (n > 0 && (text[n - 1] == L' ' || text[n - 1] == L'\n' || text[n - 1] == L'\r')) text[--n] = 0; /* no trailing blank line */
     SetWindowTextW(g_edit, L"");
     input_close();
     free(g_draft); g_draft = NULL;
-    if (i < 0 || (!n && !g_attach_n)) { free(text); return; }
-    if (g_attach_n) { /* the images go in as their paths, after the words */
+    if (i < 0 || !n) { free(text); return; }
+    if (g_attach_n) { /* each "[Image #N]" becomes its image's path, where it stands */
         size_t len = wcslen(text) + 1;
-        for (int k = 0; k < g_attach_n; k++) len += wcslen(g_attach[k]) + 1;
-        wchar_t *all = malloc(sizeof(wchar_t) * (len + 1));
-        wcscpy(all, text);
-        for (int k = 0; k < g_attach_n; k++) { if (all[0]) wcscat(all, L" "); wcscat(all, g_attach[k]); }
+        for (int k = 0; k < g_attach_n; k++) len += wcslen(g_attach[k]) * 4;
+        wchar_t *all = malloc(sizeof(wchar_t) * (len + 1)), *o = all;
+        for (const wchar_t *c = text; *c;) {
+            int id, used = 0, k = token_at(c, &id, &used);
+            if (k >= 0) { wcscpy(o, g_attach[k]); o += wcslen(o); c += used; }
+            else *o++ = *c++;
+        }
+        *o = 0;
         free(text);
         text = all;
-        g_attach_n = 0;
+        g_attach_n = g_attach_next = 0;
     }
     Session *s = &shown_room()->s[i];
     s->unread = 0;
@@ -1877,18 +2044,17 @@ static void type_enter(void) {
 static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_KEYDOWN && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) { send_reply(); return 0; }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
-    if (msg == WM_KEYDOWN && wp == VK_BACK && !GetWindowTextLengthW(w) && g_attach_n) { g_attach_n--; InvalidateRect(g_input, NULL, FALSE); return 0; }
-    if (msg == WM_CHAR && wp == 8 && !GetWindowTextLengthW(w)) return 0;
+    if (msg == WM_PASTE) { SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
+    if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
     if (msg == WM_CHAR && (wp == L'\r' || wp == 27) && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
     if (msg == WM_MOUSEWHEEL) { tip_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
     return CallWindowProcW(g_edit_proc, w, msg, wp, lp);
 }
 
-static void add_drop(HDROP d);
+static void add_drop(HDROP d, int finish);
 
 static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_CTLCOLOREDIT: SetTextColor((HDC)wp, RGB(232, 234, 242)); SetBkColor((HDC)wp, RGB(36, 38, 46)); return (LRESULT)g_input_bg;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { /* like the text box: dark card, the session's colour down the left edge, a rounded field */
         PAINTSTRUCT ps;
@@ -1915,12 +2081,21 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         RECT tt = {x0, pad, r.right - pad, pad + in_title_h()};
         DrawTextW(dc, title, -1, &tt, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         wchar_t hint[1200];
+        int used = 0;
         if (g_attach_n) {
-            swprintf(hint, 1200, L"%d image%ls: ", g_attach_n, g_attach_n > 1 ? L"s" : L"");
-            for (int k = 0; k < g_attach_n; k++) { if (k) wcscat(hint, L", "); wcsncat(hint, g_attach_name[k], 1100 - wcslen(hint)); }
-            wcscat(hint, L"   \x00B7   Backspace removes the last");
-        } else wcscpy(hint, L"Enter sends   \x00B7   Shift+Enter new line   \x00B7   Esc closes   \x00B7   drop an image on the core");
-        SetTextColor(dc, g_attach_n ? RGB(190, 200, 225) : RGB(120, 126, 142));
+            wchar_t *t = edit_text();
+            hint[0] = 0;
+            for (int k = 0; k < g_attach_n; k++) {
+                if (!attach_used(t, k)) continue;
+                wchar_t one[200];
+                swprintf(one, 200, L"%ls[Image #%d] %ls", used++ ? L",  " : L"", g_attach_id[k], g_attach_name[k]);
+                wcsncat(hint, one, 1000 - wcslen(hint));
+            }
+            free(t);
+        }
+        if (used) wcscat(hint, L"   \x00B7   Backspace deletes an image");
+        else wcscpy(hint, L"Enter sends   \x00B7   Shift+Enter new line   \x00B7   Esc closes   \x00B7   drop an image on the core");
+        SetTextColor(dc, used ? RGB(190, 200, 225) : RGB(120, 126, 142));
         SelectObject(dc, g_input_sf);
         RECT ht = {x0 + (int)(2 * g_dpi), fy + in_field_h() + gap, r.right - pad, r.bottom - pad};
         DrawTextW(dc, hint, -1, &ht, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1933,7 +2108,8 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(w, NULL, FALSE);
         return 0;
     }
-    case WM_DROPFILES: add_drop((HDROP)wp); return 0;
+    case WM_DROPFILES: { int first = g_attach_n; add_drop((HDROP)wp, 1); insert_tokens(first); return 0; }
+    case WM_COMMAND: if (HIWORD(wp) == EN_CHANGE) { edit_style(); InvalidateRect(w, NULL, FALSE); } return 0; /* CJK in its face; the hint lists the images still in the text */
     case WM_ACTIVATE: if (LOWORD(wp) == WA_INACTIVE) input_close(); return 0; /* clicked elsewhere */
     case WM_SETFOCUS: SetFocus(g_edit); return 0;
     }
@@ -1975,8 +2151,19 @@ static int is_image(const wchar_t *path) {
     return 0;
 }
 
-/* image files dropped on a core or on the reply box: kept for the reply (other files are passed over) */
-static void add_drop(HDROP d) {
+/* image files dropped on a core or on the reply box: kept for the reply, each with its token number (other
+ * files are passed over); finish: the drop came as WM_DROPFILES and is ours to free */
+static void add_drop(HDROP d, int finish) {
+    if (g_attach_n == MAX_ATTACH && g_edit) { /* full: forget the images whose tokens were deleted */
+        wchar_t *t = edit_text();
+        int o = 0;
+        for (int k = 0; k < g_attach_n; k++) if (attach_used(t, k)) {
+            if (o != k) { wcscpy(g_attach[o], g_attach[k]); wcscpy(g_attach_name[o], g_attach_name[k]); g_attach_id[o] = g_attach_id[k]; }
+            o++;
+        }
+        g_attach_n = o;
+        free(t);
+    }
     UINT n = DragQueryFileW(d, 0xFFFFFFFF, NULL, 0);
     for (UINT i = 0; i < n && g_attach_n < MAX_ATTACH; i++) {
         wchar_t path[MAX_PATH * 2];
@@ -1985,10 +2172,16 @@ static void add_drop(HDROP d) {
         const wchar_t *base = wcsrchr(path, L'\\');
         wcsncpy(g_attach_name[g_attach_n], base ? base + 1 : path, 119);
         g_attach_name[g_attach_n][119] = 0;
+        g_attach_id[g_attach_n] = ++g_attach_next;
         g_attach_n++;
     }
-    DragFinish(d);
+    if (finish) DragFinish(d);
     if (g_input) InvalidateRect(g_input, NULL, FALSE);
+}
+static int has_image(HDROP d) {
+    UINT n = DragQueryFileW(d, 0xFFFFFFFF, NULL, 0);
+    for (UINT i = 0; i < n; i++) { wchar_t path[MAX_PATH * 2]; if (DragQueryFileW(d, i, path, MAX_PATH * 2) && is_image(path)) return 1; }
+    return 0;
 }
 
 static void input_open_for(const Session *s) {
@@ -2003,19 +2196,24 @@ static void input_open_for(const Session *s) {
         RegisterClass(&ic);
         g_input_bg = CreateSolidBrush(RGB(36, 38, 46));
         g_input = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, L"VigilInput", L"Vigil reply", WS_POPUP, 0, 0, 10, 10, NULL, NULL, ic.hInstance, NULL);
-        g_edit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 10, 10, g_input, NULL, ic.hInstance, NULL);
+        LoadLibraryW(L"Msftedit.dll"); /* a rich edit: a font per run, so Chinese can have its own face, as in the terminal */
+        g_edit = CreateWindowEx(0, MSFTEDIT_CLASS, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 10, 10, g_input, NULL, ic.hInstance, NULL);
+        SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, RGB(36, 38, 46));
+        SendMessageW(g_edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
         g_edit_proc = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)edit_proc);
     }
     if (!g_input_font) {
-        g_input_font = CreateFontW(-(int)(g_font * g_dpi + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        g_input_font = CreateFontW(-(int)(g_font * g_dpi + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, mono_face()); /* the CLI's face */
         g_input_tf = CreateFontW(-(int)(g_font * g_dpi + 0.5f), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         g_input_sf = CreateFontW(-(int)(g_font * 0.86f * g_dpi + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     }
     SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_input_font, TRUE);
+    edit_style();
     if (strcmp(g_input_sid, s->sid)) {
-        if (strcmp(g_draft_sid, s->sid)) g_attach_n = 0; /* images belong to the reply they were dropped for */
+        if (strcmp(g_draft_sid, s->sid)) g_attach_n = g_attach_next = 0; /* images belong to the reply they were dropped for */
         snprintf(g_input_sid, sizeof g_input_sid, "%s", s->sid);
         SetWindowTextW(g_edit, g_draft && !strcmp(g_draft_sid, s->sid) ? g_draft : L"");
+        edit_style();
     }
     InvalidateRect(g_input, NULL, FALSE);
     LONG_PTR ex = GetWindowLongPtr(g_tip, GWL_EXSTYLE); /* the box takes the wheel while a reply is typed */
@@ -2029,6 +2227,69 @@ static void input_open_for(const Session *s) {
     SendMessageW(g_edit, EM_SETSEL, 0, -1);
     SendMessageW(g_edit, EM_SETSEL, (WPARAM)-1, -1);
 }
+
+/* ---- images dragged onto a core: it reads them (TRANSCRIBING) while they are over it and a moment after the
+ * drop, then its reply box opens with an [Image #N] token for each. An OLE drop target on each core's window, so
+ * the core can answer while the drag is still going on (WM_DROPFILES only says so at the end). */
+static char g_drag_sid[72], g_drop_sid[72]; /* the core an image is over now; the one that just took a drop */
+static double g_drop_until;
+static int core_at(POINT p, float *lx, float *ly);
+static Room *shown_room(void);
+static void drop_on_core(int i, HDROP d) {
+    Room *room = shown_room();
+    if (i < 0 || i >= room->n || !strcmp(room->s[i].sid, "ghost") || !has_image(d)) return;
+    Session *s = &room->s[i];
+    if (strcmp(g_input_sid, s->sid) && strcmp(g_draft_sid, s->sid)) g_attach_n = g_attach_next = 0;
+    snprintf(g_draft_sid, sizeof g_draft_sid, "%s", s->sid); /* so opening keeps them */
+    int first = g_attach_n;
+    add_drop(d, 0);
+    snprintf(g_drop_sid, sizeof g_drop_sid, "%s", s->sid);
+    g_drop_until = wall() + 1.4;
+    input_open_for(s);
+    insert_tokens(first);
+}
+static HDROP drag_files(IDataObject *d, STGMEDIUM *sm) {
+    FORMATETC fe = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    return d && d->lpVtbl->GetData(d, &fe, sm) == S_OK ? (HDROP)sm->hGlobal : NULL;
+}
+static int g_drag_img; /* what is being dragged has an image in it */
+static DWORD drag_at(POINTL pt) {
+    POINT p = {pt.x, pt.y};
+    Room *room = shown_room();
+    int i = g_drag_img ? core_at(p, NULL, NULL) : -1;
+    if (i >= 0 && i < room->n && strcmp(room->s[i].sid, "ghost")) { snprintf(g_drag_sid, sizeof g_drag_sid, "%s", room->s[i].sid); return DROPEFFECT_COPY; }
+    g_drag_sid[0] = 0;
+    return DROPEFFECT_NONE;
+}
+static HRESULT STDMETHODCALLTYPE dt_qi(IDropTarget *t, REFIID riid, void **pp) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDropTarget)) { *pp = t; return S_OK; }
+    *pp = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE dt_ref(IDropTarget *t) { (void)t; return 1; } /* one static object, never freed */
+static HRESULT STDMETHODCALLTYPE dt_enter(IDropTarget *t, IDataObject *d, DWORD keys, POINTL pt, DWORD *eff) {
+    (void)t; (void)keys;
+    STGMEDIUM sm;
+    HDROP h = drag_files(d, &sm);
+    g_drag_img = h && has_image(h);
+    if (h) ReleaseStgMedium(&sm);
+    *eff = drag_at(pt);
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE dt_over(IDropTarget *t, DWORD keys, POINTL pt, DWORD *eff) { (void)t; (void)keys; *eff = drag_at(pt); return S_OK; }
+static HRESULT STDMETHODCALLTYPE dt_leave(IDropTarget *t) { (void)t; g_drag_sid[0] = 0; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dt_drop(IDropTarget *t, IDataObject *d, DWORD keys, POINTL pt, DWORD *eff) {
+    (void)t; (void)keys;
+    POINT p = {pt.x, pt.y};
+    STGMEDIUM sm;
+    HDROP h = drag_files(d, &sm);
+    g_drag_sid[0] = 0;
+    *eff = DROPEFFECT_NONE;
+    if (h) { drop_on_core(core_at(p, NULL, NULL), h); ReleaseStgMedium(&sm); *eff = DROPEFFECT_COPY; }
+    return S_OK;
+}
+static IDropTargetVtbl g_dt_vtbl = {dt_qi, dt_ref, dt_ref, dt_enter, dt_over, dt_leave, dt_drop};
+IDropTarget g_dt_ref = {&g_dt_vtbl};
 
 /* ---- the pointer ---------------------------------------------------------------------------------- */
 /* the core under p (screen pixels), or -1; look gets the offset from its centre in shell radii (y down).
@@ -2230,6 +2491,7 @@ static void update_overlays(double now) {
         Session *s = &room->s[i];
         s->overlay = 0;
         s->overlay = away && session_shown(s, now) != ST_WAIT ? ST_STANDBY : 0;
+        if ((g_drag_sid[0] && !strcmp(s->sid, g_drag_sid)) || (now < g_drop_until && !strcmp(s->sid, g_drop_sid))) s->overlay = ST_TRANSCRIBE; /* an image on it */
     }
 }
 
@@ -2438,6 +2700,7 @@ static Orbit g_pv_ob[4];
 static int g_pv_st = ST_THINK, g_pv_drag; /* the state the preview's main core shows */
 static int g_tab;                   /* 0 General, 1 Motions */
 static double g_mot_msg_until;      /* "a state needs a routine" shows until then */
+static float g_pv_zoom = 1;         /* the wheel over the preview: 1 to 3 times, to see the detail */
 static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
 
@@ -2741,12 +3004,14 @@ static void set_build(void) {
     /* title and close */
     tx(28, 14, 400, 50, L"Settings", g_sf_title, S_TEXT, DT_LEFT);
     static const wchar_t *tabs[2] = {L"General", L"Motions"};
-    for (int i = 0; i < 2; i++) { /* the two pages */
-        float a = 128 + i * 92;
+    for (int i = 0; i < 2; i++) { /* the two pages, as tabs: the open one filled in slate blue, the other plain text */
+        float a = 132 + i * 96;
         int on = g_tab == i, hot = is_hot(K_TAB, 0, i);
-        box(pn, a, 18, a + 86, 46, 14, on ? S_CHIP_HOT : (hot ? S_CHIP : S_BG), S_OR, on ? 1.5f : 0);
-        tx(a, 18, a + 86, 46, tabs[i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
-        hit(a, 18, a + 86, 46, K_TAB, 0, i);
+        if (on) box(pn, a, 19, a + 88, 45, 5, 0x22304A, 0x3A4C6A, 1);
+        else if (hot) box(pn, a, 19, a + 88, 45, 5, 0x232327, 0, 0);
+        tx(a, 19, a + 88, 45, tabs[i], g_sf_label, on ? 0xFFFFFF : hot ? S_TEXT : 0xC4C7CF, DT_CENTER);
+        hit(a, 19, a + 88, 45, K_TAB, 0, i);
+        if (!on && !(i + 1 < 2 && g_tab == i + 1)) box(pn, a + 93, 24, a + 94, 40, 0, S_EDGE, 0, 0); /* a thin divider after it */
     }
     int ch = is_hot(K_CLOSE, 0, 0);
     box(pn, 824, 16, 856, 48, 10, ch ? S_CLOSE_HOT : 0x26262B, 0, 0);
@@ -2766,7 +3031,10 @@ static void set_build(void) {
     box(pn, 580, 74, 583, 74 + sh, 1.5f, S_OR, 0, 0);
     tx(594, 84, 832, 84 + th, L"vigil · Done", g_tip_tf, 0xFFB877, DT_LEFT | DT_END_ELLIPSIS);
     tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_tip_bf, 0xE6E8F0, DT_WORDBREAK | DT_END_ELLIPSIS);
-    tx(580, 190, 840, 210, L"Drag the core to feel the gravity", g_sf_label, S_MUTED, DT_LEFT);
+    wchar_t hint[80];
+    if (g_pv_zoom > 1.01f) swprintf(hint, 80, L"Scroll to zoom: %.1fx   \x00B7   double-click resets", g_pv_zoom);
+    else wcscpy(hint, L"Drag the core   \x00B7   scroll on it to zoom in");
+    tx(580, 190, 840, 210, hint, g_sf_label, S_MUTED, DT_LEFT);
     for (int i = 0; i < 6; i++) {
         float x0 = 580 + (i % 3) * (260 + 6) / 3.0f, y0 = 216 + (i / 3) * 34;
         float x1 = x0 + (260 - 12) / 3.0f;
@@ -2908,7 +3176,7 @@ static void settings_tick(double now) {
     if (g_sl_dirty) set_build();
     /* the cluster in the preview, scaled as Size scales it on the screen */
     int pw = g_pv_rc.right - g_pv_rc.left, ph = g_pv_rc.bottom - g_pv_rc.top;
-    float cx = pw / 2.0f, cy = ph / 2.0f, cw = fminf((float)pw, (float)ph) * 0.97f * (0.55f + 0.45f * (g_scale - 0.75f) / 0.85f);
+    float cx = pw / 2.0f, cy = ph / 2.0f, cw = fminf((float)pw, (float)ph) * 0.97f * (0.55f + 0.45f * (g_scale - 0.75f) / 0.85f) * g_pv_zoom;
     /* the same proportions as draw_single, on a cluster cw wide instead of g_cw */
     float big = cw * 0.6f, rx = cw / 2.0f - (float)(8 * g_dpi) * cw / g_cw, ry = rx * 1.15f;
     float small = g_others ? fminf(cw * 0.2f, (float)(2 * M_PI * rx / 3 * 0.75)) : 0;
@@ -2966,7 +3234,7 @@ static void settings_tick(double now) {
         blit_pic_at(&g_pv, g_pv_ob[i].px - w4 / 2.0f, g_pv_ob[i].py - w4 / 2.0f, &g_pv_pic[i]);
     }
     int w4 = ((int)big / 4) * 4;
-    pic_make(&g_pv_pic[0], m, w4, now, 1);
+    pic_make(&g_pv_pic[0], m, w4, now, 3); /* the one you watch: every frame */
     float fx = g_pv_mx - w4 / 2.0f, fy = g_pv_my - w4 / 2.0f;
     blit_pic_at(&g_pv, fx, fy, &g_pv_pic[0]);
     g_blit_add = 0;
@@ -3026,6 +3294,9 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         }
         break;
+    case WM_LBUTTONDBLCLK: /* on the preview: zoom back to 1; anywhere else a second press like the first */
+        if (PtInRect(&g_pv_rc, p) && set_hit_at(p) < 0) { g_pv_zoom = 1; g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; return 0; }
+        /* fall through */
     case WM_LBUTTONDOWN: {
         int h = set_hit_at(p);
         if (h >= 0) {
@@ -3062,6 +3333,15 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
         tip_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
+    case WM_MOUSEWHEEL: { /* over the preview: zoom in to see the detail */
+        POINT c = p; ScreenToClient(w, &c);
+        if (!PtInRect(&g_pv_rc, c)) return 0;
+        g_pv_zoom = clampf(g_pv_zoom * powf(1.2f, GET_WHEEL_DELTA_WPARAM(wp) / 120.0f), 1, 3);
+        if (g_pv_zoom < 1.05f) g_pv_zoom = 1;
+        g_pv_mx = g_pv_my = 0; /* centred again */
+        g_sl_dirty = 1;
+        return 0;
+    }
     case WM_KEYDOWN: if (wp == VK_ESCAPE) { set_close(); return 0; } break;
     case WM_CLOSE: set_close(); return 0;
     }
@@ -3079,6 +3359,7 @@ static void settings_open(void) {
         sc.hInstance = GetModuleHandle(NULL);
         sc.hCursor = LoadCursor(NULL, IDC_ARROW);
         sc.lpszClassName = L"VigilSettings";
+        sc.style = CS_DBLCLKS;
         RegisterClass(&sc);
         g_set = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"VigilSettings", L"Vigil settings", WS_POPUP, 0, 0, 10, 10, NULL, NULL, sc.hInstance, NULL);
         g_sl.mem = CreateCompatibleDC(NULL);
@@ -3270,17 +3551,12 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_RBUTTONUP: { int i = core_at(p, NULL, NULL); if (i >= 0) menu(w, i); return 0; }
-    case WM_DROPFILES: { /* images dropped on a core: its reply line opens with them */
+    case WM_DROPFILES: { /* images dropped on a core (when the drop target below is not in use) */
         POINT dp;
         DragQueryPoint((HDROP)wp, &dp);
         ClientToScreen(w, &dp);
-        int i = core_at(dp, NULL, NULL);
-        if (i < 0 || i >= room->n || !strcmp(room->s[i].sid, "ghost")) { DragFinish((HDROP)wp); return 0; }
-        if (strcmp(g_input_sid, room->s[i].sid) && strcmp(g_draft_sid, room->s[i].sid)) g_attach_n = 0;
-        snprintf(g_draft_sid, sizeof g_draft_sid, "%s", room->s[i].sid); /* so opening keeps them */
-        add_drop((HDROP)wp);
-        room->s[i].ring_at = wall();
-        input_open_for(&room->s[i]);
+        drop_on_core(core_at(dp, NULL, NULL), (HDROP)wp);
+        DragFinish((HDROP)wp);
         return 0;
     }
     case WM_SETCURSOR: /* moved by the mouse: the core is the pointer */
@@ -3344,6 +3620,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     const char *events = NULL;
+    OleInitialize(NULL); /* the cores are drop targets (an image dragged over one) */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--demo")) { g_demo_n = 3; if (v && v[0] >= '1' && v[0] <= '6' && !v[1]) { g_demo_n = v[0] - '0'; i++; } }
