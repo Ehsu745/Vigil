@@ -278,6 +278,7 @@ static void remember_launch(void) {
 }
 
 static void restore_launch(void) {
+    motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_tip_size = g_launch.tip_size; g_others = g_launch.others;
     g_labels = g_launch.labels; g_away_after = g_launch.away; g_tip_middle = g_launch.tip_middle; g_tip_mono = g_launch.tip_mono;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
@@ -291,8 +292,26 @@ static int json_num(const char *j, const char *key, float *v) {
     return c && sscanf(c + strlen(k), " : %f", v) == 1;
 }
 
+/* "key": [n, n, ...] with ST_N numbers; 0 if missing or short */
+static int json_masks(const char *j, const char *key, uint32_t *out) {
+    char k[40];
+    snprintf(k, sizeof k, "\"%s\"", key);
+    const char *c = strstr(j, k);
+    if (!c || !(c = strchr(c + strlen(k), '['))) return 0;
+    c++;
+    for (int i = 0; i < ST_N; i++) {
+        char *e;
+        unsigned long v = strtoul(c, &e, 10);
+        if (e == c) return 0;
+        out[i] = (uint32_t)v;
+        c = e;
+        while (*c == ' ' || *c == ',') c++;
+    }
+    return 1;
+}
+
 static void settings_load(void) {
-    char path[1100], buf[1024];
+    char path[1100], buf[4096];
     if (!settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "rb");
     if (!f) return;
@@ -314,6 +333,16 @@ static void settings_load(void) {
     char sh[16], *c = strstr(buf, "\"shape\"");
     if (c && sscanf(c, "\"shape\" : \"%15[a-z0-9]\"", sh) == 1) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh);
     if ((c = strstr(buf, "\"frame\"")) && sscanf(c, "\"frame\" : \"%15[a-z]\"", sh) == 1) snprintf(g_frame, sizeof g_frame, "%s", sh);
+    uint32_t rt[ST_N], act[ST_N]; /* Settings > Motions */
+    MotionMap def[ST_N];
+    motion_map_init();
+    motion_map_default(def);
+    if (json_masks(buf, "mapRoutines", rt) && json_masks(buf, "mapActions", act))
+        for (int i = 0; i < ST_N; i++) {
+            uint32_t r = rt[i] & ((1u << RT_N) - 1);
+            MOTION_MAP[i].rt = r ? r : def[i].rt; /* a state always has a routine */
+            MOTION_MAP[i].act = act[i] & ((1u << W_N) - 2);
+        }
 }
 
 static void settings_save(void) {
@@ -324,6 +353,12 @@ static void settings_save(void) {
     fprintf(f, "{\"fontSize\": %g, \"core\": %g, \"scale\": %g, \"glow\": %g, \"gravity\": %g, \"tipSize\": %g, \"others\": %d, \"labels\": %d, \"tipMiddle\": %d, \"tipMono\": %d, \"away\": %g, "
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
             g_font, g_core, g_scale, g_glow, g_gravity, g_tip_size, g_others, g_labels, g_tip_middle, g_tip_mono, g_away_after, g_shape_name, g_frame);
+    fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
+    fprintf(f, ", \"mapRoutines\": [");
+    for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
+    fprintf(f, "], \"mapActions\": [");
+    for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
+    fprintf(f, "]}\n");
     fclose(f);
 }
 
@@ -2374,7 +2409,7 @@ static double tick_interval(void) { return g_moving || g_dragging || g_carrying 
  * Replies) with icon tiles, sliders, a switch and chips. Drawn antialiased into its own bitmap and shown as a
  * layered window, so the corners are smooth too. Every choice applies at once and is kept, as the menu's were. */
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_TIPAT, R_TIPFONT, R_TEXT, R_LABELS, R_AWAY, R_TIPSIZE };
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
 typedef struct { RECT r; int kind, row, val, n; float t0, t1; } SetHit; /* a slider: n stops from t0 to t1 (pixels) */
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
 static const wchar_t *PV_NAMES[6] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep"};
@@ -2390,17 +2425,19 @@ static COLORREF hexr(unsigned v) { return RGB(v >> 16 & 255, v >> 8 & 255, v & 2
 static Pane g_sl, g_so;             /* the window's still layer (redrawn when something changes) and what is shown */
 static int g_sl_dirty = 1;
 static HFONT g_sf_title, g_sf_card, g_sf_text, g_sf_label, g_sf_small, g_sf_aa, g_sf_aam;
-static SetHit g_hits[128];
+static SetHit g_hits[200];
 static int g_hits_n, g_hot = -1, g_slide = -1, g_tracking, g_close_armed; /* armed: pressed on the close button */
-typedef struct { RECT r; wchar_t t[80]; HFONT f; COLORREF c; UINT how; } TextOp;
-static TextOp g_tx[96];
+typedef struct { RECT r; wchar_t t[160]; HFONT f; COLORREF c; UINT how; } TextOp;
+static TextOp g_tx[160];
 static int g_tx_n;
 static RECT g_pv_rc;                /* the preview's cluster, in the window */
 static Pane g_pv;                   /* its picture (a DIB, no window of its own) */
 static Room g_pv_room;
 static Pic g_pv_pic[4];
 static Orbit g_pv_ob[4];
-static int g_pv_state = 1, g_pv_drag;
+static int g_pv_st = ST_THINK, g_pv_drag; /* the state the preview's main core shows */
+static int g_tab;                   /* 0 General, 1 Motions */
+static double g_mot_msg_until;      /* "a state needs a routine" shows until then */
 static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
 
@@ -2495,14 +2532,14 @@ static void box(Pane *pn, float x0, float y0, float x1, float y1, float rad, uns
     if (ew > 0) aa_rrect(pn, S(x0), S(y0), S(x1), S(y1), S(rad), hexc(edge), 1, S(ew));
 }
 static void tx(float x0, float y0, float x1, float y1, const wchar_t *t, HFONT f, unsigned c, UINT how) {
-    if (g_tx_n >= 96) return;
+    if (g_tx_n >= 160) return;
     TextOp *o = &g_tx[g_tx_n++];
     o->r = SR(x0, y0, x1, y1);
-    wcsncpy(o->t, t, 79); o->t[79] = 0;
+    wcsncpy(o->t, t, 159); o->t[159] = 0;
     o->f = f; o->c = hexr(c); o->how = how;
 }
 static void hit(float x0, float y0, float x1, float y1, int kind, int row, int val) {
-    if (g_hits_n < 128) g_hits[g_hits_n++] = (SetHit){SR(x0, y0, x1, y1), kind, row, val, 0, 0, 0};
+    if (g_hits_n < 200) g_hits[g_hits_n++] = (SetHit){SR(x0, y0, x1, y1), kind, row, val, 0, 0, 0};
 }
 static int is_hot(int kind, int row, int val) { return g_hot >= 0 && g_hits[g_hot].kind == kind && g_hits[g_hot].row == row && g_hits[g_hot].val == val; }
 
@@ -2565,7 +2602,7 @@ static void slider(Pane *pn, float x0, float y, float x1, int row, int n) {
     int hot = (g_hot >= 0 && g_hits[g_hot].kind == K_SLIDE && g_hits[g_hot].row == row) || (g_slide >= 0 && g_hits[g_slide].row == row);
     if (hot) aa_disc(pn, S(kx), S(y), S(12), hexc(S_OR), 0.18f);
     aa_disc(pn, S(kx), S(y), S(8), hexc(S_KNOB), 1);
-    if (g_hits_n < 128) g_hits[g_hits_n++] = (SetHit){SR(x0 - 10, y - 13, x1 + 10, y + 13), K_SLIDE, row, cur, n, S(x0), S(x1)};
+    if (g_hits_n < 200) g_hits[g_hits_n++] = (SetHit){SR(x0 - 10, y - 13, x1 + 10, y + 13), K_SLIDE, row, cur, n, S(x0), S(x1)};
 }
 
 /* ---- the preview: four made-up sessions, the main one in the state picked beside it */
@@ -2581,6 +2618,116 @@ static void pv_init(double now) {
     g_pv_last = now;
 }
 
+/* ---- the Motions page: which routines and actions each state may use (MOTION_MAP), and a preview of each */
+static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR};
+static const wchar_t *MOT_STATE_NAMES[ST_N] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep",
+                                              L"Speaking", L"Listening", L"Transcribing", L"Away", L"Error"};
+static const wchar_t *state_wname(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return L"?"; }
+static void txa(float x0, float y0, float x1, float y1, const char *a, HFONT f, unsigned c, UINT how) {
+    wchar_t w[160];
+    MultiByteToWideChar(CP_UTF8, 0, a, -1, w, 160);
+    w[159] = 0;
+    tx(x0, y0, x1, y1, w, f, c, how);
+}
+static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
+
+/* a running routine that was just switched off makes way at once */
+static void mot_refresh(int st, int rt) {
+    for (int i = 0; i < g_room.n; i++) if (g_room.s[i].mo.rt == rt && g_room.s[i].mo.routine == st) g_room.s[i].mo.routine = -1;
+    for (int i = 0; i < 4; i++) if (g_pv_room.s[i].mo.rt == rt && g_pv_room.s[i].mo.routine == st) g_pv_room.s[i].mo.routine = -1;
+}
+static void mot_play(int row, int id) {
+    Session *m = &g_pv_room.s[0];
+    if (row == 0) motion_play(m, id);
+    else whim_play(m, id, wall());
+    g_pv_lock_until = 0;
+}
+static void mot_toggle(int row, int id) {
+    MotionMap *mm = &MOTION_MAP[g_pv_st];
+    uint32_t *set = row == 0 ? &mm->rt : &mm->act, bit = 1u << id;
+    if (row == 0 && (*set & bit) && bits(*set) == 1) { g_mot_msg_until = wall() + 3; g_sl_dirty = 1; return; } /* a state needs a routine */
+    *set ^= bit;
+    if (*set & bit) mot_play(row, id); /* switched on: shown at once */
+    else if (row == 0) mot_refresh(g_pv_st, id);
+    settings_applied(1);
+}
+
+/* a chip that can be switched on, with a play button at its right end */
+static void mot_chip(Pane *pn, float x0, float y0, float x1, float y1, int on, int dis, int row, int id, const char *name) {
+    int hot = is_hot(K_MTOG, row, id), hp = is_hot(K_MPLAY, row, id);
+    box(pn, x0, y0, x1, y1, (y1 - y0) / 2, hot ? S_CHIP_HOT : S_TILE, on ? S_OR : (hot ? S_EDGE_HOT : S_EDGE), on ? 1.5f : 1);
+    txa(x0 + 10, y0, x1 - 19, y1, name, g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+    float cy = (y0 + y1) / 2, P[6] = {S(x1 - 16), S(cy - 4), S(x1 - 16), S(cy + 4), S(x1 - 9), S(cy)};
+    aa_tri(pn, P, hexc(hp ? S_OR : S_MUTED), 1);
+    if (!dis) hit(x0, y0, x1 - 22, y1, K_MTOG, row, id);
+    hit(x1 - 23, y0, x1, y1, K_MPLAY, row, id);
+}
+
+static void motions_page(Pane *pn) {
+    const float y0 = 304, l = 40, r = 840;
+    int st = g_pv_st;
+    box(pn, 24, y0, 856, 684, 16, S_CARD, 0, 0);
+    tx(l, y0 + 12, 300, y0 + 34, L"Motions", g_sf_card, S_TEXT, DT_LEFT);
+    tx(300, y0 + 12, r, y0 + 34, L"Each state picks one of its routines every time it starts; actions play now and then.", g_sf_small, S_MUTED, DT_RIGHT);
+    /* the states: Claude Code's, then the panel's own */
+    static const wchar_t *rowname[2] = {L"Claude Code", L"Panel"};
+    for (int rw = 0; rw < 2; rw++) {
+        float y = y0 + 42 + rw * 32;
+        tx(l, y, l + 86, y + 26, rowname[rw], g_sf_small, S_MUTED, DT_LEFT);
+        int n = rw ? 5 : 6, first = rw ? 6 : 0;
+        float cw = (r - (l + 88) - 5 * 6) / 6;
+        for (int i = 0; i < n; i++) {
+            int sti = MOT_STATES[first + i], on = sti == st, hot = is_hot(K_MSTATE, 0, sti);
+            float a = l + 88 + i * (cw + 6);
+            box(pn, a, y, a + cw, y + 26, 13, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
+            aa_disc(pn, S(a + 13), S(y + 13), S(3.5f), LOOKS[sti].halo, 1);
+            tx(a + 22, y, a + cw - 6, y + 26, MOT_STATE_NAMES[first + i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+            hit(a, y, a + cw, y + 26, K_MSTATE, 0, sti);
+        }
+    }
+    /* the routines: this state's own first */
+    const MotionMap *mm = &MOTION_MAP[st];
+    wchar_t lab[120];
+    swprintf(lab, 120, L"Routines for %ls", state_wname(st));
+    tx(l, y0 + 108, r, y0 + 128, lab, g_sf_label, S_LABEL, DT_LEFT);
+    tx(l, y0 + 108, r, y0 + 128, L"click to use it here  \x25B6 to watch it", g_sf_small, S_MUTED, DT_RIGHT);
+    int order[RT_N], n = 0;
+    for (int pass = 0; pass < 2; pass++) for (int i = 1; i < RT_N; i++) if ((ROUTINES[i].home == st) == !pass) order[n++] = i;
+    float cw = (r - l - 6 * 5) / 7;
+    for (int i = 0; i < n; i++) {
+        int id = order[i];
+        float a = l + (i % 7) * (cw + 5), y = y0 + 132 + (i / 7) * 31;
+        mot_chip(pn, a, y, a + cw, y + 26, (mm->rt >> id) & 1, id == RT_HOLE && st != ST_SLEEP, 0, id, ROUTINES[id].name);
+    }
+    /* the actions */
+    float ya = y0 + 132 + ((n + 6) / 7) * 31 + 6;
+    swprintf(lab, 120, L"Actions for %ls", state_wname(st));
+    tx(l, ya, r, ya + 20, lab, g_sf_label, S_LABEL, DT_LEFT);
+    float aw = (r - l - 7 * 5) / 8;
+    for (int w = 1; w < W_N; w++) {
+        float a = l + ((w - 1) % 8) * (aw + 5), y = ya + 24 + ((w - 1) / 8) * 31;
+        mot_chip(pn, a, y, a + aw, y + 26, (mm->act >> w) & 1, 0, 1, w, WHIMS[w].name);
+    }
+    /* what the chip under the pointer does, or a summary */
+    float yd = ya + 24 + ((W_N - 2) / 8 + 1) * 31 + 2;
+    char line[400];
+    if (g_hot >= 0 && (g_hits[g_hot].kind == K_MTOG || g_hits[g_hot].kind == K_MPLAY)) {
+        int id = g_hits[g_hot].val;
+        if (g_hits[g_hot].row == 0) {
+            char home[60] = "";
+            if (ROUTINES[id].home != st) { char hn[40]; WideCharToMultiByte(CP_UTF8, 0, state_wname(ROUTINES[id].home), -1, hn, 40, NULL, NULL); snprintf(home, sizeof home, " (made for %s)", hn); }
+            snprintf(line, sizeof line, "%s%s: %s", ROUTINES[id].name, home, ROUTINES[id].about);
+        } else snprintf(line, sizeof line, "%s: %s", WHIMS[id].name, WHIMS[id].about ? WHIMS[id].about : "");
+        txa(l, yd, r, yd + 20, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
+    } else if (wall() < g_mot_msg_until) tx(l, yd, r, yd + 20, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
+    else {
+        wchar_t sum[200];
+        int nr = bits(mm->rt), na = bits(mm->act);
+        swprintf(sum, 200, L"%ls uses %d routine%ls and %d action%ls. Changes apply the next time a state starts, and are kept.", state_wname(st), nr, nr == 1 ? L"" : L"s", na, na == 1 ? L"" : L"s");
+        tx(l, yd, r, yd + 20, sum, g_sf_small, S_MUTED, DT_LEFT);
+    }
+}
+
 /* the still layer: everything but the moving cluster */
 static void set_build(void) {
     set_fonts();
@@ -2593,6 +2740,14 @@ static void set_build(void) {
     box(pn, 0, 0, 880, 740, 18, S_BG, 0x2A2A30, 1);
     /* title and close */
     tx(28, 14, 400, 50, L"Settings", g_sf_title, S_TEXT, DT_LEFT);
+    static const wchar_t *tabs[2] = {L"General", L"Motions"};
+    for (int i = 0; i < 2; i++) { /* the two pages */
+        float a = 128 + i * 92;
+        int on = g_tab == i, hot = is_hot(K_TAB, 0, i);
+        box(pn, a, 18, a + 86, 46, 14, on ? S_CHIP_HOT : (hot ? S_CHIP : S_BG), S_OR, on ? 1.5f : 0);
+        tx(a, 18, a + 86, 46, tabs[i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
+        hit(a, 18, a + 86, 46, K_TAB, 0, i);
+    }
     int ch = is_hot(K_CLOSE, 0, 0);
     box(pn, 824, 16, 856, 48, 10, ch ? S_CLOSE_HOT : 0x26262B, 0, 0);
     aa_seg(pn, S(835), S(27), S(845), S(37), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
@@ -2615,95 +2770,97 @@ static void set_build(void) {
     for (int i = 0; i < 6; i++) {
         float x0 = 580 + (i % 3) * (260 + 6) / 3.0f, y0 = 216 + (i / 3) * 34;
         float x1 = x0 + (260 - 12) / 3.0f;
-        int on = i == g_pv_state, hot = is_hot(K_STATE, 0, i);
+        int on = PV_STATES[i] == g_pv_st, hot = is_hot(K_STATE, 0, i);
         box(pn, x0, y0, x1, y0 + 28, 14, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
         tx(x0, y0, x1, y0 + 28, PV_NAMES[i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
         hit(x0, y0, x1, y0 + 28, K_STATE, 0, i);
     }
-    /* the cards */
-    const float y0 = 304, cw = (832 - 32) / 3.0f;
-    float cx[3];
-    for (int k = 0; k < 3; k++) { cx[k] = 24 + k * (cw + 16); box(pn, cx[k], y0, cx[k] + cw, 680, 16, S_CARD, 0, 0); }
-    static const wchar_t *titles[3] = {L"Look", L"Motion", L"Replies"};
-    for (int k = 0; k < 3; k++) tx(cx[k] + 16, y0 + 14, cx[k] + cw - 16, y0 + 36, titles[k], g_sf_card, S_TEXT, DT_LEFT);
-    /* Look: shape, glow, size on screen, inner core */
-    float l = cx[0] + 16, r = cx[0] + cw - 16, tw = (r - l - 18) / 4;
-    tx(l, y0 + 46, r, y0 + 64, L"Shape", g_sf_label, S_LABEL, DT_LEFT);
-    static const wchar_t *shapes[4] = {L"Dodecahedron", L"Buckyball", L"Geodesic", L"Fine geodesic"};
-    for (int i = 0; i < 4; i++) {
-        float a = l + i * (tw + 6);
-        int sel = set_current(R_SHAPE) == i;
-        pick_box(pn, a, y0 + 70, a + tw, y0 + 116, 12, sel, is_hot(K_PICK, R_SHAPE, i), NULL, NULL);
-        shape_icon(pn, i, a + tw / 2, y0 + 93, sel ? S_OR : S_MUTED);
-        hit(a, y0 + 70, a + tw, y0 + 116, K_PICK, R_SHAPE, i);
-    }
-    int hs = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_SHAPE;
-    tx(l + 60, y0 + 46, r, y0 + 64, hs ? shapes[g_hits[g_hot].val] : shapes[set_current(R_SHAPE) < 0 ? 2 : set_current(R_SHAPE)], g_sf_small, S_MUTED, DT_RIGHT);
-    tx(l, y0 + 128, r, y0 + 146, L"Glow", g_sf_label, S_LABEL, DT_LEFT);
-    aa_disc(pn, S(l + 4), S(y0 + 164), S(3.5f), hexc(S_OR), 0.45f);
-    slider(pn, l + 20, y0 + 164, r - 22, R_GLOW, 3);
-    aa_disc(pn, S(r - 5), S(y0 + 164), S(10), hexc(S_OR), 0.2f);
-    aa_disc(pn, S(r - 5), S(y0 + 164), S(5.5f), hexc(S_OR), 1);
-    tx(l, y0 + 186, r, y0 + 204, L"Size on screen", g_sf_label, S_LABEL, DT_LEFT);
-    tx(l - 2, y0 + 212, l + 12, y0 + 232, L"S", g_sf_small, S_MUTED, DT_CENTER);
-    slider(pn, l + 20, y0 + 222, r - 22, R_SCALE, 4);
-    tx(r - 14, y0 + 210, r + 2, y0 + 234, L"L", g_sf_text, S_MUTED, DT_CENTER);
-    tx(l, y0 + 244, r, y0 + 262, L"Inner core", g_sf_label, S_LABEL, DT_LEFT);
-    aa_disc(pn, S(l + 4), S(y0 + 280), S(2.5f), hexc(S_KNOB), 0.8f);
-    slider(pn, l + 20, y0 + 280, r - 22, R_CORE, 4);
-    aa_disc(pn, S(r - 5), S(y0 + 280), S(5.5f), hexc(S_KNOB), 0.8f);
-    /* Motion: gravity, other sessions, focus frame */
-    l = cx[1] + 16; r = cx[1] + cw - 16;
-    tx(l, y0 + 46, r, y0 + 64, L"Gravity", g_sf_label, S_LABEL, DT_LEFT);
-    slider(pn, l + 8, y0 + 82, r - 8, R_GRAVITY, 4);
-    tx(l, y0 + 94, r, y0 + 112, L"Floaty", g_sf_small, S_MUTED, DT_LEFT);
-    tx(l, y0 + 94, r, y0 + 112, L"Firm", g_sf_small, S_MUTED, DT_RIGHT);
-    tx(l, y0 + 124, r - 56, y0 + 142, L"Other sessions", g_sf_text, S_TEXT, DT_LEFT);
-    tx(l, y0 + 142, r - 56, y0 + 160, L"Small cores around the main one", g_sf_small, S_MUTED, DT_LEFT);
-    int on = g_others, ht = is_hot(K_TOGGLE, R_OTHERS, 0);
-    box(pn, r - 42, y0 + 130, r, y0 + 154, 12, on ? S_OR : (ht ? S_EDGE_HOT : S_EDGE), 0, 0);
-    aa_disc(pn, S(on ? r - 12 : r - 30), S(y0 + 142), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
-    hit(l, y0 + 122, r, y0 + 162, K_TOGGLE, R_OTHERS, 0);
-    tx(l, y0 + 176, r, y0 + 194, L"Focus frame", g_sf_label, S_LABEL, DT_LEFT);
-    float fw = (r - l - 12) / 3;
-    for (int i = 0; i < 7; i++) {
-        float a = l + (i % 3) * (fw + 6), b = y0 + 200 + (i / 3) * 34;
-        pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_FRAME) == i, is_hot(K_PICK, R_FRAME, i), FRAME_NAMES[i], g_sf_label);
-        hit(a, b, a + fw, b + 28, K_PICK, R_FRAME, i);
-    }
-    /* Replies: font, text size, where the box opens, labels */
-    l = cx[2] + 16; r = cx[2] + cw - 16;
-    float bw = (r - l - 6) / 2;
-    tx(l, y0 + 46, r, y0 + 64, L"Font", g_sf_label, S_LABEL, DT_LEFT);
-    for (int i = 0; i < 2; i++) {
-        float a = l + i * (bw + 6);
-        int sel = set_current(R_TIPFONT) == i;
-        pick_box(pn, a, y0 + 70, a + bw, y0 + 118, 12, sel, is_hot(K_PICK, R_TIPFONT, i), NULL, NULL);
-        tx(a, y0 + 72, a + bw, y0 + 100, L"Aa", i ? g_sf_aa : g_sf_aam, sel ? S_TEXT : S_CHIP_TXT, DT_CENTER);
-        tx(a, y0 + 98, a + bw, y0 + 114, i ? L"Clean" : L"Terminal", g_sf_small, sel ? S_TEXT : S_MUTED, DT_CENTER);
-        hit(a, y0 + 70, a + bw, y0 + 118, K_PICK, R_TIPFONT, i);
-    }
-    tx(l, y0 + 130, r, y0 + 148, L"Text size", g_sf_label, S_LABEL, DT_LEFT);
-    tx(l - 2, y0 + 156, l + 12, y0 + 176, L"A", g_sf_small, S_MUTED, DT_CENTER);
-    slider(pn, l + 20, y0 + 166, r - 22, R_TEXT, 5);
-    tx(r - 16, y0 + 154, r + 2, y0 + 180, L"A", g_sf_card, S_MUTED, DT_CENTER);
-    tx(l, y0 + 190, r, y0 + 208, L"Box size", g_sf_label, S_LABEL, DT_LEFT);
-    box(pn, l, y0 + 220, l + 10, y0 + 228, 2, S_MUTED, 0, 0);
-    slider(pn, l + 20, y0 + 224, r - 22, R_TIPSIZE, 4);
-    box(pn, r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
-    static const wchar_t *opens[2] = {L"Next to core", L"Middle"}, *labels[2] = {L"On hover", L"Always"};
-    tx(l, y0 + 248, r, y0 + 266, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
-    for (int i = 0; i < 2; i++) {
-        float a = l + i * (bw + 6);
-        pick_box(pn, a, y0 + 272, a + bw, y0 + 302, 10, set_current(R_TIPAT) == i, is_hot(K_PICK, R_TIPAT, i), opens[i], g_sf_label);
-        hit(a, y0 + 272, a + bw, y0 + 302, K_PICK, R_TIPAT, i);
-    }
-    tx(l, y0 + 316, r, y0 + 334, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
-    for (int i = 0; i < 2; i++) {
-        float a = l + i * (bw + 6);
-        pick_box(pn, a, y0 + 340, a + bw, y0 + 368, 10, set_current(R_LABELS) == i, is_hot(K_PICK, R_LABELS, i), labels[i], g_sf_label);
-        hit(a, y0 + 340, a + bw, y0 + 368, K_PICK, R_LABELS, i);
-    }
+    if (g_tab == 0) {
+        /* the cards */
+        const float y0 = 304, cw = (832 - 32) / 3.0f;
+        float cx[3];
+        for (int k = 0; k < 3; k++) { cx[k] = 24 + k * (cw + 16); box(pn, cx[k], y0, cx[k] + cw, 680, 16, S_CARD, 0, 0); }
+        static const wchar_t *titles[3] = {L"Look", L"Motion", L"Replies"};
+        for (int k = 0; k < 3; k++) tx(cx[k] + 16, y0 + 14, cx[k] + cw - 16, y0 + 36, titles[k], g_sf_card, S_TEXT, DT_LEFT);
+        /* Look: shape, glow, size on screen, inner core */
+        float l = cx[0] + 16, r = cx[0] + cw - 16, tw = (r - l - 18) / 4;
+        tx(l, y0 + 46, r, y0 + 64, L"Shape", g_sf_label, S_LABEL, DT_LEFT);
+        static const wchar_t *shapes[4] = {L"Dodecahedron", L"Buckyball", L"Geodesic", L"Fine geodesic"};
+        for (int i = 0; i < 4; i++) {
+            float a = l + i * (tw + 6);
+            int sel = set_current(R_SHAPE) == i;
+            pick_box(pn, a, y0 + 70, a + tw, y0 + 116, 12, sel, is_hot(K_PICK, R_SHAPE, i), NULL, NULL);
+            shape_icon(pn, i, a + tw / 2, y0 + 93, sel ? S_OR : S_MUTED);
+            hit(a, y0 + 70, a + tw, y0 + 116, K_PICK, R_SHAPE, i);
+        }
+        int hs = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_SHAPE;
+        tx(l + 60, y0 + 46, r, y0 + 64, hs ? shapes[g_hits[g_hot].val] : shapes[set_current(R_SHAPE) < 0 ? 2 : set_current(R_SHAPE)], g_sf_small, S_MUTED, DT_RIGHT);
+        tx(l, y0 + 128, r, y0 + 146, L"Glow", g_sf_label, S_LABEL, DT_LEFT);
+        aa_disc(pn, S(l + 4), S(y0 + 164), S(3.5f), hexc(S_OR), 0.45f);
+        slider(pn, l + 20, y0 + 164, r - 22, R_GLOW, 3);
+        aa_disc(pn, S(r - 5), S(y0 + 164), S(10), hexc(S_OR), 0.2f);
+        aa_disc(pn, S(r - 5), S(y0 + 164), S(5.5f), hexc(S_OR), 1);
+        tx(l, y0 + 186, r, y0 + 204, L"Size on screen", g_sf_label, S_LABEL, DT_LEFT);
+        tx(l - 2, y0 + 212, l + 12, y0 + 232, L"S", g_sf_small, S_MUTED, DT_CENTER);
+        slider(pn, l + 20, y0 + 222, r - 22, R_SCALE, 4);
+        tx(r - 14, y0 + 210, r + 2, y0 + 234, L"L", g_sf_text, S_MUTED, DT_CENTER);
+        tx(l, y0 + 244, r, y0 + 262, L"Inner core", g_sf_label, S_LABEL, DT_LEFT);
+        aa_disc(pn, S(l + 4), S(y0 + 280), S(2.5f), hexc(S_KNOB), 0.8f);
+        slider(pn, l + 20, y0 + 280, r - 22, R_CORE, 4);
+        aa_disc(pn, S(r - 5), S(y0 + 280), S(5.5f), hexc(S_KNOB), 0.8f);
+        /* Motion: gravity, other sessions, focus frame */
+        l = cx[1] + 16; r = cx[1] + cw - 16;
+        tx(l, y0 + 46, r, y0 + 64, L"Gravity", g_sf_label, S_LABEL, DT_LEFT);
+        slider(pn, l + 8, y0 + 82, r - 8, R_GRAVITY, 4);
+        tx(l, y0 + 94, r, y0 + 112, L"Floaty", g_sf_small, S_MUTED, DT_LEFT);
+        tx(l, y0 + 94, r, y0 + 112, L"Firm", g_sf_small, S_MUTED, DT_RIGHT);
+        tx(l, y0 + 124, r - 56, y0 + 142, L"Other sessions", g_sf_text, S_TEXT, DT_LEFT);
+        tx(l, y0 + 142, r - 56, y0 + 160, L"Small cores around the main one", g_sf_small, S_MUTED, DT_LEFT);
+        int on = g_others, ht = is_hot(K_TOGGLE, R_OTHERS, 0);
+        box(pn, r - 42, y0 + 130, r, y0 + 154, 12, on ? S_OR : (ht ? S_EDGE_HOT : S_EDGE), 0, 0);
+        aa_disc(pn, S(on ? r - 12 : r - 30), S(y0 + 142), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
+        hit(l, y0 + 122, r, y0 + 162, K_TOGGLE, R_OTHERS, 0);
+        tx(l, y0 + 176, r, y0 + 194, L"Focus frame", g_sf_label, S_LABEL, DT_LEFT);
+        float fw = (r - l - 12) / 3;
+        for (int i = 0; i < 7; i++) {
+            float a = l + (i % 3) * (fw + 6), b = y0 + 200 + (i / 3) * 34;
+            pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_FRAME) == i, is_hot(K_PICK, R_FRAME, i), FRAME_NAMES[i], g_sf_label);
+            hit(a, b, a + fw, b + 28, K_PICK, R_FRAME, i);
+        }
+        /* Replies: font, text size, where the box opens, labels */
+        l = cx[2] + 16; r = cx[2] + cw - 16;
+        float bw = (r - l - 6) / 2;
+        tx(l, y0 + 46, r, y0 + 64, L"Font", g_sf_label, S_LABEL, DT_LEFT);
+        for (int i = 0; i < 2; i++) {
+            float a = l + i * (bw + 6);
+            int sel = set_current(R_TIPFONT) == i;
+            pick_box(pn, a, y0 + 70, a + bw, y0 + 118, 12, sel, is_hot(K_PICK, R_TIPFONT, i), NULL, NULL);
+            tx(a, y0 + 72, a + bw, y0 + 100, L"Aa", i ? g_sf_aa : g_sf_aam, sel ? S_TEXT : S_CHIP_TXT, DT_CENTER);
+            tx(a, y0 + 98, a + bw, y0 + 114, i ? L"Clean" : L"Terminal", g_sf_small, sel ? S_TEXT : S_MUTED, DT_CENTER);
+            hit(a, y0 + 70, a + bw, y0 + 118, K_PICK, R_TIPFONT, i);
+        }
+        tx(l, y0 + 130, r, y0 + 148, L"Text size", g_sf_label, S_LABEL, DT_LEFT);
+        tx(l - 2, y0 + 156, l + 12, y0 + 176, L"A", g_sf_small, S_MUTED, DT_CENTER);
+        slider(pn, l + 20, y0 + 166, r - 22, R_TEXT, 5);
+        tx(r - 16, y0 + 154, r + 2, y0 + 180, L"A", g_sf_card, S_MUTED, DT_CENTER);
+        tx(l, y0 + 190, r, y0 + 208, L"Box size", g_sf_label, S_LABEL, DT_LEFT);
+        box(pn, l, y0 + 220, l + 10, y0 + 228, 2, S_MUTED, 0, 0);
+        slider(pn, l + 20, y0 + 224, r - 22, R_TIPSIZE, 4);
+        box(pn, r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
+        static const wchar_t *opens[2] = {L"Next to core", L"Middle"}, *labels[2] = {L"On hover", L"Always"};
+        tx(l, y0 + 248, r, y0 + 266, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
+        for (int i = 0; i < 2; i++) {
+            float a = l + i * (bw + 6);
+            pick_box(pn, a, y0 + 272, a + bw, y0 + 302, 10, set_current(R_TIPAT) == i, is_hot(K_PICK, R_TIPAT, i), opens[i], g_sf_label);
+            hit(a, y0 + 272, a + bw, y0 + 302, K_PICK, R_TIPAT, i);
+        }
+        tx(l, y0 + 316, r, y0 + 334, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
+        for (int i = 0; i < 2; i++) {
+            float a = l + i * (bw + 6);
+            pick_box(pn, a, y0 + 340, a + bw, y0 + 368, 10, set_current(R_LABELS) == i, is_hot(K_PICK, R_LABELS, i), labels[i], g_sf_label);
+            hit(a, y0 + 340, a + bw, y0 + 368, K_PICK, R_LABELS, i);
+        }
+    } else motions_page(pn);
     /* the foot: standby time, reset */
     int aw = set_current(R_AWAY);
     tx(28, 694, 120, 726, L"Rest after", g_sf_label, S_MUTED, DT_LEFT);
@@ -2740,7 +2897,7 @@ static void settings_tick(double now) {
     if (!set_open()) return;
     float dt = (float)fmin(0.1, now - g_pv_last);
     g_pv_last = now;
-    int shown[4] = {PV_STATES[g_pv_state], ST_WORK, ST_IDLE, ST_THINK};
+    int shown[4] = {g_pv_st, ST_WORK, ST_IDLE, ST_THINK};
     for (int i = 0; i < 4; i++) {
         Session *s = &g_pv_room.s[i];
         s->state = shown[i] == ST_SLEEP ? ST_IDLE : shown[i];
@@ -2851,7 +3008,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_NCHITTEST: { /* the top strip moves the window */
         POINT c = p; ScreenToClient(w, &c);
-        if (c.y < (int)S(52) && c.x < (int)S(816)) return HTCAPTION;
+        if (c.y < (int)S(52) && c.x < (int)S(816) && set_hit_at(c) < 0) return HTCAPTION;
         return HTCLIENT;
     }
     case WM_MOUSEMOVE: {
@@ -2878,7 +3035,11 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_TOGGLE: set_choose(sh->row, 0); break;
             case K_SLIDE: g_slide = h; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
             case K_CYCLE: { int c = set_current(sh->row); set_choose(sh->row, (c + 1) % 4); break; }
-            case K_STATE: g_pv_state = sh->val; g_sl_dirty = 1; break;
+            case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
+            case K_TAB: g_tab = sh->val; g_sl_dirty = 1; break;
+            case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
+            case K_MTOG: mot_toggle(sh->row, sh->val); break;
+            case K_MPLAY: mot_play(sh->row, sh->val); break;
             case K_RESET: set_reset(); break;
             case K_CLOSE: g_close_armed = 1; SetCapture(w); break; /* it closes when the button is let go over it */
             }
@@ -3171,7 +3332,8 @@ static void usage(void) {
         "  --away SECONDS       no input this long: cores show STANDBY (default 120, 0 = never)\n"
         "  --stats              every 5 s, frames, pictures and window updates a second to panel-stats.txt\n"
         "  --settings           open the Settings window at once\n"
-        "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n\n"
+        "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n"
+        "  --settings-tab motions open it on the Motions page\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, text box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
@@ -3201,6 +3363,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
         else if (!strcmp(a, "--stats")) g_stats = 1;
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
+        else if (!strcmp(a, "--settings-tab") && v) { g_tab = !strcmp(v, "motions"); g_open_settings = 1; i++; }
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
         else { usage(); return a[0] == '-' && (!strcmp(a, "-h") || !strcmp(a, "--help")) ? 0 : 2; }
     }

@@ -25,13 +25,15 @@ const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "S
 #define VIOLET C(175, 135, 255)
 #define INDIGO C(110, 105, 215)
 #define ORANGE C(255, 120, 30)
+#define CYAN C(40, 200, 255)
+#define ICE C(165, 235, 255)
 
 /*                rot   core  hz    depth edge  flow  hr   glitch  core body  core glow  line   line halo  lc    lh
  * lc / lh: how much the speech or microphone level drives core brightness / glow size (panel states only) */
 const Look LOOKS[ST_N] = {
     [ST_IDLE]  = {0.16f, 0.72f, 0.15f, 0.08f, 0.78f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     [ST_THINK] = {0.36f, 0.92f, 0.70f, 0.32f, 0.86f, 0.00f, 6.0f, 0, PALE, AMBER, AMBER, AMBER, 0, 0},
-    [ST_WORK]  = {0.95f, 1.15f, 2.20f, 0.12f, 1.00f, 1.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
+    [ST_WORK]  = {0.95f, 1.15f, 2.20f, 0.12f, 1.00f, 1.00f, 4.5f, 0, PURE, CYAN, ICE, CYAN, 0, 0}, /* electric cyan: told apart from IDLE's soft blue */
     [ST_WAIT]  = {0.10f, 1.00f, 1.00f, 0.60f, 0.60f, 0.45f, 6.0f, 1, NEARWHITE, ORANGE, ORANGE, ORANGE, 0, 0},
     [ST_CHEER] = {1.60f, 1.60f, 0.00f, 0.00f, 1.20f, 1.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
     [ST_SLEEP] = {0.04f, 0.26f, 0.08f, 0.30f, 0.30f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0},
@@ -50,21 +52,47 @@ const Hover HOVER = {.bright = 0.35f, .slow = 0.7f, .tilt = 0.32f, .gaze = 0.10f
 const Carry CARRY = {.lift = 0.35f, .ease = 10.0f, .lean = 0.035f, .lean_max = 0.55f, .stretch = 0.12f,
                      .spring = 170.0f, .damp = 26.0f, .lag = 0.20f, .jig_max = 0.42f,
                      .shake_gain = 0.0022f, .shake_fade = 1.4f, .shake_spin = 9.0f, .shake_glitch = 0.7f, .drop = 0.9f};
-/* idle whims: name, seconds, weight while idle, weight while asleep */
+/* actions: name, seconds, weight while awake (IDLE, STANDBY), weight while asleep, what it does (the Settings window
+ * shows it); a weight above 0 also puts it in that state's default map. The geometric ones are played by motion.c. */
 const Whim WHIMS[W_N] = {
-    [W_LOOK] = {"look", 2.6f, 3, 0},    /* glances one way, then another */
-    [W_PEEK] = {"peek", 2.2f, 2, 0},    /* leans to one side as if to see past something */
-    [W_TWIRL] = {"twirl", 1.5f, 1, 0},  /* spins round once, fast */
-    [W_SHIVER] = {"shiver", 0.8f, 1, 0.6f},
-    [W_BLINK] = {"blink", 0.45f, 2.5f, 0},
-    /* the geometric ones (motion.c) */
-    [W_ALIGN] = {"align", 2.2f, 2, 0},    /* turns a vertex exactly toward you, holds */
-    [W_STEP] = {"step", 1.3f, 1, 0},      /* two snap turns of 72°, like a combination lock */
-    [W_UNFOLD] = {"unfold", 2.4f, 1, 0},  /* a fresh cut of patches opens row by row and closes again */
-    [W_SCAN] = {"scan", 1.6f, 1, 0},      /* one plane sweeps top to bottom */
-    [W_SPIKE] = {"spike", 1.2f, 1, 0},    /* one or two sharp spikes snap out and back */
-    [W_CRAZY] = {"crazy", 1.9f, .35f, 0}, /* the full fit, rarely, out of nowhere */
+    [W_LOOK] = {"look", 2.6f, 3, 0, "Glances one way, then the other."},
+    [W_PEEK] = {"peek", 2.2f, 2, 0, "Leans to one side to see past something."},
+    [W_TWIRL] = {"twirl", 1.5f, 1, 0, "Spins round fast and coasts down."},
+    [W_SHIVER] = {"shiver", 0.8f, 1, 0.6f, "A quick shudder."},
+    [W_BLINK] = {"blink", 0.45f, 2.5f, 0, "Dims once or twice."},
+    [W_ALIGN] = {"align", 2.2f, 2, 0, "Turns a vertex exactly toward you, holds, carries on."},
+    [W_STEP] = {"step", 1.3f, 1, 0, "Two snap steps of 72 degrees, like a combination lock."},
+    [W_UNFOLD] = {"unfold", 2.4f, 1, 0, "A fresh cut of patches opens down the sphere, then closes in reverse."},
+    [W_SCAN] = {"scan", 1.6f, 1, 0, "One plane sweeps top to bottom."},
+    [W_SPIKE] = {"spike", 1.2f, 1, 0, "One or two sharp spikes snap out of random nodes and back."},
+    [W_CRAZY] = {"crazy", 1.9f, .35f, 0, "The full ERROR fit, rarely, out of nowhere."},
+    [W_RIPPLE] = {"ripple", 1.8f, 1, 0, "A wave of lifted patches runs over the sphere from one side to the other."},
+    [W_ORBIT] = {"orbit", 2.4f, 1, 0, "One patch lifts off, flies once round the core and docks again."},
+    [W_PETAL] = {"petal", 2.2f, 1, 0, "The patches round one node open like a flower, ring by ring, and close."},
+    [W_CONSTELLATION] = {"constellation", 2.4f, 1, 0, "A short chain of neighbouring nodes lights up one by one, then fades."},
+    [W_TUMBLE] = {"tumble", 1.6f, 1, 0, "A slow half turn about a random axis that settles exactly."},
 };
+
+/* The motion map's defaults, worked out from the tables: each state may run the routines made for it, and play
+ * the actions WHIMS weights for it (awake: IDLE and STANDBY; asleep: SLEEP). */
+void motion_map_default(MotionMap *out) {
+    for (int st = 0; st < ST_N; st++) {
+        out[st].rt = out[st].act = 0;
+        for (int r = 0; r < RT_N; r++) if (ROUTINES[r].home == st) out[st].rt |= 1u << r;
+        for (int w = 1; w < W_N; w++) {
+            float weight = st == ST_SLEEP ? WHIMS[w].sleep : st == ST_IDLE || st == ST_STANDBY ? WHIMS[w].idle : 0;
+            if (weight > 0) out[st].act |= 1u << w;
+        }
+    }
+}
+MotionMap MOTION_MAP[ST_N];
+void motion_map_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    motion_map_default(MOTION_MAP);
+}
+
 const WhimGap WHIM_GAP = {.idle_min = 3, .idle_max = 10, .sleep_min = 7, .sleep_max = 18};
 
 const Touch TOUCH = {.unread_hz = 0.5f, .unread_amp = 0.45f, .ring_for = 1.0f, .vol_for = 1.2f, .coast = 1.2f, .aura = 0.6f};
@@ -88,6 +116,7 @@ static float frand(uint32_t *st) { /* xorshift, 0..1 */
 
 void session_init(Session *s, const char *sid, double t, const Shape *sh) {
     memset(s, 0, sizeof *s);
+    motion_map_init();
     snprintf(s->sid, sizeof s->sid, "%s", sid);
     s->created = s->last = s->state_t = t;
     s->burst_at = s->ring_at = s->vol_at = -1e9;
@@ -161,7 +190,7 @@ void room_apply(Room *r, const Event *e) {
 int session_shown(const Session *s, double now) {
     if (s->overlay > 0 && s->overlay < ST_N) return s->overlay;
     if (s->state == ST_THINK && now < s->hold_work_until) return ST_WORK;
-    if (s->state == ST_CHEER && now - s->state_t > CHEER_FOR) return ST_IDLE;
+    if (s->state == ST_CHEER && now - s->state_t > (s->mo.cheer_for > CHEER_FOR ? s->mo.cheer_for : CHEER_FOR)) return ST_IDLE; /* Bloom and Zip need longer */
     if (s->state == ST_IDLE && now - s->last > SLEEP_AFTER) return ST_SLEEP;
     return s->state;
 }
@@ -180,26 +209,45 @@ static float hold(float u, float in) {                                          
 /* Whims: left alone (idle, or asleep, and not touched), a core now and then does something small on its
  * own. Most only shape the picture through the w_* fields; a twirl or a landing also nudges the spin and
  * the core's spring, so they flow on into the usual motion. */
+static void whim_start(Session *s, int w, double now) {
+    s->whim = w;
+    s->whim_at = now;
+    s->whim_a = frand(&s->rng) * 2 - 1;
+    s->whim_b = frand(&s->rng) * 2 - 1;
+    if (s->whim == W_TWIRL) s->spin_y += (s->whim_a < 0 ? -1 : 1) * (5.5f + 2.5f * fabsf(s->whim_b));
+    if (s->whim == W_SHIVER) s->spin_x += 1.2f * s->whim_a;
+}
+
+void whim_play(Session *s, int w, double now) {
+    if (w <= W_NONE || w >= W_N) return;
+    whim_start(s, w, now);
+    s->whim_forced = 1;
+    s->whim_k = 1;
+}
+
+/* how likely action w is picked while asleep or not */
+static float whim_weight(int w, int asleep) {
+    float v = asleep && WHIMS[w].sleep > 0 ? WHIMS[w].sleep : WHIMS[w].idle;
+    return v > 0 ? v : 1;
+}
+
 static void whims(Session *s, int shown, double now, float dt) {
-    int free = (shown == ST_IDLE || shown == ST_SLEEP) && !s->overlay && !s->carried && !s->held
-               && s->hover_to <= 0 && s->hover < 0.05f;
+    uint32_t acts = MOTION_MAP[shown].act & ~1u; /* the actions this state may play (MOTION_MAP) */
+    int free = (acts || s->whim_forced) && !s->carried && !s->held && s->hover_to <= 0 && s->hover < 0.05f;
+    if (s->whim_forced) free = 1;
     ease(&s->whim_k, free ? 1.0f : 0.0f, 1.0f - expf(-dt * (free ? 2.0f : 8.0f)));
     int asleep = shown == ST_SLEEP;
     if (!s->whim_next || (!free && s->whim == W_NONE)) /* (re)arm: the first one comes a while after the core settles */
         s->whim_next = now + WHIM_GAP.idle_min + frand(&s->rng) * (WHIM_GAP.idle_max - WHIM_GAP.idle_min);
-    if (s->whim == W_NONE && free && now >= s->whim_next) {
+    if (s->whim == W_NONE && free && acts && now >= s->whim_next) {
         float total = 0, pick;
-        for (int w = 1; w < W_N; w++) total += asleep ? WHIMS[w].sleep : WHIMS[w].idle;
+        for (int w = 1; w < W_N; w++) if (acts & (1u << w)) total += whim_weight(w, asleep);
         pick = frand(&s->rng) * total;
         for (int w = 1; w < W_N; w++) {
-            pick -= asleep ? WHIMS[w].sleep : WHIMS[w].idle;
-            if (pick < 0 && (asleep ? WHIMS[w].sleep : WHIMS[w].idle) > 0) { s->whim = w; break; }
+            if (!(acts & (1u << w))) continue;
+            pick -= whim_weight(w, asleep);
+            if (pick < 0) { whim_start(s, w, now); break; }
         }
-        s->whim_at = now;
-        s->whim_a = frand(&s->rng) * 2 - 1;
-        s->whim_b = frand(&s->rng) * 2 - 1;
-        if (s->whim == W_TWIRL) s->spin_y += (s->whim_a < 0 ? -1 : 1) * (5.5f + 2.5f * fabsf(s->whim_b));
-        if (s->whim == W_SHIVER) s->spin_x += 1.2f * s->whim_a;
     }
     s->w_lx = s->w_ly = s->w_lean_x = s->w_lean_y = s->w_off_x = s->w_off_y = s->w_tall = 0;
     s->w_scale = s->w_bright = 1;
@@ -207,6 +255,7 @@ static void whims(Session *s, int shown, double now, float dt) {
     float d = WHIMS[s->whim].dur, el = (float)(now - s->whim_at), u = el / d, k = s->whim_k, a = s->whim_a, b = s->whim_b;
     if (u >= 1) { /* done: the next one after a pause */
         s->whim = W_NONE;
+        s->whim_forced = 0;
         float lo = asleep ? WHIM_GAP.sleep_min : WHIM_GAP.idle_min, hi = asleep ? WHIM_GAP.sleep_max : WHIM_GAP.idle_max;
         s->whim_next = now + lo + frand(&s->rng) * (hi - lo);
         return;
@@ -337,6 +386,7 @@ double session_rate(const Session *s, double now, int fps) {
                || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for /* the mouse is doing something */
                || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
+    if (s->mo.hole > 0.01f && r < 10) r = 10; /* the black hole's dust keeps turning */
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
     return r < fps ? r : fps;
 }

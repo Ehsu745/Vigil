@@ -93,14 +93,17 @@ typedef struct {
 extern const Carry CARRY;
 
 /* Left alone, a core is not still: now and then it does something small on its own, like a living thing.
- * Each behaviour ("whim") is a row of WHIMS in session.c. */
+ * Each behaviour (an action, or "whim") is a row of WHIMS in session.c; the geometric ones are played by a
+ * function in motion.c (its row of WHIM_RUN there), the soft ones by whims() in session.c. */
 enum { W_NONE, W_LOOK, W_PEEK, W_TWIRL, W_SHIVER, W_BLINK,
        W_ALIGN, W_STEP, W_UNFOLD, W_SCAN, W_SPIKE, W_CRAZY, /* geometric ones, played by motion.c */
+       W_RIPPLE, W_ORBIT, W_PETAL, W_CONSTELLATION, W_TUMBLE,
        W_N };
 typedef struct {
     const char *name;
     float dur;           /* seconds */
-    float idle, sleep;   /* how likely it is picked while idle / asleep (0 = never) */
+    float idle, sleep;   /* how likely it is picked while awake / asleep; > 0 also puts it in that state's default map */
+    const char *about;   /* what it does, in a sentence (the panel's Settings shows it) */
 } Whim;
 extern const Whim WHIMS[W_N];
 typedef struct { float idle_min, idle_max, sleep_min, sleep_max; } WhimGap; /* seconds between whims */
@@ -110,18 +113,99 @@ extern const Col HUES[NHUE];     /* single-core mode: one colour per session, ti
 
 typedef struct { int e, dir; float t, sp; } Pulse;
 
+/* ---- the motion map: which routines and actions each state may use ----------------------------------
+ * A routine runs for as long as a state lasts (one of the state's routines is picked at random each time
+ * the state starts); an action plays once, now and then, while the core is left alone. Any routine or action
+ * may be given to any state, except the black hole, which is for SLEEP only. By default a state may use the
+ * routines made for it (Routine.home) and the actions WHIMS weights for it. The panel's Settings change
+ * MOTION_MAP and keep it; the terminal uses the defaults.
+ *
+ * To add a routine: an RT_ name here, a function in motion.c and its row of ROUTINES there.
+ * To add an action: a W_ name above, its row of WHIMS (session.c), a function and its row of WHIM_RUN (motion.c). */
+enum {
+    RT_DRIFT,                                            /* a slow plain turn: what a state with no routine does */
+    RT_ORACLE,                                           /* IDLE */
+    RT_PUZZLE, RT_SMOOTH, RT_LONG, RT_BLADES,            /* THINK */
+    RT_ENGINE, RT_GYRO, RT_HELIX, RT_TYPEWRITER, RT_FORGE, RT_LOOM, RT_CONVEYOR, RT_COMPRESSOR, /* WORK */
+    RT_SWIM, RT_BEACON, RT_KNOCK,                        /* NEEDS YOU */
+    RT_UNLOCK, RT_BLOOM, RT_ZIP,                         /* DONE */
+    RT_DORMANT, RT_HOLE,                                 /* SLEEP */
+    RT_BROADCAST, RT_RECEIVER, RT_DECODING, RT_LOCKED, RT_CRAZY, /* the panel's states */
+    RT_N
+};
+struct RCtx; /* what a routine gets each frame (motion.c) */
+typedef struct {
+    const char *name;
+    int home;                     /* the state it was made for (-1: none, never on by default) */
+    float cheer;                  /* run as DONE, it keeps DONE on screen this long (0 = the usual) */
+    int fine;                     /* wants fine patches of 1 or 2 triangles (else 1 to 6) */
+    void (*run)(struct RCtx *);   /* every frame */
+    void (*enter)(struct RCtx *); /* once as it starts (may be NULL) */
+    const char *about;
+} Routine;
+extern const Routine ROUTINES[RT_N];
+typedef struct { uint32_t rt, act; } MotionMap; /* bit RT_x: may run routine x; bit W_x: may play action x */
+_Static_assert(RT_N <= 32 && W_N <= 32, "MotionMap holds 32 routines and 32 actions");
+extern MotionMap MOTION_MAP[ST_N];
+void motion_map_default(MotionMap *out);  /* fills ST_N rows with the defaults */
+void motion_map_init(void);               /* sets MOTION_MAP to the defaults once; later calls do nothing */
+
 /* ---- motion.c: how the shell moves (the "Core Bestiary" design) --------------------------------
  * At rest the shell is an exact geodesic sphere. It moves only in geometric ways: snap turns about
  * symmetry axes, irregular patches of triangles sliding out along their normal and locking back, layers
- * of triangles turning against the rest, spikes (one node pulled far out, or in toward the centre), a
- * scan plane and nodes lighting in sequence. Each state runs its own routine; see motion.c. */
+ * of triangles turning against the rest, pieces carried off whole, spikes (one node pulled far out, or in
+ * toward the centre), a scan plane and nodes lighting in sequence, with sparks, light trails and rings.
+ * Each state runs a routine from its row of MOTION_MAP; see motion.c. */
 #define MAX_TURN 6
 #define MAX_SPIKE 32
 #define MAX_EV 24
+#define MAX_SPARK 192
+#define MAX_RING 6
+#define MAX_TRAIL 20
+#define MAX_BLADE 20
+#define NDUST 140
+#define NSTAR 22
 typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /* kind: 0 in-out, 1 speeds up and stops dead, 2 jerks out and back */
 typedef struct { int v; float len, up, hd, dn; double at; } Spike;         /* len < 0: pulled in toward the centre */
 typedef struct { int from, to, ntrail, trail[10]; double at, trail_at[10]; } Fish;
 typedef struct { double at; int kind; } MEvent;                             /* something a routine asked to happen later */
+/* a particle, in view space (before the pointer tilt), shell units: gravity falls down the screen */
+enum { SK_STREAK, SK_EMBER, SK_FLARE, SK_MOTE };
+typedef struct { float p[3], v[3], life, max, drag, g, size, seed; Col col; unsigned char kind, hot, own; } Spark;
+typedef struct { double at; float a; } MRing;                              /* a ring going out from the core */
+
+/* Each routine's own working state: Motion.rs holds the running routine's, cleared to zero as it starts. */
+typedef struct { float stir[3]; double next; } OracleRS;                    /* IDLE: where the pointer stirs it */
+typedef struct { signed char layer[MAX_T]; float gap[MAX_T], seq_s[6], seq_d[6], ax[3], end, dir; int flags; double at; } ThinkRS;
+typedef struct { unsigned char k, dir; float s, d; } BStep;                 /* k: 0 gather, 1 shuffle, 2 smash, 3 home */
+typedef struct { int g, t, tip, init, nseq, has_ht; float slot, lag, side, gd, W[9], dp[3], al, ht; BStep seq[9]; } Blade;
+typedef struct { Blade blade[MAX_BLADE]; int n, lead; float dirs[4][3], fold, end, core_v[3], want[3]; double at; } BladesRS;
+typedef struct { unsigned char belt[MAX_T], order[MAX_T]; int n, built; } EngineRS; /* built: the cut it was made for */
+typedef struct { float ax[3], ax2[3]; } AxesRS;                             /* Gyro, Helix */
+typedef struct { float ax[3], row_at; unsigned char order[MAX_T]; int start[6], row, built; } TypewriterRS;
+typedef struct { int k, hit, nham, ham[3], nlast, last[3]; float rise[3]; } ForgeRS;
+typedef struct { float ang, from; int k, rang, lit; } LoomRS;
+typedef struct { unsigned char ring[MAX_T]; float ph[MAX_T], ax[3]; int clicked; } ConveyorRS;
+typedef struct { int k, vented; } CompressorRS;
+typedef struct { Fish fish[2]; } SwimRS;
+typedef struct { int last; } BeaconRS;
+typedef struct { int k, hits; } KnockRS;
+typedef struct { float rank[MAX_T]; unsigned char clicked[MAX_T]; int flags; double at; } UnlockRS;
+typedef struct { float d[MAX_T]; unsigned char marks[MAX_T]; int k, flags; } BloomRS;
+typedef struct { float shut_at[MAX_T], ax[3]; int k, flags; } ZipRS;
+typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int size, gone; } Piece; /* a piece blown out, falling back */
+typedef struct { float r, a, s; } Dust;
+typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake; int banged, beat_ring, moving; } HoleRS;
+typedef struct { double next; } DecodingRS;
+typedef struct { int flinched; } CrazyRS;
+typedef union {
+    OracleRS oracle; ThinkRS think; BladesRS blades; EngineRS engine; AxesRS axes; TypewriterRS typewriter;
+    ForgeRS forge; LoomRS loom; ConveyorRS conveyor; CompressorRS compressor; SwimRS swim; BeaconRS beacon;
+    KnockRS knock; UnlockRS unlock; BloomRS bloom; ZipRS zip; HoleRS hole; DecodingRS decoding; CrazyRS crazy;
+} RoutineState;
+/* the action playing now: its own state, never shared with a routine */
+typedef struct { double started; float dir[3], step_ax[3]; int g, v, n; unsigned char order[MAX_T], path[6]; } WhimState;
+
 typedef struct {
     float q[9];                          /* the snap turns, on top of the drift (applied before ax / ay) */
     Turn turn[MAX_TURN];
@@ -131,7 +215,7 @@ typedef struct {
     unsigned char grp[MAX_T];            /* each triangle's patch */
     float gw[MAX_T], gn[MAX_T][3];       /* each patch's reach (0 = stays put) and normal */
     float off[MAX_T];                    /* how far each triangle has slid out, shell radii */
-    float ang[MAX_T], lax[3];            /* each triangle's layer turn, about the axis lax */
+    float ang[MAX_T], lax[3];            /* each triangle's layer turn about the axis lax (a 5-fold axis: undriven, it settles on a fifth) */
     int ang_on;                          /* a routine set layer turns this frame */
     float push[MAX_V];                   /* each node pushed out (+) or pulled in (-), shell radii */
     Spike sp[MAX_SPIKE];
@@ -140,23 +224,31 @@ typedef struct {
     float inner, inner_ang, inner_rate;  /* the inner shell: how visible, its turn, its speed */
     float scan_h, scan_a;                /* a scan plane at view height scan_h (-1 top .. 1 bottom), 0 = none */
     double crazy_until, tense_until, last_crazy;
-    double defend_seen, press_seen, press_at, wstart;
-    int press_g, locked, flinched;
+    double defend_seen, press_seen, press_at;
+    int press_g, locked;
     float lock;
     unsigned char pdist[MAX_T];          /* patch steps from the pressed patch */
     MEvent ev[MAX_EV];
-    /* the routine of the state shown now */
-    int routine, r_flag, norder;
-    double r_at, r_next;
-    float r_end, seq_s[8], seq_d[8];
-    signed char layer[MAX_T];            /* THINK: which of the two lifted layers a patch is in */
-    unsigned char belt[MAX_T];           /* WORK: the triangles on the turbine belt */
-    unsigned char order[MAX_T];          /* WORK: piston firing order; whims: unfold order */
-    float rank[MAX_T];                   /* DONE: when each patch locks back (0..1) */
-    unsigned char clicked[MAX_T];
-    Fish fish[2];                        /* NEEDS YOU */
-    double stir_next;                    /* IDLE hover */
-    float stir[3];
+    /* the routine: the state it was entered for, which one (RT_*), one asked for by motion_play, its state */
+    int routine, rt, want_rt;
+    double r_at;                         /* when it started */
+    float cheer_for;                     /* DONE stays on screen this long for this routine (0 = the usual) */
+    RoutineState rs;
+    WhimState ws;
+    /* set by a routine (or action) every frame, zero otherwise; read by the renderer */
+    unsigned char tmi[MAX_T];            /* each triangle's own matrix: tmx[tmi - 1] (0 = none), applied after it slid out */
+    float tmx[MAX_T + 1][9];
+    int ntm, tt_on, ta_on, sharp_on, trail_on;
+    float tt[MAX_T][3];                  /* each triangle carried off whole, shell units */
+    float talpha[MAX_T];                 /* how see-through each triangle is (1 = as usual), when ta_on */
+    signed char sharp_v[MAX_T];          /* a blade: its tip node, stretched out by sharp_k */
+    float sharp_k[MAX_T];
+    float squash, sq_ax[3];              /* the shell pressed flat along sq_ax (Compressor) */
+    float bright;                        /* core and threads brighter by this factor (1 = as usual) */
+    float hole;                          /* the black hole's void, 0..1 (its dust and stars: rs.hole) */
+    float trail[MAX_TRAIL][3]; int ntrail; Col trail_col; /* a light trail over the shell, model space */
+    Spark spark[MAX_SPARK];
+    MRing ring[MAX_RING];
 } Motion;
 
 typedef struct {
@@ -190,6 +282,7 @@ typedef struct {
     int whim;
     double whim_at, whim_next;
     float whim_a, whim_b, whim_k;  /* its random direction and size; how free it is to play (0 while touched) */
+    int whim_forced;               /* started by whim_play: plays to the end wherever the core is */
     float w_lx, w_ly;              /* gaze, added to the cursor look */
     float w_lean_x, w_lean_y;      /* shell turned, radians */
     float w_off_x, w_off_y;        /* the whole core moved, shell radii, y down */
@@ -217,6 +310,8 @@ void motion_init(Session *s);
 void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt);
 int motion_busy(const Session *s, double now);            /* moving on its own: wants the full frame rate */
 int motion_crazy(const Session *s, double now);           /* in the middle of a crazy fit (glitching) */
+void motion_play(Session *s, int rt);                     /* run routine rt now, in place of the one running (the Settings preview) */
+void whim_play(Session *s, int w, double now);            /* play action w now, wherever the core is (the Settings preview) */
 /* small 3x3 matrix helpers, row-major (shared with render.c) */
 void m3_mul(float *r, const float *a, const float *b);    /* r = a * b (r may be a or b) */
 void m3_rot(float *r, const float *axis, float angle);    /* about a unit axis */
