@@ -251,6 +251,15 @@ static RECT work_at(float x, float y) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &r, 0);
     return r;
 }
+/* is this point on the desktop in some monitor's work area? (an edge with no screen beyond it is a wall) */
+static int on_work(float x, float y) {
+    POINT pt = {(LONG)floorf(x), (LONG)floorf(y)};
+    HMONITOR hm = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+    MONITORINFO mi;
+    mi.cbSize = sizeof mi;
+    return hm && GetMonitorInfo(hm, &mi) && PtInRect(&mi.rcWork, pt);
+}
+
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
@@ -805,8 +814,8 @@ static void draw_all(Room *room, int n, double now) {
 /* Each core of the cluster as a body on the desktop: the main core sits at (g_mx, g_my), each small core is held
  * to the orbit by a spring (its gravity, Settings > Gravity) and drawn along it to its place by a weaker one. While the cluster is
  * carried only gravity holds them, so they slide freely round the orbit to the side away from the motion and trail
- * behind; put down, they slide home. Pulled too far (carried very fast) the spring lets go: the small core floats
- * where it was left, on the screen, until the main core comes close again. Alt-dragging a small core takes it
+ * behind; put down, they slide home. Pulled too far (carried very fast) gravity lets go: the small core flies
+ * on with its speed, slowing slowly and bouncing off the screen's edges, until the main core comes close again. Alt-dragging a small core takes it
  * out of orbit by hand. */
 typedef struct { char sid[72]; float px, py, vx, vy, w; int free, init; } Orbit;
 static Orbit g_orbit[MAX_SESS];
@@ -862,13 +871,18 @@ static void draw_single(Room *room, int n, double now) {
         else if (i == fi) { /* the main core: where it is put, quickly (a core swapping in glides to the middle) */
             float f = g_moving == 1 ? 1 : 1 - expf(-dt * 12);
             ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx = ob->vy = 0; ob->free = 0;
-        } else if (ob->free) { /* out of orbit: it drifts to a stop, on its monitor, until the main core comes close */
-            float fr = expf(-dt * 2.2f);
+        } else if (ob->free) { /* out of orbit: it keeps going, slowing a little, and bounces off the screen's edges
+                                * (not where another monitor goes on), until the main core comes close */
+            const float BOUNCE = 0.7f; /* how much speed a bounce keeps */
+            float fr = expf(-dt * 0.9f);
             ob->vx *= fr; ob->vy *= fr; ob->px += ob->vx * dt; ob->py += ob->vy * dt;
             RECT wa = work_at(ob->px, ob->py);
             float hs = ob->w / 2 + 2;
-            if (ob->px < wa.left + hs || ob->px > wa.right - hs) { ob->px = clampf(ob->px, wa.left + hs, wa.right - hs); ob->vx = 0; }
-            if (ob->py < wa.top + hs || ob->py > wa.bottom - hs) { ob->py = clampf(ob->py, wa.top + hs, wa.bottom - hs); ob->vy = 0; }
+            if (ob->px < wa.left + hs && !on_work(wa.left - 1.0f, ob->py)) { ob->px = wa.left + hs; ob->vx = fabsf(ob->vx) * BOUNCE; }
+            if (ob->px > wa.right - hs && !on_work((float)wa.right, ob->py)) { ob->px = wa.right - hs; ob->vx = -fabsf(ob->vx) * BOUNCE; }
+            if (ob->py < wa.top + hs && !on_work(ob->px, wa.top - 1.0f)) { ob->py = wa.top + hs; ob->vy = fabsf(ob->vy) * BOUNCE; }
+            if (ob->py > wa.bottom - hs && !on_work(ob->px, (float)wa.bottom)) { ob->py = wa.bottom - hs; ob->vy = -fabsf(ob->vy) * BOUNCE; }
+            if (hypotf(ob->vx, ob->vy) < 4) ob->vx = ob->vy = 0; /* (at rest) */
             if (hypotf(ob->px - g_mx, ob->py - g_my) < CATCH) ob->free = 0; /* caught: the spring takes it home */
         } else { /* on its orbit: a bead on a ring round the main core, held onto the ring and drawn along it to its place */
             float cy = g_my + bob, d = 0;
@@ -890,7 +904,7 @@ static void draw_single(Room *room, int n, double now) {
                 ob->vx += (fr * nx + ft * txn + bx) * sub; ob->vy += (fr * ny + ft * tyn + by) * sub;
                 ob->px += ob->vx * sub; ob->py += ob->vy * sub;
             }
-            if (d > BREAK) { ob->free = 1; ob->vx *= .1f; ob->vy *= .1f; } /* pulled too far: it lets go */
+            if (d > BREAK) ob->free = 1; /* pulled too far: it lets go, and flies on with the speed it had */
         }
         /* its window: the core, room round it for the focus frame, drawn at its exact place (part pixels too) */
         int w4 = ((int)ob->w / 4) * 4;
