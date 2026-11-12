@@ -32,6 +32,7 @@
 #include <shellapi.h>
 #include <ole2.h>
 #include <richedit.h>
+#include <commdlg.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,11 @@ static int g_labels = 1;            /* all cores: name and state above each core
 static double g_away_after = 120;   /* --away: seconds without keyboard or mouse input until "away" (0 = never) */
 static int g_away;
 static int g_tip_middle;            /* Settings > Text box: in the middle of the screen, else next to the core */
+static int g_tip_bg;                /* Settings > Box colour: the text box's background, one of TIP_BGS, or 5: g_tip_custom */
+static unsigned g_tip_custom = 0x2A2F3A; /* the colour picked in the palette window (0xRRGGBB) */
+static int g_text_col;              /* Settings > Colours > Text: 0 auto (light on a dark box, dark on a light one), 1-4 TEXT_COLS, 5 g_text_custom */
+static unsigned g_text_custom = 0xF2F2F5;
+static int g_wheel_spin;            /* Settings > Scroll on a core: how the wheel spins it, one of WHEEL_NAMES (4: not at all) */
 static int g_tip_mono = 1;          /* Settings > Text box font: the terminal's monospaced face, like Claude Code (else Segoe UI) */
 static int g_open_settings;         /* --settings: open the Settings window at once */
 static char g_set_shot[1024];       /* --settings-shot FILE: open it, let the preview run 2 s, save the window as a BMP and quit */
@@ -126,9 +132,49 @@ static const wchar_t *FRAME_NAMES[7] = {L"Segments", L"Lens", L"Polar", L"Diamon
 static const float GRAVITIES[4] = {1, 2, 4, 8};             /* the orbit spring's strength, times the lightest */
 static const double AWAYS[4] = {60, 120, 300, 0};
 static const float TIPSIZES[4] = {0.75f, 1.0f, 1.35f, 1.75f};
+static const unsigned TIP_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A}; /* dark, so the text keeps its contrast */
+static const wchar_t *TIP_BG_NAMES[6] = {L"Ink", L"Graphite", L"Navy", L"Plum", L"Pine", L"Custom"};
+static const wchar_t *WHEEL_NAMES[5] = {L"Roll", L"Roll back", L"Turn", L"Turn back", L"Off"};
+static unsigned tip_bgx(void) { return g_tip_bg == 5 ? g_tip_custom : TIP_BGS[g_tip_bg]; } /* 0xRRGGBB */
+static COLORREF tip_bg(void) { unsigned v = tip_bgx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
+static int box_light(void) { unsigned v = tip_bgx(); return 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140; }
+static COLORREF tip_field(void) { /* the typing field: a step lighter on a dark box, a step darker on a light one */
+    unsigned v = tip_bgx();
+    int r = v >> 16 & 255, g = v >> 8 & 255, b = v & 255, d = box_light() ? -14 : 13;
+    return RGB(max(0, min(255, r + d)), max(0, min(255, g + d)), max(0, min(255, b + d + (d > 0 ? 3 : 0))));
+}
+/* text on the box: as it is on a dark box; on a light one the same hue, dark, so it keeps its contrast */
+static COLORREF ink(COLORREF c) { return box_light() ? RGB(GetRValue(c) * 3 / 10, GetGValue(c) * 3 / 10, GetBValue(c) * 3 / 10) : c; }
+static const unsigned TEXT_COLS[5] = {0, 0xF2F2F5, 0xF5D9A0, 0x9FE8C2, 0x9CCBFF};
+static const wchar_t *TEXT_NAMES[6] = {L"Auto", L"White", L"Cream", L"Mint", L"Sky", L"Custom"};
+static unsigned inkx(unsigned v);
+/* the reply's own text (and what is typed): the chosen colour, or on Auto the usual light text, dark on a light box */
+static unsigned text_bodyx(void) { return g_text_col == 5 ? g_text_custom : g_text_col ? TEXT_COLS[g_text_col] : inkx(0xE6E8F0); }
+static COLORREF text_body(void) { unsigned v = text_bodyx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
+static unsigned inkx(unsigned v) { return box_light() ? ((v >> 16 & 255) * 3 / 10) << 16 | ((v >> 8 & 255) * 3 / 10) << 8 | (v & 255) * 3 / 10 : v; }
+/* the wheel over a core: it spins one way or another (Settings > Scroll on a core) */
+static void wheel_spin(Session *s, float notches) {
+    float k = notches * 1.2f;
+    switch (g_wheel_spin) {
+    case 0: s->spin_x = fmaxf(-8, fminf(8, s->spin_x - k)); break; /* roll: the top goes away as the wheel goes down */
+    case 1: s->spin_x = fmaxf(-8, fminf(8, s->spin_x + k)); break;
+    case 2: s->spin_y = fmaxf(-8, fminf(8, s->spin_y - k)); break; /* turn: round the upright axis */
+    case 3: s->spin_y = fmaxf(-8, fminf(8, s->spin_y + k)); break;
+    }
+}
 #define DRAG_AFTER ((int)(4 * g_dpi)) /* pixels the mouse moves before a press becomes a drag */
 
+/* --record SCENE FILE (to make the README's animations): the demo on a fixed clock, a scripted pointer in place of
+ * the real one (the real mouse is never read or moved), and every frame of the panel's own windows written to FILE */
+static char g_rec_scene[16], g_rec_file[1024];
+static double g_rec_now;            /* the made-up clock (0: the real one) */
+static POINT g_rec_mouse;           /* the scripted pointer */
+static int g_rec_still;             /* the demo sessions stop changing state */
+
+static void cursor_pos(POINT *p) { if (g_rec_scene[0]) *p = g_rec_mouse; else GetCursorPos(p); }
+
 static double wall(void) {
+    if (g_rec_now > 0) return g_rec_now;
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     ULARGE_INTEGER u;
@@ -189,6 +235,7 @@ static void pos_read(void) {
 
 static void pos_write(void) {
     char path[1100];
+    if (g_rec_scene[0]) return; /* (a recording keeps nothing) */
     if (!pos_path(path, sizeof path)) return;
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -264,7 +311,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, tip_size; int others, labels, tip_middle, tip_mono; double away; char shape[16], frame[16]; } g_launch;
+static struct { float font, core, scale, glow, gravity, tip_size; int others, labels, tip_middle, tip_mono, tip_bg, wheel_spin, text_col; unsigned tip_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -275,6 +322,7 @@ static int settings_path(char *out, size_t n) {
 static void remember_launch(void) {
     g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.tip_size = g_tip_size; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.away = g_away_after; g_launch.tip_middle = g_tip_middle; g_launch.tip_mono = g_tip_mono;
+    g_launch.tip_bg = g_tip_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.tip_custom = g_tip_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
 }
@@ -283,6 +331,7 @@ static void restore_launch(void) {
     motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_tip_size = g_launch.tip_size; g_others = g_launch.others;
     g_labels = g_launch.labels; g_away_after = g_launch.away; g_tip_middle = g_launch.tip_middle; g_tip_mono = g_launch.tip_mono;
+    g_tip_bg = g_launch.tip_bg; g_wheel_spin = g_launch.wheel_spin; g_tip_custom = g_launch.tip_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
@@ -331,6 +380,11 @@ static void settings_load(void) {
     if (json_num(buf, "labels", &v)) g_labels = v != 0;
     if (json_num(buf, "tipMiddle", &v)) g_tip_middle = v != 0;
     if (json_num(buf, "tipMono", &v)) g_tip_mono = v != 0;
+    if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_tip_bg = (int)v;
+    if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_tip_custom = (unsigned)v;
+    if (json_num(buf, "textColor", &v) && v >= 0 && v < 6) g_text_col = (int)v;
+    if (json_num(buf, "textCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_text_custom = (unsigned)v;
+    if (json_num(buf, "wheelSpin", &v) && v >= 0 && v < 5) g_wheel_spin = (int)v;
     if (json_num(buf, "away", &v) && v >= 0) g_away_after = v;
     char sh[16], *c = strstr(buf, "\"shape\"");
     if (c && sscanf(c, "\"shape\" : \"%15[a-z0-9]\"", sh) == 1) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh);
@@ -352,9 +406,9 @@ static void settings_save(void) {
     if (!settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    fprintf(f, "{\"fontSize\": %g, \"core\": %g, \"scale\": %g, \"glow\": %g, \"gravity\": %g, \"tipSize\": %g, \"others\": %d, \"labels\": %d, \"tipMiddle\": %d, \"tipMono\": %d, \"away\": %g, "
+    fprintf(f, "{\"fontSize\": %g, \"core\": %g, \"scale\": %g, \"glow\": %g, \"gravity\": %g, \"tipSize\": %g, \"others\": %d, \"labels\": %d, \"tipMiddle\": %d, \"tipMono\": %d, \"tipColor\": %d, \"tipCustom\": %u, \"textColor\": %d, \"textCustom\": %u, \"wheelSpin\": %d, \"away\": %g, "
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
-            g_font, g_core, g_scale, g_glow, g_gravity, g_tip_size, g_others, g_labels, g_tip_middle, g_tip_mono, g_away_after, g_shape_name, g_frame);
+            g_font, g_core, g_scale, g_glow, g_gravity, g_tip_size, g_others, g_labels, g_tip_middle, g_tip_mono, g_tip_bg, g_tip_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
     fprintf(f, ", \"mapRoutines\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
@@ -1026,7 +1080,7 @@ static void draw(double now) {
 /* The hook keeps them in ~/.dodeca-core/msg/<sid>.json (only with DODECA_RICH=1); read again when the file
  * changes. --demo makes them up, like the macOS panel. */
 static const char *DEMO_REPLY[] = {
-    "Refactored the channel model so fading is applied per tap.\nAll 42 simulation tests pass; the BER curve now matches the reference within 0.2 dB.\nNext I can add Doppler if you want.",
+    "Refactored the channel model so fading is applied per tap.\n\n- `channel.py`: one Rayleigh draw per tap, not per frame\n- `sim.py`: the seed covers the noise too, so runs repeat\n- `test_ber.py`: all 42 tests pass\n\nThe BER curve now matches the reference within 0.2 dB:\n\n```\nEb/N0   ref      ours\n 4 dB   1.2e-2   1.2e-2\n 8 dB   3.1e-4   3.3e-4\n12 dB   1.8e-6   1.9e-6\n```\n\n**How I checked**\n\n1. Ran the 42 tests three times with fixed seeds\n2. Swept Eb/N0 from 0 to 14 dB in 1 dB steps\n3. Compared each point with `reference.csv`\n\n**Files changed**\n\n- `channel.py` +48 -31\n- `sim.py` +12 -4\n- `test_ber.py` +20\n\nNext I can add **Doppler** if you want.",
     "The lock now debounces the reed switch for 30 ms.\nI also fixed the race where a second unlock arrived before the motor stopped.",
     "整理好今天的筆記了：三個待辦、兩個已完成。\n要不要我把待辦排進明天的計畫？",
     "Bumped the bootloader to v2.3 and rebuilt the image.\nFlash it with `make flash`; the OTA path is unchanged.",
@@ -1610,13 +1664,13 @@ static void tip_scroll(float notches) {
 }
 
 static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_PAINT) { /* drawn off-screen first, so scrolling does not flicker */
+    if (msg == WM_PAINT || msg == WM_PRINTCLIENT) { /* drawn off-screen first, so scrolling does not flicker (WM_PRINTCLIENT: --record) */
         PAINTSTRUCT ps;
-        HDC wdc = BeginPaint(w, &ps);
+        HDC wdc = msg == WM_PAINT ? BeginPaint(w, &ps) : (HDC)wp;
         RECT r; GetClientRect(w, &r);
         HDC dc = CreateCompatibleDC(wdc);
         HBITMAP bm = CreateCompatibleBitmap(wdc, r.right, r.bottom), old = SelectObject(dc, bm);
-        HBRUSH bg = CreateSolidBrush(RGB(24, 25, 30)), bar = CreateSolidBrush(g_tip_accent);
+        HBRUSH bg = CreateSolidBrush(tip_bg()), bar = CreateSolidBrush(g_tip_accent);
         FillRect(dc, &r, bg);
         RECT b = {0, 0, tip_bar(), r.bottom};
         FillRect(dc, &b, bar);
@@ -1625,14 +1679,14 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int pad = tip_pad();
         RECT t = {tip_bar() + pad, pad, r.right - pad, pad + g_tip_title_h};
         int ar = GetRValue(g_tip_accent), ag = GetGValue(g_tip_accent), ab = GetBValue(g_tip_accent);
-        SetTextColor(dc, RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10)); /* lifted toward white */
+        SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10))); /* lifted toward white */
         SelectObject(dc, g_tip_tf);
         if (g_tip_title) DrawTextW(dc, g_tip_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         int top = t.bottom + tip_gap(), sb = g_tip_body_h > g_tip_view_h ? (int)(8 * g_dpi) : 0;
         RECT view = {t.left, top, r.right - pad - sb, top + g_tip_view_h};
         RECT body = {view.left, top - g_tip_scroll, view.right, top - g_tip_scroll + g_tip_body_h};
         g_tip_view = view;
-        SetTextColor(dc, RGB(230, 232, 240));
+        SetTextColor(dc, text_body());
         SelectObject(dc, g_tip_bf);
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
@@ -1642,15 +1696,15 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             if (by + 3 * g_tip_line < view.top || by - 3 * g_tip_line > view.bottom) continue;
             if (rn->f == SH_RULE || rn->f == SH_BAR) { /* a rule, or a quote's bar */
                 RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
-                HBRUSH br = CreateSolidBrush(rn->c);
+                HBRUSH br = CreateSolidBrush(ink(rn->c));
                 FillRect(dc, &sr, br);
                 DeleteObject(br);
                 continue;
             }
-            SetTextColor(dc, rn->c);
+            SetTextColor(dc, rn->c == MD_BODY || rn->c == MD_BOLD ? text_body() : ink(rn->c)); /* the text in the chosen colour; code, links and quotes keep theirs */
             mix_text(dc, lay_font(rn->f), g_lay_text + rn->at, rn->n, 1, x, by);
             if (rn->deco) { /* a link's underline, a strike through */
-                HBRUSH br = CreateSolidBrush(rn->c);
+                HBRUSH br = CreateSolidBrush(ink(rn->c));
                 if (rn->deco & DECO_UNDER) { RECT ur = {x, by + 2 * th, x + rn->w, by + 3 * th}; FillRect(dc, &ur, br); }
                 if (rn->deco & DECO_STRIKE) { int sy = by - g_fasc[rn->f] * 3 / 10; RECT sr = {x, sy, x + rn->w, sy + th}; FillRect(dc, &sr, br); }
                 DeleteObject(br);
@@ -1667,7 +1721,7 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         }
         BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old); DeleteObject(bm); DeleteDC(dc);
-        EndPaint(w, &ps);
+        if (msg == WM_PAINT) EndPaint(w, &ps);
         return 0;
     }
     if (msg == WM_ERASEBKGND) return 1;
@@ -1713,7 +1767,7 @@ static void tip_show(const Session *s, RECT beside, int cy, double now) {
     if (!strcmp(s->sid, "ghost")) snprintf(title, sizeof title, "%s", line);
     else snprintf(title, sizeof title, "%s \xC2\xB7 %s", name, line);
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
-    if (g_single && g_focus_pinned && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
+    if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     wchar_t *wt = tip_text(title), *wb;
     { int n = MultiByteToWideChar(CP_UTF8, 0, body, -1, NULL, 0); wb = malloc(sizeof(wchar_t) * (size_t)n); MultiByteToWideChar(CP_UTF8, 0, body, -1, wb, n); } /* as written: laid out below */
@@ -1915,7 +1969,7 @@ static void edit_style(void) {
     memset(&cf, 0, sizeof cf);
     cf.cbSize = sizeof cf;
     cf.dwMask = CFM_COLOR | CFM_FACE | CFM_CHARSET;
-    cf.crTextColor = RGB(232, 234, 242);
+    cf.crTextColor = text_body();
     cf.bCharSet = DEFAULT_CHARSET;
     wcsncpy(cf.szFaceName, mono_face(), LF_FACESIZE - 1);
     SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
@@ -2060,7 +2114,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(w, &ps);
         RECT r; GetClientRect(w, &r);
-        HBRUSH bg = CreateSolidBrush(RGB(24, 25, 30)), bar = CreateSolidBrush(g_tip_accent), field = CreateSolidBrush(RGB(36, 38, 46));
+        HBRUSH bg = CreateSolidBrush(tip_bg()), bar = CreateSolidBrush(g_tip_accent), field = CreateSolidBrush(tip_field());
         FillRect(dc, &r, bg);
         RECT b = {0, 0, tip_bar(), r.bottom};
         FillRect(dc, &b, bar);
@@ -2073,7 +2127,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         DeleteObject(pen); DeleteObject(bg); DeleteObject(bar); DeleteObject(field);
         SetBkMode(dc, TRANSPARENT);
         int ar = GetRValue(g_tip_accent), ag = GetGValue(g_tip_accent), ab = GetBValue(g_tip_accent);
-        SetTextColor(dc, RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10));
+        SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10)));
         SelectObject(dc, g_input_tf);
         int i = index_of(g_input_sid);
         wchar_t title[120] = L"Reply";
@@ -2095,7 +2149,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (used) wcscat(hint, L"   \x00B7   Backspace deletes an image");
         else wcscpy(hint, L"Enter sends   \x00B7   Shift+Enter new line   \x00B7   Esc closes   \x00B7   drop an image on the core");
-        SetTextColor(dc, used ? RGB(190, 200, 225) : RGB(120, 126, 142));
+        SetTextColor(dc, ink(used ? RGB(190, 200, 225) : RGB(120, 126, 142)));
         SelectObject(dc, g_input_sf);
         RECT ht = {x0 + (int)(2 * g_dpi), fy + in_field_h() + gap, r.right - pad, r.bottom - pad};
         DrawTextW(dc, hint, -1, &ht, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -2198,7 +2252,7 @@ static void input_open_for(const Session *s) {
         g_input = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, L"VigilInput", L"Vigil reply", WS_POPUP, 0, 0, 10, 10, NULL, NULL, ic.hInstance, NULL);
         LoadLibraryW(L"Msftedit.dll"); /* a rich edit: a font per run, so Chinese can have its own face, as in the terminal */
         g_edit = CreateWindowEx(0, MSFTEDIT_CLASS, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 10, 10, g_input, NULL, ic.hInstance, NULL);
-        SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, RGB(36, 38, 46));
+        SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, tip_field());
         SendMessageW(g_edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
         g_edit_proc = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)edit_proc);
     }
@@ -2221,9 +2275,11 @@ static void input_open_for(const Session *s) {
     ShowWindow(g_input, SW_SHOW);
     input_place();
     void mask_alt(void);
-    mask_alt(); /* a key event from this process lets it take the foreground */
-    SetForegroundWindow(g_input);
-    SetFocus(g_edit);
+    if (!g_rec_scene[0]) { /* (a recording never takes the keyboard) */
+        mask_alt(); /* a key event from this process lets it take the foreground */
+        SetForegroundWindow(g_input);
+        SetFocus(g_edit);
+    }
     SendMessageW(g_edit, EM_SETSEL, 0, -1);
     SendMessageW(g_edit, EM_SETSEL, (WPARAM)-1, -1);
 }
@@ -2346,7 +2402,7 @@ static void set_transparent(Pane *p, int transparent) {
 /* every frame: what the pointer is over */
 static void track_mouse(double now) {
     POINT scr;
-    GetCursorPos(&scr);
+    cursor_pos(&scr);
     Room *room = shown_room();
     float lx = 0, ly = 0;
     int hit = core_at(scr, &lx, &ly), down = down_index();
@@ -2392,7 +2448,7 @@ void mask_alt(void) {
 /* Alt-drag or Alt-click: until it is put down, every tick asks where the mouse is (with the button up there
  * are no mouse messages once it leaves the window), at a quicker pace */
 static void start_follow(void) {
-    GetCursorPos(&g_last_mouse);
+    cursor_pos(&g_last_mouse);
     g_last_mouse_t = wall();
     g_mvx = g_mvy = 0;
     int i = down_index();
@@ -2403,7 +2459,7 @@ static void start_follow(void) {
  * motion: the carried one leans and sloshes (CARRY in session.c), and the small cores lag behind. */
 static void follow(void) {
     POINT m;
-    GetCursorPos(&m);
+    cursor_pos(&m);
     double now = wall(), dt = now - g_last_mouse_t;
     if (dt >= 1.0 / 240) { /* the mouse speed, smoothed a little */
         float a = 0.45f;
@@ -2482,7 +2538,7 @@ static void carry(void) {
 static void update_overlays(double now) {
     LASTINPUTINFO li = {sizeof li, 0};
     double idle = GetLastInputInfo(&li) ? (GetTickCount() - li.dwTime) / 1000.0 : 0;
-    int away = g_away_after > 0 && idle > g_away_after;
+    int away = !g_rec_scene[0] && g_away_after > 0 && idle > g_away_after;
     Room *room = shown_room();
     if (g_away && !away)
         for (int i = 0; i < room->n; i++) if (room->s[i].unread) room->s[i].burst_at = now;
@@ -2639,7 +2695,7 @@ static void tick(void) {
     float dt = (float)(now - g_last);
     if (dt > 0.25f) dt = 0.25f;
     g_last = now;
-    if (g_demo_n) demo_run(&g_demo, &g_room, now);
+    if (g_demo_n && !g_rec_still) demo_run(&g_demo, &g_room, now);
     else if (now - g_polled >= 0.25) { /* the events file sits in WSL: each look is a trip into its VM, 4 a second is plenty */
         g_polled = now;
         int n = tail_poll(&g_tail, g_ev, 1024);
@@ -2670,7 +2726,7 @@ static double tick_interval(void) { return g_moving || g_dragging || g_carrying 
  * its gravity: drag the core; the state it shows; a reply in the text box's font), three cards below (Look, Motion,
  * Replies) with icon tiles, sliders, a switch and chips. Drawn antialiased into its own bitmap and shown as a
  * layered window, so the corners are smooth too. Every choice applies at once and is kept, as the menu's were. */
-enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_TIPAT, R_TIPFONT, R_TEXT, R_LABELS, R_AWAY, R_TIPSIZE };
+enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_TIPAT, R_TIPFONT, R_TEXT, R_LABELS, R_AWAY, R_TIPSIZE, R_TIPBG, R_WHEEL, R_TEXTCOL };
 enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
 typedef struct { RECT r; int kind, row, val, n; float t0, t1; } SetHit; /* a slider: n stops from t0 to t1 (pixels) */
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
@@ -2707,7 +2763,7 @@ static double g_pv_orbit, g_pv_lock_until, g_pv_last;
 static float S(float v) { return v * (float)g_dpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
 static int SW_W(void) { return (int)lroundf(S(880)); }
-static int SW_H(void) { return (int)lroundf(S(740)); }
+static int SW_H(void) { return (int)lroundf(S(830)); }
 static int set_open(void) { return g_set && IsWindowVisible(g_set); }
 
 static int set_current(int row) {
@@ -2726,6 +2782,9 @@ static int set_current(int row) {
         case R_LABELS: return g_labels;
         case R_AWAY: if (i < 4 && g_away_after == AWAYS[i]) return i; break;
         case R_TIPSIZE: if (i < 4 && g_tip_size == TIPSIZES[i]) return i; break;
+        case R_TIPBG: return g_tip_bg;
+        case R_WHEEL: return g_wheel_spin;
+        case R_TEXTCOL: return g_text_col;
         }
     }
     return -1;
@@ -2740,8 +2799,73 @@ static void settings_applied(int save) {
     g_sl_dirty = 1;
 }
 
+/* Lucide's "palette" icon (ISC License, lucide.dev), its outline sampled from the SVG path on a 24-unit grid,
+ * drawn at (cx, cy) `size` pixels across with the icon's 2-unit round strokes */
+static const float LUCIDE_PALETTE[] = {
+    12.00f, 2.00f, 11.32f, 2.02f, 10.65f, 2.09f, 9.99f, 2.20f, 9.35f, 2.36f, 8.72f, 2.55f, 8.12f, 2.79f, 7.53f, 3.06f,
+    6.96f, 3.37f, 6.42f, 3.71f, 5.90f, 4.09f, 5.40f, 4.50f, 4.94f, 4.94f, 4.50f, 5.40f, 4.09f, 5.90f, 3.71f, 6.42f,
+    3.37f, 6.96f, 3.06f, 7.53f, 2.79f, 8.12f, 2.55f, 8.72f, 2.36f, 9.35f, 2.20f, 9.99f, 2.09f, 10.65f, 2.02f, 11.32f,
+    2.00f, 12.00f, 2.02f, 12.68f, 2.09f, 13.35f, 2.20f, 14.01f, 2.36f, 14.65f, 2.55f, 15.28f, 2.79f, 15.88f, 3.06f, 16.47f,
+    3.37f, 17.04f, 3.71f, 17.58f, 4.09f, 18.10f, 4.50f, 18.60f, 4.94f, 19.06f, 5.40f, 19.50f, 5.90f, 19.91f, 6.42f, 20.29f,
+    6.96f, 20.63f, 7.53f, 20.94f, 8.12f, 21.21f, 8.72f, 21.45f, 9.35f, 21.64f, 9.99f, 21.80f, 10.65f, 21.91f, 11.32f, 21.98f,
+    12.00f, 22.00f, 12.44f, 21.94f, 12.84f, 21.77f, 13.17f, 21.51f, 13.43f, 21.17f, 13.59f, 20.76f, 13.65f, 20.31f, 13.63f, 20.10f,
+    13.59f, 19.89f, 13.53f, 19.69f, 13.44f, 19.51f, 13.33f, 19.34f, 13.21f, 19.19f, 13.08f, 19.04f, 12.97f, 18.87f, 12.88f, 18.69f,
+    12.82f, 18.50f, 12.79f, 18.29f, 12.77f, 18.06f, 12.82f, 17.63f, 12.99f, 17.22f, 13.25f, 16.87f, 13.60f, 16.61f, 14.01f, 16.44f,
+    14.44f, 16.39f, 16.44f, 16.39f, 16.82f, 16.38f, 17.19f, 16.34f, 17.55f, 16.28f, 17.91f, 16.19f, 18.25f, 16.09f, 18.59f, 15.96f,
+    18.92f, 15.80f, 19.23f, 15.63f, 19.54f, 15.44f, 19.82f, 15.23f, 20.10f, 15.00f, 20.36f, 14.76f, 20.60f, 14.50f, 20.83f, 14.23f,
+    21.04f, 13.94f, 21.23f, 13.64f, 21.40f, 13.32f, 21.55f, 12.99f, 21.68f, 12.66f, 21.79f, 12.31f, 21.88f, 11.95f, 21.94f, 11.59f,
+    21.98f, 11.22f, 21.99f, 10.84f, 21.97f, 10.24f, 21.89f, 9.65f, 21.78f, 9.07f, 21.62f, 8.51f, 21.42f, 7.96f, 21.19f, 7.42f,
+    20.91f, 6.90f, 20.60f, 6.40f, 20.26f, 5.92f, 19.88f, 5.46f, 19.47f, 5.02f, 19.03f, 4.61f, 18.57f, 4.22f, 18.07f, 3.86f,
+    17.55f, 3.52f, 17.01f, 3.22f, 16.45f, 2.94f, 15.86f, 2.70f, 15.26f, 2.49f, 14.63f, 2.32f, 14.00f, 2.18f, 13.34f, 2.08f,
+    12.68f, 2.02f, 12.00f, 2.00f,
+};
+static void palette_icon(Pane *pn, float cx, float cy, float size, unsigned col) {
+    float k = size / 24, x0 = cx - size / 2, y0 = cy - size / 2;
+    int n = (int)(sizeof LUCIDE_PALETTE / sizeof LUCIDE_PALETTE[0]) / 2;
+    Col c = hexc(col);
+    for (int i = 0; i + 1 < n; i++) {
+        const float *a = LUCIDE_PALETTE + 2 * i;
+        aa_seg(pn, x0 + a[0] * k, y0 + a[1] * k, x0 + a[2] * k, y0 + a[3] * k, 2 * k, c, 1);
+    }
+    static const float DOT[4][2] = {{13.5f, 6.5f}, {17.5f, 10.5f}, {8.5f, 7.5f}, {6.5f, 12.5f}};
+    for (int i = 0; i < 4; i++) aa_disc(pn, x0 + DOT[i][0] * k, y0 + DOT[i][1] * k, 1.5f * k, c, 1);
+}
+
+/* the colour window opens in the middle of the Settings window, in front of it */
+static UINT_PTR CALLBACK cc_hook(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)wp; (void)lp;
+    if (msg == WM_INITDIALOG && g_set) {
+        RECT sr, dr;
+        GetWindowRect(g_set, &sr); GetWindowRect(d, &dr);
+        int w = dr.right - dr.left, h = dr.bottom - dr.top;
+        SetWindowPos(d, HWND_TOPMOST, (sr.left + sr.right - w) / 2, (sr.top + sr.bottom - h) / 2, 0, 0, SWP_NOSIZE);
+    }
+    return 0; /* the dialog's own handling goes on */
+}
+
+/* the palette swatch: Windows' colour window, opened on the colour in use; the cores keep moving meanwhile (a plain
+ * timer ticks while the window runs its own message loop) */
+static int pick_colour(unsigned *target) {
+    static COLORREF keep[16]; /* its own row of custom colours, for this run */
+    CHOOSECOLORW cc;
+    memset(&cc, 0, sizeof cc);
+    cc.lStructSize = sizeof cc;
+    cc.hwndOwner = g_set;
+    cc.rgbResult = RGB(*target >> 16 & 255, *target >> 8 & 255, *target & 255);
+    cc.lpCustColors = keep;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR | CC_ENABLEHOOK;
+    cc.lpfnHook = cc_hook;
+    SetTimer(g_cluster.w, ID_TIMER, 33, NULL);
+    BOOL ok = ChooseColorW(&cc);
+    KillTimer(g_cluster.w, ID_TIMER);
+    if (!ok) return 0;
+    *target = (unsigned)GetRValue(cc.rgbResult) << 16 | (unsigned)GetGValue(cc.rgbResult) << 8 | GetBValue(cc.rgbResult);
+    return 1;
+}
 static void set_choose(int row, int val) {
-    if (val == set_current(row) && row != R_OTHERS) return;
+    int palette = (row == R_TIPBG || row == R_TEXTCOL) && val == 5;
+    if (val == set_current(row) && row != R_OTHERS && !palette) return;
+    if (palette && !pick_colour(row == R_TIPBG ? &g_tip_custom : &g_text_custom)) return; /* cancelled: as it was */
     switch (row) {
     case R_SHAPE: snprintf(g_shape_name, sizeof g_shape_name, "%s", SHAPES[val]); shape_make(&g_shape, g_shape_name); break;
     case R_CORE: g_core = CORES[val]; break;
@@ -2756,6 +2880,9 @@ static void set_choose(int row, int val) {
     case R_LABELS: g_labels = val; break;
     case R_AWAY: g_away_after = AWAYS[val]; break;
     case R_TIPSIZE: g_tip_size = TIPSIZES[val]; tip_hide(); break;
+    case R_TIPBG: g_tip_bg = val; if (g_input) edit_style(); if (g_tip) InvalidateRect(g_tip, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, tip_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_WHEEL: g_wheel_spin = val; break;
+    case R_TEXTCOL: g_text_col = val; if (g_tip) InvalidateRect(g_tip, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     default: return;
     }
     settings_applied(1);
@@ -2929,7 +3056,7 @@ static void mot_chip(Pane *pn, float x0, float y0, float x1, float y1, int on, i
 static void motions_page(Pane *pn) {
     const float y0 = 304, l = 40, r = 840;
     int st = g_pv_st;
-    box(pn, 24, y0, 856, 684, 16, S_CARD, 0, 0);
+    box(pn, 24, y0, 856, 774, 16, S_CARD, 0, 0);
     tx(l, y0 + 12, 300, y0 + 34, L"Motions", g_sf_card, S_TEXT, DT_LEFT);
     tx(300, y0 + 12, r, y0 + 34, L"Each state picks one of its routines every time it starts; actions play now and then.", g_sf_small, S_MUTED, DT_RIGHT);
     /* the states: Claude Code's, then the panel's own */
@@ -3000,15 +3127,15 @@ static void set_build(void) {
     pane_size(pn, W, H);
     memset(pn->px, 0, (size_t)W * H * 4);
     g_hits_n = 0; g_tx_n = 0;
-    box(pn, 0, 0, 880, 740, 18, S_BG, 0x2A2A30, 1);
+    box(pn, 0, 0, 880, 830, 18, S_BG, 0x2A2A30, 1);
     /* title and close */
     tx(28, 14, 400, 50, L"Settings", g_sf_title, S_TEXT, DT_LEFT);
     static const wchar_t *tabs[2] = {L"General", L"Motions"};
-    for (int i = 0; i < 2; i++) { /* the two pages, as tabs: the open one filled in slate blue, the other plain text */
+    for (int i = 0; i < 2; i++) { /* the two pages, as tabs: the open one ringed in orange like a chosen chip, the other plain text */
         float a = 132 + i * 96;
         int on = g_tab == i, hot = is_hot(K_TAB, 0, i);
-        if (on) box(pn, a, 19, a + 88, 45, 5, 0x22304A, 0x3A4C6A, 1);
-        else if (hot) box(pn, a, 19, a + 88, 45, 5, 0x232327, 0, 0);
+        if (on) box(pn, a, 19, a + 88, 45, 13, S_CHIP, S_OR, 1.5f);
+        else if (hot) box(pn, a, 19, a + 88, 45, 13, S_CHIP_HOT, 0, 0);
         tx(a, 19, a + 88, 45, tabs[i], g_sf_label, on ? 0xFFFFFF : hot ? S_TEXT : 0xC4C7CF, DT_CENTER);
         hit(a, 19, a + 88, 45, K_TAB, 0, i);
         if (!on && !(i + 1 < 2 && g_tab == i + 1)) box(pn, a + 93, 24, a + 94, 40, 0, S_EDGE, 0, 0); /* a thin divider after it */
@@ -3027,10 +3154,10 @@ static void set_build(void) {
     float th = tm.tmHeight / (float)g_dpi;
     SelectObject(mdc, g_tip_bf); GetTextMetricsW(mdc, &tm);
     float bh = tm.tmHeight / (float)g_dpi, sh = fminf(112, 22 + th + 6 + bh * 2);
-    box(pn, 580, 74, 840, 74 + sh, 10, 0x18191E, 0, 0);
+    box(pn, 580, 74, 840, 74 + sh, 10, tip_bgx(), 0, 0);
     box(pn, 580, 74, 583, 74 + sh, 1.5f, S_OR, 0, 0);
-    tx(594, 84, 832, 84 + th, L"vigil · Done", g_tip_tf, 0xFFB877, DT_LEFT | DT_END_ELLIPSIS);
-    tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_tip_bf, 0xE6E8F0, DT_WORDBREAK | DT_END_ELLIPSIS);
+    tx(594, 84, 832, 84 + th, L"vigil · Done", g_tip_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
+    tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_tip_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
     wchar_t hint[80];
     if (g_pv_zoom > 1.01f) swprintf(hint, 80, L"Scroll to zoom: %.1fx   \x00B7   double-click resets", g_pv_zoom);
     else wcscpy(hint, L"Drag the core   \x00B7   scroll on it to zoom in");
@@ -3047,7 +3174,7 @@ static void set_build(void) {
         /* the cards */
         const float y0 = 304, cw = (832 - 32) / 3.0f;
         float cx[3];
-        for (int k = 0; k < 3; k++) { cx[k] = 24 + k * (cw + 16); box(pn, cx[k], y0, cx[k] + cw, 680, 16, S_CARD, 0, 0); }
+        for (int k = 0; k < 3; k++) { cx[k] = 24 + k * (cw + 16); box(pn, cx[k], y0, cx[k] + cw, 770, 16, S_CARD, 0, 0); }
         static const wchar_t *titles[3] = {L"Look", L"Motion", L"Replies"};
         for (int k = 0; k < 3; k++) tx(cx[k] + 16, y0 + 14, cx[k] + cw - 16, y0 + 36, titles[k], g_sf_card, S_TEXT, DT_LEFT);
         /* Look: shape, glow, size on screen, inner core */
@@ -3076,7 +3203,7 @@ static void set_build(void) {
         aa_disc(pn, S(l + 4), S(y0 + 280), S(2.5f), hexc(S_KNOB), 0.8f);
         slider(pn, l + 20, y0 + 280, r - 22, R_CORE, 4);
         aa_disc(pn, S(r - 5), S(y0 + 280), S(5.5f), hexc(S_KNOB), 0.8f);
-        /* Motion: gravity, other sessions, focus frame */
+        /* Motion: gravity, other sessions, focus frame, what the wheel does */
         l = cx[1] + 16; r = cx[1] + cw - 16;
         tx(l, y0 + 46, r, y0 + 64, L"Gravity", g_sf_label, S_LABEL, DT_LEFT);
         slider(pn, l + 8, y0 + 82, r - 8, R_GRAVITY, 4);
@@ -3095,7 +3222,13 @@ static void set_build(void) {
             pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_FRAME) == i, is_hot(K_PICK, R_FRAME, i), FRAME_NAMES[i], g_sf_label);
             hit(a, b, a + fw, b + 28, K_PICK, R_FRAME, i);
         }
-        /* Replies: font, text size, where the box opens, labels */
+        tx(l, y0 + 314, r, y0 + 332, L"Scroll on a core", g_sf_label, S_LABEL, DT_LEFT);
+        for (int i = 0; i < 5; i++) {
+            float a = l + (i % 3) * (fw + 6), b = y0 + 338 + (i / 3) * 34;
+            pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_WHEEL) == i, is_hot(K_PICK, R_WHEEL, i), WHEEL_NAMES[i], g_sf_label);
+            hit(a, b, a + fw, b + 28, K_PICK, R_WHEEL, i);
+        }
+        /* Replies: font, text size, box size, colours (box and text), where the box opens, labels */
         l = cx[2] + 16; r = cx[2] + cw - 16;
         float bw = (r - l - 6) / 2;
         tx(l, y0 + 46, r, y0 + 64, L"Font", g_sf_label, S_LABEL, DT_LEFT);
@@ -3116,30 +3249,53 @@ static void set_build(void) {
         slider(pn, l + 20, y0 + 224, r - 22, R_TIPSIZE, 4);
         box(pn, r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
         static const wchar_t *opens[2] = {L"Next to core", L"Middle"}, *labels[2] = {L"On hover", L"Always"};
-        tx(l, y0 + 248, r, y0 + 266, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
-        for (int i = 0; i < 2; i++) {
-            float a = l + i * (bw + 6);
-            pick_box(pn, a, y0 + 272, a + bw, y0 + 302, 10, set_current(R_TIPAT) == i, is_hot(K_PICK, R_TIPAT, i), opens[i], g_sf_label);
-            hit(a, y0 + 272, a + bw, y0 + 302, K_PICK, R_TIPAT, i);
+        tx(l, y0 + 248, r, y0 + 266, L"Colours", g_sf_label, S_LABEL, DT_LEFT);
+        int hb = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TIPBG, ht2 = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TEXTCOL;
+        wchar_t names[60];
+        swprintf(names, 60, L"%ls  \x00B7  %ls", TIP_BG_NAMES[hb ? g_hits[g_hot].val : g_tip_bg], TEXT_NAMES[ht2 ? g_hits[g_hot].val : g_text_col]);
+        tx(l + 60, y0 + 248, r, y0 + 266, names, g_sf_small, S_MUTED, DT_RIGHT);
+        float sl = l + 38, sw = (r - sl - 5 * 6) / 6;
+        for (int row = 0; row < 2; row++) { /* Box: the default swatches, then the palette; Text: "Aa" in each colour on the box's colour, then the palette */
+            float yy = y0 + 272 + row * 34;
+            tx(l, yy, sl - 4, yy + 26, row ? L"Text" : L"Box", g_sf_small, S_MUTED, DT_LEFT);
+            for (int i = 0; i < 6; i++) {
+                float a = sl + i * (sw + 6);
+                int rr = row ? R_TEXTCOL : R_TIPBG, sel = set_current(rr) == i, hot = is_hot(K_PICK, rr, i);
+                unsigned fill = row ? tip_bgx() : i < 5 ? TIP_BGS[i] : g_tip_custom;
+                box(pn, a, yy, a + sw, yy + 26, 7, fill, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
+                unsigned tc = row ? (i == 5 ? g_text_custom : i ? TEXT_COLS[i] : inkx(0xE6E8F0)) : 0;
+                if (i == 5) { /* Lucide's palette icon: on Box light on a dark colour and dark on a light one, on Text in the picked colour */
+                    unsigned v = fill;
+                    int light = 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140;
+                    palette_icon(pn, S(a + sw / 2), S(yy + 13), S(16), row ? tc : light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
+                } else if (row) tx(a, yy, a + sw, yy + 26, L"Aa", g_sf_small, tc, DT_CENTER);
+                hit(a, yy, a + sw, yy + 26, K_PICK, rr, i);
+            }
         }
-        tx(l, y0 + 316, r, y0 + 334, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
+        tx(l, y0 + 342, r, y0 + 360, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
         for (int i = 0; i < 2; i++) {
             float a = l + i * (bw + 6);
-            pick_box(pn, a, y0 + 340, a + bw, y0 + 368, 10, set_current(R_LABELS) == i, is_hot(K_PICK, R_LABELS, i), labels[i], g_sf_label);
-            hit(a, y0 + 340, a + bw, y0 + 368, K_PICK, R_LABELS, i);
+            pick_box(pn, a, y0 + 364, a + bw, y0 + 392, 10, set_current(R_TIPAT) == i, is_hot(K_PICK, R_TIPAT, i), opens[i], g_sf_label);
+            hit(a, y0 + 364, a + bw, y0 + 392, K_PICK, R_TIPAT, i);
+        }
+        tx(l, y0 + 404, r, y0 + 422, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
+        for (int i = 0; i < 2; i++) {
+            float a = l + i * (bw + 6);
+            pick_box(pn, a, y0 + 426, a + bw, y0 + 454, 10, set_current(R_LABELS) == i, is_hot(K_PICK, R_LABELS, i), labels[i], g_sf_label);
+            hit(a, y0 + 426, a + bw, y0 + 454, K_PICK, R_LABELS, i);
         }
     } else motions_page(pn);
     /* the foot: standby time, reset */
     int aw = set_current(R_AWAY);
-    tx(28, 694, 120, 726, L"Rest after", g_sf_label, S_MUTED, DT_LEFT);
+    tx(28, 784, 120, 816, L"Rest after", g_sf_label, S_MUTED, DT_LEFT);
     int ha = is_hot(K_CYCLE, R_AWAY, 0);
-    box(pn, 92, 697, 184, 723, 13, ha ? S_CHIP_HOT : S_CHIP, 0, 0);
-    tx(92, 697, 184, 723, aw >= 0 ? AWAY_TEXT[aw] : L"custom", g_sf_label, S_TEXT, DT_CENTER);
-    hit(92, 697, 184, 723, K_CYCLE, R_AWAY, 0);
-    tx(192, 694, 420, 726, aw == 3 ? L"(cores never rest)" : L"away: cores show STANDBY", g_sf_label, S_MUTED, DT_LEFT);
+    box(pn, 92, 787, 184, 813, 13, ha ? S_CHIP_HOT : S_CHIP, 0, 0);
+    tx(92, 787, 184, 813, aw >= 0 ? AWAY_TEXT[aw] : L"custom", g_sf_label, S_TEXT, DT_CENTER);
+    hit(92, 787, 184, 813, K_CYCLE, R_AWAY, 0);
+    tx(192, 784, 420, 816, aw == 3 ? L"(cores never rest)" : L"away: cores show STANDBY", g_sf_label, S_MUTED, DT_LEFT);
     int can = settings_saved(), hr = is_hot(K_RESET, 0, 0);
-    tx(640, 694, 856, 726, L"Reset to defaults", g_sf_label, can ? (hr ? 0xFFB877 : S_OR) : 0x55555E, DT_RIGHT);
-    if (can) hit(740, 698, 856, 722, K_RESET, 0, 0);
+    tx(640, 784, 856, 816, L"Reset to defaults", g_sf_label, can ? (hr ? 0xFFB877 : S_OR) : 0x55555E, DT_RIGHT);
+    if (can) hit(740, 788, 856, 812, K_RESET, 0, 0);
     /* the text, then everything inside the edge made opaque again (GDI leaves its alpha at 0) */
     GdiFlush();
     SetBkMode(mdc, TRANSPARENT);
@@ -3397,6 +3553,226 @@ static void settings_shot(const char *path) {
     fclose(f);
 }
 
+/* ---- --record: two scripted scenes for the README, frames written raw ------------------------------------
+ * "reply": the pointer rests on the main core (its text box, then lock-on), then on a small core.
+ * "input": the wheel scrolls a long reply, a double-click opens the reply box, text is typed, an image is dragged onto
+ * the core (it reads it) and dropped: an [Image #1] token. Nothing is sent.
+ * "carry": Alt-click picks the cluster up, a slow move (the small cores trail behind), a dash toward the screen's corner
+ * that turns away (they break off, fly on and bounce off its edges), then over to each one, which comes back to the
+ * orbit, and put down. Recorded at Gravity: Floaty.
+ * Each frame: int32 x, y (the pointer, in the frame), int32 shown (0 while carried: the pointer hides; 2 with an
+ * image file under it), then W×H
+ * BGR bytes of the cores and the text box over the terminal's background (#212121). Header: int32 W, H, fps. */
+static RECT g_rec_rc;
+static float rec_ease(float a) { a = clampf(a, 0, 1); return a * a * (3 - 2 * a); }
+static void rec_glide(double t, double t0, double t1, float ax, float ay, float bx, float by) {
+    if (t < t0 || t > t1 + 0.05) return;
+    float e = rec_ease((float)((t - t0) / (t1 - t0)));
+    g_rec_mouse.x = (LONG)lroundf(ax + (bx - ax) * e); g_rec_mouse.y = (LONG)lroundf(ay + (by - ay) * e);
+}
+
+static void rec_over(uint32_t *fr, int W, int H, const uint32_t *src, int sw, int sh, int ox, int oy, int opaque) {
+    for (int y = 0; y < sh; y++) {
+        int fy = oy + y;
+        if (fy < 0 || fy >= H) continue;
+        for (int x = 0; x < sw; x++) {
+            int fx = ox + x;
+            if (fx < 0 || fx >= W) continue;
+            uint32_t sp = src[(size_t)y * sw + x], a = opaque ? 255 : sp >> 24, *d = &fr[(size_t)fy * W + fx], o = 0;
+            if (!a && !opaque) continue;
+            for (int k = 0; k < 24; k += 8) {
+                uint32_t sc = sp >> k & 255, dc = *d >> k & 255, v = sc + dc * (255 - a) / 255;
+                o |= (v > 255 ? 255 : v) << k;
+            }
+            *d = o | 0xFF000000u;
+        }
+    }
+}
+
+static void rec_frame(FILE *f) {
+    int W = g_rec_rc.right - g_rec_rc.left, H = g_rec_rc.bottom - g_rec_rc.top;
+    static uint32_t *fr;
+    static uint8_t *bgr;
+    if (!fr) { fr = malloc((size_t)W * H * 4); bgr = malloc((size_t)W * H * 3); }
+    for (size_t i = 0; i < (size_t)W * H; i++) fr[i] = 0xFF212121u;
+    for (int k = 0; k <= g_core_n; k++) { /* the small cores, then the main one on top */
+        int i = k < g_core_n ? k : g_top;
+        if (i < 0 || i >= MAX_SESS || (k < g_core_n && i == g_top)) continue;
+        Pane *p = &g_pane[i];
+        if (p->shown && p->px) rec_over(fr, W, H, p->px, p->W, p->H, p->x - g_rec_rc.left, p->y - g_rec_rc.top, 0);
+    }
+    if (g_tip && IsWindowVisible(g_tip)) { /* the text box paints itself into a bitmap of ours */
+        RECT r;
+        GetWindowRect(g_tip, &r);
+        int tw = r.right - r.left, th = r.bottom - r.top;
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = tw; bi.bmiHeader.biHeight = -th;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        uint32_t *tp = NULL;
+        HDC mem = CreateCompatibleDC(NULL);
+        HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&tp, NULL, 0), old = SelectObject(mem, bm);
+        SendMessage(g_tip, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
+        GdiFlush();
+        rec_over(fr, W, H, tp, tw, th, r.left - g_rec_rc.left, r.top - g_rec_rc.top, 1);
+        SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+    }
+    if (g_input && IsWindowVisible(g_input)) { /* the reply box (a rich edit inside): as the compositor has it */
+        RECT r;
+        GetWindowRect(g_input, &r);
+        int tw = r.right - r.left, th = r.bottom - r.top;
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = tw; bi.bmiHeader.biHeight = -th;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        uint32_t *tp = NULL;
+        HDC mem = CreateCompatibleDC(NULL);
+        HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&tp, NULL, 0), old = SelectObject(mem, bm);
+        /* caught mid-repaint the rich edit comes out blank or half drawn: take it until two takes in a row agree */
+        uint32_t *prev = malloc((size_t)tw * th * 4);
+        RECT er; /* the text field, in the box's pixels */
+        GetWindowRect(g_edit, &er);
+        OffsetRect(&er, -r.left, -r.top);
+        IntersectRect(&er, &er, &(RECT){0, 0, tw, th});
+        int has_text = GetWindowTextLengthW(g_edit) > 0;
+        for (int tries = 0; tries < 40; tries++) {
+            RedrawWindow(g_input, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN); /* the text in it painted now, not later */
+            PrintWindow(g_input, mem, 2 /* PW_RENDERFULLCONTENT */);
+            GdiFlush();
+            int flat = has_text;
+            uint32_t c0 = tp[(size_t)er.top * tw + er.left] & 0xFFFFFF;
+            for (int y = er.top; y < er.bottom && flat; y++) for (int x = er.left; x < er.right; x++) if ((tp[(size_t)y * tw + x] & 0xFFFFFF) != c0) { flat = 0; break; }
+            if (tries && !flat && !memcmp(prev, tp, (size_t)tw * th * 4)) break;
+            memcpy(prev, tp, (size_t)tw * th * 4);
+            Sleep(3);
+        }
+        free(prev);
+        HRGN rg = CreateRectRgn(0, 0, 0, 0);
+        int has = GetWindowRgn(g_input, rg) != ERROR;
+        for (int y = 0; y < th; y++) for (int x = 0; x < tw; x++) tp[(size_t)y * tw + x] = has && !PtInRegion(rg, x, y) ? 0 : tp[(size_t)y * tw + x] | 0xFF000000u; /* the round corners */
+        DeleteObject(rg);
+        rec_over(fr, W, H, tp, tw, th, r.left - g_rec_rc.left, r.top - g_rec_rc.top, 0);
+        SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+    }
+    for (size_t i = 0; i < (size_t)W * H; i++) { bgr[i * 3] = fr[i] & 255; bgr[i * 3 + 1] = fr[i] >> 8 & 255; bgr[i * 3 + 2] = fr[i] >> 16 & 255; }
+    int32_t head[3] = {g_rec_mouse.x - g_rec_rc.left, g_rec_mouse.y - g_rec_rc.top, g_carrying ? 0 : g_drag_img ? 2 : 1};
+    fwrite(head, sizeof head, 1, f);
+    fwrite(bgr, 1, (size_t)W * H * 3, f);
+}
+
+static void rec_run(void) {
+    FILE *f = fopen(g_rec_file, "wb");
+    if (!f) { fprintf(stderr, "vigil-panel: cannot write %s\n", g_rec_file); return; }
+    int carry = !strcmp(g_rec_scene, "carry"), input = !strcmp(g_rec_scene, "input");
+    g_single = 1; g_others = 1; g_focus_pinned = 0;
+    snprintf(g_frame, sizeof g_frame, "diamond");
+    if (carry) g_gravity = GRAVITIES[0]; /* Floaty: a flick breaks them loose */
+    int W = (int)((carry ? 1300 : 1000) * g_dpi), H = (int)((carry ? 560 : input ? 620 : 440) * g_dpi), m = carry ? 0 : (int)(40 * g_dpi);
+    SetRect(&g_rec_rc, g_work.right - m - W, g_work.bottom - m - H, g_work.right - m, g_work.bottom - m);
+    float L = (float)g_rec_rc.left, T = (float)g_rec_rc.top;
+    g_mx = L + (carry ? .5f : .8f) * W; g_my = T + (input ? .36f : .5f) * H;
+    float cx = g_mx, cy = g_my;
+    g_rec_mouse.x = (LONG)(L + .2f * W); g_rec_mouse.y = (LONG)(T + .9f * H);
+    if (carry) g_rec_rc.top -= (int)(110 * g_dpi); /* room above: the dash turns up near the top */
+    int32_t head[3] = {g_rec_rc.right - g_rec_rc.left, g_rec_rc.bottom - g_rec_rc.top, 15};
+    fwrite(head, sizeof head, 1, f);
+    const double WARM = 17.5, END = carry ? 11.5 : input ? 13.0 : 8.6; /* the demo runs a while first, so all three sessions are there */
+    double t0 = g_rec_now;
+    int sat = -1, picked = 0, dropped = 0;
+    float sx = 0, sy = 0;
+    MSG msg;
+    for (long fno = 0;; fno++) {
+        g_rec_now = t0 + fno / 30.0;
+        double t = fno / 30.0 - WARM;
+        if (t >= 0 && !g_focus_pinned) { /* the same session in the middle all through (input: one with a reply) */
+            g_focus_pinned = 1;
+            if (input) { snprintf(g_focus, sizeof g_focus, "demo-0"); g_rec_still = 1; }
+        }
+        if (input && t >= 0) {
+            Room *room = shown_room();
+            int fi = index_of(g_focus);
+            Session *s = fi >= 0 ? &room->s[fi] : NULL;
+            float kx = cx - g_cw * .06f, ky = cy - g_cw * .04f, ox = L + .12f * W, oy = T + .93f * H;
+            static const char *TYPE1 = "Looks right. Plot BER against the reference ", *TYPE2 = "and tell me if it still matches at 12 dB.";
+            static int typed, typed2;
+            rec_glide(t, 0.2, 0.9, L + .2f * W, T + .9f * H, kx, ky);
+            for (int k = 0; k < 6 && s; k++) { /* the wheel: down four notches, up two (the core spins with it) */
+                double at = 1.4 + k * .45;
+                if (t >= at && t < at + 1 / 30.0) {
+                    float notches = k < 4 ? -1.0f : 1.0f;
+                    wheel_spin(s, notches);
+                    if (!strcmp(g_tip_sid, s->sid)) tip_scroll(notches);
+                }
+            }
+            if (s && t >= 4.6 && t < 4.6 + 1 / 30.0) { s->ring_at = wall(); s->unread = 0; input_open_for(s); } /* double-click */
+            const char *line = t < 8 ? TYPE1 : TYPE2;
+            int *at = t < 8 ? &typed : &typed2;
+            if (g_edit && t >= (t < 8 ? 5.0 : 11.0) && fno % 2 == 0 && line[*at]) { /* typed, a key every 1/15 s */
+                wchar_t ch[2] = {(wchar_t)line[(*at)++], 0};
+                SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)ch);
+            }
+            rec_glide(t, 8.0, 8.7, kx, ky, ox, oy);   /* out to the file, and back with it */
+            if (t >= 8.9 && t < 10.5) g_drag_img = 1;
+            rec_glide(t, 8.9, 9.7, ox, oy, kx, ky);
+            if (s && t >= 9.5 && t < 10.5) snprintf(g_drag_sid, sizeof g_drag_sid, "%s", s->sid); /* over the core: it reads it */
+            if (s && t >= 10.5 && t < 10.5 + 1 / 30.0) { /* dropped: as drop_on_core, with a made-up file */
+                g_drag_sid[0] = 0; g_drag_img = 0;
+                snprintf(g_draft_sid, sizeof g_draft_sid, "%s", s->sid);
+                int first = g_attach_n;
+                wcscpy(g_attach[g_attach_n], L"/mnt/c/Users/me/Pictures/ber-curve.png");
+                wcscpy(g_attach_name[g_attach_n], L"ber-curve.png");
+                g_attach_id[g_attach_n++] = ++g_attach_next;
+                snprintf(g_drop_sid, sizeof g_drop_sid, "%s", s->sid);
+                g_drop_until = wall() + 1.4;
+                insert_tokens(first);
+            }
+        } else if (!carry) {
+            rec_glide(t, 1.0, 1.7, L + .2f * W, T + .9f * H, cx - g_cw * .08f, cy - g_cw * .06f);
+            if (t >= 4.6 && sat < 0) { /* on to a small core: wherever it is now */
+                for (int i = 0; i < g_core_n; i++) if (i != g_top && g_core_rc[i].right > g_core_rc[i].left) { sat = i; break; }
+                sx = (float)g_rec_mouse.x; sy = (float)g_rec_mouse.y;
+            }
+            if (sat >= 0 && t <= 5.3) rec_glide(t, 4.6, 5.2, sx, sy, (g_core_rc[sat].left + g_core_rc[sat].right) * .5f, (g_core_rc[sat].top + g_core_rc[sat].bottom) * .5f);
+            if (t >= 7.4) rec_glide(t, 7.4, 8.1, sx = (t < 7.45 ? (float)g_rec_mouse.x : sx), sy = (t < 7.45 ? (float)g_rec_mouse.y : sy), L + .3f * W, T + .95f * H);
+        } else {
+            rec_glide(t, 0.2, 0.9, L + .2f * W, T + .9f * H, cx, cy);
+            if (t >= 1.0 && !picked && g_top >= 0) { /* Alt-click on the main core: it rides on the pointer */
+                snprintf(g_down_sid, sizeof g_down_sid, "%s", shown_room()->s[g_top].sid);
+                g_move_mouse = g_rec_mouse; g_move_origin.x = (LONG)g_mx; g_move_origin.y = (LONG)g_my;
+                g_moving = 1; g_carrying = 1; picked = 1;
+                start_follow();
+            }
+            /* a slow move (the small cores trail behind), then a dash toward the screen's corner that turns away
+             * without stopping: they break off, fly on into the corner and bounce, and stay there */
+            static const float PATH[][3] = {{.5f, .5f, 1.3f}, {.45f, .25f, 2.6f}, {.82f, .7f, 2.7f}, {.82f, .05f, 2.78f}, {.55f, .2f, 3.3f}};
+            for (int k = 0; k < 4; k++)
+                if (t >= PATH[k][2] && t < PATH[k + 1][2]) {
+                    float e = (float)((t - PATH[k][2]) / (PATH[k + 1][2] - PATH[k][2]));
+                    if (k == 0 || k == 3) e = rec_ease(e); /* the slow parts eased, the dash and the turn at full speed */
+                    g_rec_mouse.x = (LONG)lroundf(L + W * (PATH[k][0] + (PATH[k + 1][0] - PATH[k][0]) * e));
+                    g_rec_mouse.y = (LONG)lroundf(T + H * (PATH[k][1] + (PATH[k + 1][1] - PATH[k][1]) * e));
+                }
+            if (t >= 4.0 && t < 8.6) { /* over to each loose one, slowly: close enough, it comes back to the orbit */
+                Orbit *best = NULL;
+                float bd = 1e9f, px = (float)g_rec_mouse.x, py = (float)g_rec_mouse.y, gx = L + .5f * W, gy = T + .5f * H;
+                for (int i = 0; i < g_orbit_n; i++) if (g_orbit[i].free) { float d = hypotf(g_orbit[i].px - px, g_orbit[i].py - py); if (d < bd) { bd = d; best = &g_orbit[i]; } }
+                if (best) { gx = best->px; gy = best->py; }
+                gx = clampf(gx, L + g_cw * .4f, L + W - g_cw * .4f); gy = clampf(gy, T + g_cw * .4f, T + H - g_cw * .4f);
+                float dx = gx - px, dy = gy - py, d = hypotf(dx, dy), step = 300 * (float)g_dpi / 30;
+                if (d > step) { dx *= step / d; dy *= step / d; }
+                g_rec_mouse.x = (LONG)lroundf(px + dx); g_rec_mouse.y = (LONG)lroundf(py + dy);
+            }
+            if (t >= 9.0 && !dropped) { dropped = 1; place_down(); sx = (float)g_rec_mouse.x; sy = (float)g_rec_mouse.y; }
+            if (dropped) rec_glide(t, 9.4, 10.2, sx, sy, L + .15f * W, T + .92f * H); /* the pointer goes away */
+        }
+        tick();
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+        if (t >= 0 && fno % 2 == 0) rec_frame(f);
+        if (t > END) break;
+    }
+    fclose(f);
+}
+
 static void menu(HWND w, int core) {
     HMENU m = CreatePopupMenu(), pick = NULL;
     wchar_t buf[80];
@@ -3477,7 +3853,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (i < 0 || i >= room->n) return 0;
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
-        s->spin_x = fmaxf(-8, fminf(8, s->spin_x - notches * 1.2f));
+        wheel_spin(s, notches);
         if (!strcmp(g_tip_sid, s->sid)) tip_scroll(notches);
         return 0;
     }
@@ -3609,6 +3985,8 @@ static void usage(void) {
         "  --stats              every 5 s, frames, pictures and window updates a second to panel-stats.txt\n"
         "  --settings           open the Settings window at once\n"
         "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n"
+        "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
+        "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab motions open it on the Motions page\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, text box, text size, labels,\n"
@@ -3641,9 +4019,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--stats")) g_stats = 1;
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
         else if (!strcmp(a, "--settings-tab") && v) { g_tab = !strcmp(v, "motions"); g_open_settings = 1; i++; }
+        else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
+        else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
         else { usage(); return a[0] == '-' && (!strcmp(a, "-h") || !strcmp(a, "--help")) ? 0 : 2; }
     }
+    if (g_rec_scene[0]) { if (strcmp(g_rec_scene, "reply") && strcmp(g_rec_scene, "carry") && strcmp(g_rec_scene, "input")) { usage(); return 2; } g_demo_n = 3; g_rec_now = 1.7e9; }
     if (!shape_make(&g_shape, g_shape_name)) { usage(); return 2; }
     if (!events && !g_demo_n) { usage(); return 2; }
     if (events) { /* its folder holds msg\ and the saved positions */
@@ -3708,6 +4089,7 @@ int main(int argc, char **argv) {
     g_stat_since = wall();
     if (g_open_settings) settings_open();
     MSG m;
+    if (g_rec_scene[0]) { rec_run(); goto done; }
     double shot_at = wall() + 2;
     for (;;) {
         tick();
