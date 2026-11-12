@@ -1,5 +1,9 @@
-dodeca-core
+vigil
 *.ppm
 *.o
 .DS_Store
-dodeca-panel
+vigil-panel
+Vigil.app/
+vigil-panel.exe
+/vigil-win
+.obsidian/

@@ -1,6 +1,6 @@
 /* Follows the events file. The hook writes flat JSON objects, one per line, so the reader only
  * needs to pull a handful of string/number fields out of a line. */
-#include "dodeca.h"
+#include "vigil.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +59,7 @@ int event_parse(const char *line, size_t n, Event *e) {
     field(line, end, "cwd", e->cwd, sizeof e->cwd);
     field(line, end, "tool", e->tool, sizeof e->tool);
     field(line, end, "n", e->ntype, sizeof e->ntype);
+    if (field(line, end, "m", num, sizeof num)) e->msg = atoi(num); /* only written with DODECA_RICH */
     return e->t > 0;
 }
 
