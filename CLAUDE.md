@@ -36,7 +36,8 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `src/events.c`: follows the JSONL file and parses lines into `Event`.
 - `src/session.c`: event → state mapping, timings (`HOLD_WORK`, `CHEER_FOR`, `SLEEP_AFTER`, `DROP_AFTER`), the per-state appearance table `LOOKS`, and the built-in demo.
 - `src/geom.c`: polyhedron shells (`dodeca`, `bucky`, `geo2`, `geo3`).
-- `src/render.c`: draws into a float RGB `Canvas`.
+- `src/motion.c`: how the shell moves (the "Core Bestiary" design): snap turns (`Motion.q`), random patch cuts and their offsets, layer turns, spikes, scan plane, inner shell, and one routine per state (`think`, `work`, `swim`, `unlock`, the cases in `motion_tick`), plus the geometric whims. Nothing overshoots: fixed easing curves or critically damped following. Patches need the triangles of the geodesic shells.
+- `src/render.c`: draws into a float RGB `Canvas`; draws the shell per triangle when patches have moved.
 - `src/main.c`: terminal main loop, the output modes (kitty / iTerm2 inline PNG / half-block cells), options, `--snapshot`.
 - `mac/panel.m`: the floating panel. It reuses `events.c`, `geom.c`, `session.c` and `render.c`, but not `main.c`.
 - `mac/tip.m`: the box beside the panel (hover tooltip, voice-reply preview): wraps its text, system font, title and edge bar in the session's colour.
@@ -45,7 +46,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `hook.py`, `install_hooks.py`: the Claude Code hook and its installer (`--rich` sets `DODECA_RICH=1`).
 - `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`; `pane_api.py send` also types a voice reply into a session.
 
-To change colors or motion, edit `LOOKS` in `src/session.c`. How a core reacts to the mouse (panel only) is the `HOVER`, `TOUCH` and `CARRY` tables next to it, and what it does on its own when left alone (idle or asleep) is `WHIMS` and `WHIM_GAP`, and the panel's own states (SPEAKING, LISTENING, TRANSCRIBING, STANDBY) are rows of `LOOKS` too: the panel sets them as `Session.overlay`, which `session_shown` puts first; the terminal never sets it. Don't hard-code looks in `panel.m`. The panel's hit test (`coreAt:`) uses the shell outline `SHELL_HIT` from `vigil.h`; gestures are told apart in `PanelView` (press / drag / click / double-click) and acted on by `AppDelegate` through the `CoreActions` protocol. A new state needs changes in `vigil.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
+To change colors, edit `LOOKS` in `src/session.c`; how each state moves is its routine in `src/motion.c`. How a core reacts to the mouse (panel only) is the `HOVER`, `TOUCH` and `CARRY` tables next to it, and what it does on its own when left alone (idle or asleep) is `WHIMS` and `WHIM_GAP`, and the panel's own states (SPEAKING, LISTENING, TRANSCRIBING, STANDBY) are rows of `LOOKS` too: the panel sets them as `Session.overlay`, which `session_shown` puts first; the terminal never sets it. Don't hard-code looks in `panel.m`. The panel's hit test (`coreAt:`) uses the shell outline `SHELL_HIT` from `vigil.h`; gestures are told apart in `PanelView` (press / drag / click / double-click) and acted on by `AppDelegate` through the `CoreActions` protocol. A new state needs changes in `vigil.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
 
 ## Rules
 

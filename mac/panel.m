@@ -56,6 +56,7 @@ static int g_labels_hover;                      // --labels hover: no name / sta
 static int g_single;
 static const char *g_mode_hotkey = "ctrl+opt+c";  // --mode-hotkey: switch between single core and all cores
 static char g_shape_name[16] = "geo2";          // --shape
+static char g_frame[16] = "segments";           // --frame: drawn round a core while it is carried or locked on
 static NSString *g_focus;                       // the session in the middle
 static BOOL g_focus_pinned;                     // chosen by a click: auto-follow is off until "Follow automatically"                             // --debug: log each voice step to stderr (never the words)
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[vigil] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
@@ -111,17 +112,19 @@ static void pointer_visible(BOOL on) {
 
 // The right-click Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings.json (600) and
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
-static struct { int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16]; double away; } g_launch;
+static struct { int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away; } g_launch;
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
+    snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
 }
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
+    snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
 static void load_settings(void) {
     NSData *d = [NSData dataWithContentsOfFile:settings_file()];
@@ -136,17 +139,125 @@ static void load_settings(void) {
     if ((n = j[@"fontSize"]) && n.doubleValue >= 6) g_font_size = n.doubleValue;
     if ((n = j[@"glow"]) && n.floatValue > 0) g_glow = n.floatValue;
     if ((n = j[@"away"])) g_away_after = n.doubleValue;
+    NSString *fr = j[@"frame"];
+    if ([fr isKindOfClass:[NSString class]] && fr.length < sizeof g_frame) snprintf(g_frame, sizeof g_frame, "%s", fr.UTF8String);
     NSString *sh = j[@"shape"];
     if ([sh isKindOfClass:[NSString class]] && sh.length < sizeof g_shape_name) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh.UTF8String);
 }
 static void save_settings(void) {
     NSDictionary *j = @{@"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
-                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after)};
+                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame)};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
     [[NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted error:NULL] writeToFile:settings_file() atomically:YES];
     chmod(settings_file().fileSystemRepresentation, 0600);
+}
+
+// ---- the focus frame: drawn round a core while it is carried, or after the pointer has rested on it 2 s ----
+static void stroke2(CGContextRef ctx, CGPathRef path, CGColorRef col, CGColorRef glow, CGFloat w, CGFloat gw) {
+    if (glow) { CGContextSetStrokeColorWithColor(ctx, glow); CGContextSetLineWidth(ctx, gw); CGContextAddPath(ctx, path); CGContextStrokePath(ctx); }
+    CGContextSetStrokeColorWithColor(ctx, col); CGContextSetLineWidth(ctx, w); CGContextAddPath(ctx, path); CGContextStrokePath(ctx);
+}
+static void tick_mark(CGMutablePathRef p, CGFloat ox, CGFloat oy, double g, CGFloat r0, CGFloat r1) {
+    CGPathMoveToPoint(p, NULL, ox + cos(g) * r0, oy + sin(g) * r0); CGPathAddLineToPoint(p, NULL, ox + cos(g) * r1, oy + sin(g) * r1);
+}
+static void focus_frame(CGContextRef ctx, NSRect r, const Session *s, double t) {
+    float a = fmaxf(s->mo.lock, s->carry);
+    if (a < 0.01f || !strcmp(g_frame, "none")) return;
+    if (a > 1) a = 1;
+    CGFloat ox = NSMidX(r), oy = NSMidY(r), shell = r.size.width * SHELL_FRAC, u = 1 - pow(1 - a, 3);
+    CGFloat rr = shell * (1.55 - 0.3 * u), k = fmax(0.5, r.size.width / 300.0), TAU = 2 * M_PI;
+    Col c = s->cur.line, e = s->cur.eh;
+    CGColorRef col = CGColorCreateSRGB(c.r, c.g, c.b, 0.75 * a), faint = CGColorCreateSRGB(c.r, c.g, c.b, 0.25 * a), glow = CGColorCreateSRGB(e.r, e.g, e.b, 0.2 * a);
+    CGContextSaveGState(ctx);
+    CGContextSetLineCap(ctx, kCGLineCapButt);
+    CGMutablePathRef p;
+    if (!strcmp(g_frame, "segments")) { // 12 segments with a lit run travelling round, a fine scale inside
+        double head = fmod(t * 5, 12);
+        for (int i = 0; i < 12; i++) {
+            double g1 = i / 12.0 * TAU + M_PI / 2 + 0.05, g2 = g1 + TAU / 12 - 0.1, d = fmod(head - i + 12, 12), on = d < 3 ? 1 - d / 3 : 0;
+            p = CGPathCreateMutable(); CGPathAddArc(p, NULL, ox, oy, rr, g1, g2, false);
+            stroke2(ctx, p, on > 0 ? col : faint, on > 0 ? glow : NULL, (1.2 + 1.8 * on) * k, 6 * k); CGPathRelease(p);
+        }
+        p = CGPathCreateMutable();
+        for (int i = 0; i < 72; i++) tick_mark(p, ox, oy, i / 72.0 * TAU, rr - 6 * k, rr - (i % 6 ? 9 : 13) * k);
+        stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+    } else if (!strcmp(g_frame, "lens")) { // two graduated arcs, ( ), with end caps and a long centre mark
+        double half = 0.78;
+        for (int sd = 0; sd < 2; sd++) {
+            double side = sd * M_PI;
+            p = CGPathCreateMutable(); CGPathAddArc(p, NULL, ox, oy, rr, side - half, side + half, false); stroke2(ctx, p, col, glow, 1.4 * k, 5 * k); CGPathRelease(p);
+            p = CGPathCreateMutable();
+            for (int i = -6; i <= 6; i++) if (i) tick_mark(p, ox, oy, side + half * i / 6, rr, rr - (abs(i) == 3 ? 9 : 5) * k);
+            tick_mark(p, ox, oy, side, rr + 8 * k, rr + 26 * k);
+            stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+            p = CGPathCreateMutable();
+            tick_mark(p, ox, oy, side, rr, rr - 16 * k); tick_mark(p, ox, oy, side - half, rr - 5 * k, rr + 5 * k); tick_mark(p, ox, oy, side + half, rr - 5 * k, rr + 5 * k);
+            stroke2(ctx, p, col, NULL, 1.6 * k, 0); CGPathRelease(p);
+        }
+    } else if (!strcmp(g_frame, "polar")) { // spokes between two rings, turning slowly, a marker riding outside
+        CGFloat r1 = rr - 12 * k;
+        p = CGPathCreateMutable(); CGPathAddEllipseInRect(p, NULL, CGRectMake(ox - rr, oy - rr, 2 * rr, 2 * rr)); CGPathAddEllipseInRect(p, NULL, CGRectMake(ox - r1, oy - r1, 2 * r1, 2 * r1));
+        stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+        CGMutablePathRef minor = CGPathCreateMutable(), major = CGPathCreateMutable();
+        for (int i = 0; i < 24; i++) { double g = t * 0.12 + i / 24.0 * TAU; tick_mark(i % 6 ? minor : major, ox, oy, g, r1, i % 6 ? rr : rr + 8 * k); }
+        stroke2(ctx, minor, faint, NULL, 1 * k, 0); stroke2(ctx, major, col, glow, 1.5 * k, 5 * k); CGPathRelease(minor); CGPathRelease(major);
+        double gm = -t * 0.6;
+        CGContextSetFillColorWithColor(ctx, col); CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, ox + cos(gm) * (rr + 7 * k), oy + sin(gm) * (rr + 7 * k));
+        CGContextAddLineToPoint(ctx, ox + cos(gm - 0.05) * (rr + 16 * k), oy + sin(gm - 0.05) * (rr + 16 * k));
+        CGContextAddLineToPoint(ctx, ox + cos(gm + 0.05) * (rr + 16 * k), oy + sin(gm + 0.05) * (rr + 16 * k));
+        CGContextClosePath(ctx); CGContextFillPath(ctx);
+    } else if (!strcmp(g_frame, "diamond")) { // a square on its point: notched sides, rings at the corners, a dotted inner square
+        CGFloat s2 = rr * 1.12; CGPoint V[4];
+        for (int i = 0; i < 4; i++) V[i] = CGPointMake(ox + cos(i * M_PI / 2 + M_PI / 2) * s2, oy + sin(i * M_PI / 2 + M_PI / 2) * s2);
+        p = CGPathCreateMutable();
+        for (int i = 0; i < 4; i++) {
+            CGPoint a0 = V[i], b0 = V[(i + 1) % 4];
+            for (int h = 0; h < 2; h++) { double f0 = h ? 0.56 : 0.1, f1 = h ? 0.9 : 0.44;
+                CGPathMoveToPoint(p, NULL, a0.x + (b0.x - a0.x) * f0, a0.y + (b0.y - a0.y) * f0); CGPathAddLineToPoint(p, NULL, a0.x + (b0.x - a0.x) * f1, a0.y + (b0.y - a0.y) * f1); }
+        }
+        stroke2(ctx, p, col, glow, 1.4 * k, 5 * k); CGPathRelease(p);
+        CGContextSetFillColorWithColor(ctx, col);
+        for (int i = 0; i < 4; i++) {
+            CGPoint a0 = V[i], b0 = V[(i + 1) % 4];
+            CGContextFillEllipseInRect(ctx, CGRectMake((a0.x + b0.x) / 2 - 2.2 * k, (a0.y + b0.y) / 2 - 2.2 * k, 4.4 * k, 4.4 * k));
+            CGContextFillEllipseInRect(ctx, CGRectMake(a0.x - 1.6 * k, a0.y - 1.6 * k, 3.2 * k, 3.2 * k));
+            p = CGPathCreateMutable(); CGPathAddEllipseInRect(p, NULL, CGRectMake(a0.x - 6 * k, a0.y - 6 * k, 12 * k, 12 * k)); stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+        }
+        CGFloat dash[2] = {2 * k, 5 * k};
+        CGContextSetLineDash(ctx, 0, dash, 2);
+        p = CGPathCreateMutable();
+        for (int i = 0; i < 4; i++) { CGPoint q = CGPointMake(ox + (V[i].x - ox) * 0.86, oy + (V[i].y - oy) * 0.86); if (i) CGPathAddLineToPoint(p, NULL, q.x, q.y); else CGPathMoveToPoint(p, NULL, q.x, q.y); }
+        CGPathCloseSubpath(p); stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+        CGContextSetLineDash(ctx, 0, NULL, 0);
+    } else if (!strcmp(g_frame, "lock")) { // four corner pieces slide in from outside and lock square
+        CGFloat s2 = rr * (0.9 + 0.45 * (1 - u)), l = rr * 0.26;
+        int sg[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        CGContextSetFillColorWithColor(ctx, col);
+        for (int i = 0; i < 4; i++) {
+            CGFloat sx = sg[i][0], sy = sg[i][1], cx = ox + sx * s2, cy = oy + sy * s2;
+            p = CGPathCreateMutable(); CGPathMoveToPoint(p, NULL, cx, cy - sy * l); CGPathAddLineToPoint(p, NULL, cx, cy); CGPathAddLineToPoint(p, NULL, cx - sx * l, cy);
+            stroke2(ctx, p, col, glow, 1.8 * k, 5 * k); CGPathRelease(p);
+            CGContextFillRect(ctx, CGRectMake(cx - 3 * k + sx * 3 * k, cy - 3 * k + sy * 3 * k, 6 * k, 6 * k));
+            p = CGPathCreateMutable();
+            CGPathMoveToPoint(p, NULL, cx - sx * l * 0.5, cy); CGPathAddLineToPoint(p, NULL, cx - sx * l * 0.5, cy + sy * 6 * k);
+            CGPathMoveToPoint(p, NULL, cx, cy - sy * l * 0.5); CGPathAddLineToPoint(p, NULL, cx + sx * 6 * k, cy - sy * l * 0.5);
+            stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+        }
+    } else if (!strcmp(g_frame, "orbits")) { // three short arcs on three radii, each its own way and speed, a bead leading each
+        p = CGPathCreateMutable(); CGPathAddEllipseInRect(p, NULL, CGRectMake(ox - rr * 1.07, oy - rr * 1.07, 2 * rr * 1.07, 2 * rr * 1.07)); stroke2(ctx, p, faint, NULL, 1 * k, 0); CGPathRelease(p);
+        double O[3][3] = {{1, 0.9, 1.1}, {1.07, -0.6, 0.7}, {1.14, 0.35, 1.6}};
+        CGContextSetFillColorWithColor(ctx, col);
+        for (int i = 0; i < 3; i++) {
+            double g = t * O[i][1] + i * 2.1, rad = rr * O[i][0], a0 = O[i][1] > 0 ? g - O[i][2] : g, a1 = O[i][1] > 0 ? g : g + O[i][2];
+            p = CGPathCreateMutable(); CGPathAddArc(p, NULL, ox, oy, rad, a0, a1, false); stroke2(ctx, p, col, glow, 1.4 * k, 5 * k); CGPathRelease(p);
+            CGContextFillEllipseInRect(ctx, CGRectMake(ox + cos(g) * rad - 3 * k, oy + sin(g) * rad - 3 * k, 6 * k, 6 * k));
+        }
+    }
+    CGContextRestoreGState(ctx);
+    CGColorRelease(col); CGColorRelease(faint); CGColorRelease(glow);
 }
 
 static double wall(void) {
@@ -625,6 +736,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             }
             _core[i] = at[i];
             CGContextDrawImage(ctx, NSRectToCGRect(at[i]), _img[i]);
+            focus_frame(ctx, at[i], s, now);
         }
     _coreN = n;
 }
@@ -712,6 +824,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
         if (_reordering && [_downSid isEqualToString:sid_of(s)]) { held = i; continue; } // drawn last, at the mouse
         CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
+        focus_frame(ctx, _core[i], s, now);
     }
     _coreN = n;
     if (held >= 0) { // ⌥-drag: the held core under the mouse, a little larger, above the others
@@ -720,6 +833,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         CGContextSetAlpha(ctx, 0.92);
         CGContextDrawImage(ctx, NSRectToCGRect(r), _img[held]);
         CGContextSetAlpha(ctx, 1);
+        focus_frame(ctx, r, &room->s[held], now);
     }
 }
 @end
@@ -914,7 +1028,10 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         Session *s = &room->s[i];
         s->hover_to = i == hit;
         if (i == hit) { s->look_x_to = (float)look.x; s->look_y_to = (float)look.y; }
+        // lock-on: the pointer has rested on this core for 2 s (not while dragging or carrying)
+        s->lock_to = i == hit && !self.view.moving && [sid_of(s) isEqualToString:self.hoverSid] && now - self.hoverSince > 2.0 ? 1 : 0;
     }
+    [self watchForRush:now];
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
     if (self.view.moving) { self.hoverSince = now; [self.tip orderOut:nil]; return; } // no tooltip while dragging
@@ -923,6 +1040,37 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (![sid isEqualToString:self.hoverSid]) { self.hoverSid = sid; self.hoverSince = now; }
     if (hit < 0 || now - self.hoverSince < 0.3) { [self.tip orderOut:nil]; return; } // a short pause before the tooltip
     [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
+}
+
+// Defence: only a rush at a core sets it off. The pointer has to start well away (over 2.2 shell radii
+// from the centre) and land on the core within 0.18 s; passing by, or coming in at a normal pace, never does.
+static double rush_t[128];
+static NSPoint rush_p[128];
+static int rush_n;
+- (void)watchForRush:(double)now {
+    NSPoint m = [NSEvent mouseLocation];
+    if (rush_n == 128) { memmove(rush_t, rush_t + 1, 127 * sizeof(double)); memmove(rush_p, rush_p + 1, 127 * sizeof(NSPoint)); rush_n--; }
+    rush_t[rush_n] = now; rush_p[rush_n++] = m;
+    int drop = 0;
+    while (drop < rush_n && now - rush_t[drop] > 0.18) drop++;
+    if (drop) { memmove(rush_t, rush_t + drop, (size_t)(rush_n - drop) * sizeof(double)); memmove(rush_p, rush_p + drop, (size_t)(rush_n - drop) * sizeof(NSPoint)); rush_n -= drop; }
+    if (!self.panel.visible || self.view.busy) return;
+    Room *room = g_room.n ? &g_room : &g_ghost;
+    for (int i = 0; i < room->n; i++) {
+        Session *s = &room->s[i];
+        NSRect r = [self.panel convertRectToScreen:[self.view convertRect:[self.view coreRect:i] toView:nil]];
+        CGFloat R = r.size.width * SHELL_FRAC;
+        if (R < 4 || now - s->defend_at < 2 || session_shown(s, now) == ST_WORK) continue;
+        NSPoint c = NSMakePoint(NSMidX(r), NSMidY(r));
+        if (hypot(m.x - c.x, m.y - c.y) / R > 1.0) continue;
+        for (int j = 0; j < rush_n; j++) {
+            if (hypot(rush_p[j].x - c.x, rush_p[j].y - c.y) / R <= 2.2) continue;
+            CGFloat dx = m.x - rush_p[j].x, dy = m.y - rush_p[j].y, l = hypot(dx, dy);
+            s->defend_at = now; s->defend_x = (float)(dx / l); s->defend_y = (float)(-dy / l); // screen y up, view y down
+            rush_n = 0;
+            return;
+        }
+    }
 }
 
 // a small floating box that never takes clicks (the hover tooltip, the recognized-text preview)
@@ -1161,6 +1309,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 }
 
 - (void)coreTouched:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (s) { s->press_at = wall(); s->press_x = s->look_x_to; s->press_y = s->look_y_to; } // the patch under the pointer goes in
     if ([sid isEqualToString:self.pendingSid]) self.pendingHeld = YES; // decided when the click is known
 }
 
@@ -1377,6 +1527,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self choice:m title:@"Glow" key:@"glow" current:@(g_glow) options:@[@[@"Soft", @0.7f], @[@"Normal", @1.0f], @[@"Bright", @1.4f]]];
     [self choice:m title:@"Shape" key:@"shape" current:@(g_shape_name)
          options:@[@[@"Dodecahedron", @"dodeca"], @[@"Buckyball", @"bucky"], @[@"Geodesic", @"geo2"], @[@"Fine geodesic", @"geo3"]]];
+    [self choice:m title:@"Focus frame" key:@"frame" current:@(g_frame)
+         options:@[@[@"Segments", @"segments"], @[@"Lens", @"lens"], @[@"Polar", @"polar"], @[@"Diamond", @"diamond"], @[@"Lock", @"lock"], @[@"Orbits", @"orbits"], @[@"None", @"none"]]];
     [self choice:m title:@"Away after" key:@"away" current:@(g_away_after)
          options:@[@[@"1 minute", @60.0], @[@"2 minutes", @120.0], @[@"5 minutes", @300.0], @[@"Never", @0.0]]];
     [m addItem:[NSMenuItem separatorItem]];
@@ -1417,6 +1569,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     else if ([key isEqualToString:@"confirmSend"]) g_confirm_send = [v boolValue];
     else if ([key isEqualToString:@"glow"]) g_glow = [v floatValue];
     else if ([key isEqualToString:@"away"]) g_away_after = [v doubleValue];
+    else if ([key isEqualToString:@"frame"]) snprintf(g_frame, sizeof g_frame, "%s", [v UTF8String]);
     else if ([key isEqualToString:@"shape"]) {
         if (!shape_make(&g_shape, [v UTF8String])) return;
         snprintf(g_shape_name, sizeof g_shape_name, "%s", [v UTF8String]);
@@ -1690,6 +1843,8 @@ static void usage(void) {
          "  --single           single-core mode: one big core, the other sessions small around it (aura = who)\n"
          "  --mode-hotkey KEYS switch between single core and all cores (default ctrl+opt+c; none = off)\n"
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
+         "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
+         "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
          "  --tty PATH --launcher-pid N --claude PATH   (set by the ./vigil-panel launcher)");
@@ -1731,6 +1886,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--summarize") && v) { g_summarize_claude = !strcmp(v, "claude"); g_voice |= g_summarize_claude; i++; }
             else if (!strcmp(a, "--claude") && v) { g_claude = @(v); i++; }
             else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
+            else if (!strcmp(a, "--frame") && v) { snprintf(g_frame, sizeof g_frame, "%s", v); i++; }
             else if (!strcmp(a, "--launcher-pid") && v) { g_launcher_pid = atoi(v); i++; }
             else if (!strcmp(a, "--bg") && v) {
                 unsigned int rgb = 0;

@@ -46,19 +46,24 @@ const Look LOOKS[ST_N] = {
 /* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
 const Hover HOVER = {.bright = 0.35f, .slow = 0.7f, .tilt = 0.32f, .gaze = 0.10f, .ease = 7.0f};
 /* carried: it lights up, leans into the motion, the core sloshes behind, and a hard shake makes it dizzy */
+/* damp = 2·√spring: critically damped, so the core follows the motion and settles without bouncing */
 const Carry CARRY = {.lift = 0.35f, .ease = 10.0f, .lean = 0.035f, .lean_max = 0.55f, .stretch = 0.12f,
-                     .spring = 170.0f, .damp = 5.5f, .lag = 0.10f, .jig_max = 0.42f,
-                     .shake_gain = 0.0022f, .shake_fade = 1.4f, .shake_spin = 9.0f, .shake_glitch = 0.7f, .drop = 2.6f};
+                     .spring = 170.0f, .damp = 26.0f, .lag = 0.20f, .jig_max = 0.42f,
+                     .shake_gain = 0.0022f, .shake_fade = 1.4f, .shake_spin = 9.0f, .shake_glitch = 0.7f, .drop = 0.9f};
 /* idle whims: name, seconds, weight while idle, weight while asleep */
 const Whim WHIMS[W_N] = {
     [W_LOOK] = {"look", 2.6f, 3, 0},    /* glances one way, then another */
     [W_PEEK] = {"peek", 2.2f, 2, 0},    /* leans to one side as if to see past something */
-    [W_HOP] = {"hop", 1.0f, 1.5f, 0},   /* a little jump (sometimes two), squashes on landing */
     [W_TWIRL] = {"twirl", 1.5f, 1, 0},  /* spins round once, fast */
     [W_SHIVER] = {"shiver", 0.8f, 1, 0.6f},
     [W_BLINK] = {"blink", 0.45f, 2.5f, 0},
-    [W_YAWN] = {"yawn", 3.0f, 1, 0.5f}, /* stretches up, glows, sinks back */
-    [W_SIGH] = {"sigh", 2.6f, 1.5f, 2}, /* swells and brightens slowly: a breath; asleep, a snore */
+    /* the geometric ones (motion.c) */
+    [W_ALIGN] = {"align", 2.2f, 2, 0},    /* turns a vertex exactly toward you, holds */
+    [W_STEP] = {"step", 1.3f, 1, 0},      /* two snap turns of 72°, like a combination lock */
+    [W_UNFOLD] = {"unfold", 2.4f, 1, 0},  /* a fresh cut of patches opens row by row and closes again */
+    [W_SCAN] = {"scan", 1.6f, 1, 0},      /* one plane sweeps top to bottom */
+    [W_SPIKE] = {"spike", 1.2f, 1, 0},    /* one or two sharp spikes snap out and back */
+    [W_CRAZY] = {"crazy", 1.9f, .35f, 0}, /* the full fit, rarely, out of nowhere */
 };
 const WhimGap WHIM_GAP = {.idle_min = 3, .idle_max = 10, .sleep_min = 7, .sleep_max = 18};
 
@@ -89,6 +94,8 @@ void session_init(Session *s, const char *sid, double t, const Shape *sh) {
     s->vol = 0.8f;
     s->state = ST_IDLE;
     s->cur = LOOKS[ST_IDLE];
+    s->defend_at = s->press_at = -1e9;
+    motion_init(s);
     s->rng = hash_str(sid) | 1; /* seeded by the id: a session always moves the same way */
     s->ay = frand(&s->rng) * 6.283f;
     s->ax = 0.35f + frand(&s->rng) * 6.283f;
@@ -219,17 +226,6 @@ static void whims(Session *s, int shown, double now, float dt) {
         s->w_tall = 0.03f * e;
         break;
     }
-    case W_HOP: { /* one hop, or two smaller ones */
-        int two = b > 0.2f;
-        float uu = two ? fmodf(u * 2, 1) : u, h = two ? 0.12f : 0.2f;
-        float air = uu < 0.55f ? bump(uu / 0.55f) : 0, land = uu >= 0.55f ? bump((uu - 0.55f) / 0.45f) : 0;
-        float prev = (el - dt) / d;
-        float pu = two ? fmodf(prev * 2, 1) : prev;
-        if (pu < 0.55f && uu >= 0.55f) s->jig_vy += 1.6f; /* the core keeps falling for a moment inside */
-        s->w_off_y = -h * air;
-        s->w_tall = 0.07f * air - 0.11f * land;
-        break;
-    }
     case W_TWIRL:
         s->w_ly = -0.4f * bump(u);
         s->w_bright = 1 + 0.2f * bump(u);
@@ -247,21 +243,6 @@ static void whims(Session *s, int shown, double now, float dt) {
         s->w_scale = 1 - 0.03f * bump(uu);
         break;
     }
-    case W_YAWN: {
-        float up = hold(u / 0.8f, 0.35f), after = u > 0.8f ? bump((u - 0.8f) / 0.2f) : 0;
-        s->w_tall = 0.13f * up - 0.05f * after;
-        s->w_ly = -0.7f * up;
-        s->w_bright = 1 + 0.45f * up;
-        s->w_off_y = -0.03f * up;
-        break;
-    }
-    case W_SIGH: {
-        float e = bump(u);
-        s->w_scale = 1 + (asleep ? 0.05f : 0.07f) * e;
-        s->w_bright = 1 + (asleep ? 0.35f : 0.3f) * e;
-        s->w_off_y = (asleep ? 0.02f : -0.02f) * e;
-        break;
-    }
     }
     /* touched in the middle of a whim: it fades out instead of stopping dead */
     s->w_lx *= k; s->w_ly *= k; s->w_lean_x *= k; s->w_lean_y *= k; s->w_off_x *= k; s->w_off_y *= k; s->w_tall *= k;
@@ -270,7 +251,8 @@ static void whims(Session *s, int shown, double now, float dt) {
 }
 
 /* Carried by the mouse (the panel sets carried and move_*): the shell leans into the motion, the core hangs
- * on a spring and sloshes when the mouse speeds up, stops or turns, and shaking builds up into a dizzy spin. */
+ * on a critically damped spring, so it lags a little when the mouse speeds up, stops or turns and settles
+ * without bouncing; shaking builds up into a dizzy spin (and, in motion.c, a crazy fit). */
 static void carried(Session *s, double now, float dt) {
     float k = 1.0f - expf(-dt * CARRY.ease);
     ease(&s->carry, (float)s->carried, k);
@@ -315,7 +297,8 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
         ease(&s->look_x, s->look_x_to * s->hover_to + s->w_lx, kh);
         ease(&s->look_y, s->look_y_to * s->hover_to + s->w_ly, kh);
         carried(s, now, dt);
-        float spin = c->rot * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
+        motion_tick(s, sh, session_shown(s, now), now, dt);
+        float spin = c->rot * s->mo.rate * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
         if (!s->held) { /* while dragged the panel turns it; after that a fling fades back into its own spin */
             s->ay += (spin + s->spin_y) * dt;
             s->ax += (spin * 0.37f + s->spin_x) * dt;
@@ -351,7 +334,8 @@ double session_rate(const Session *s, double now, int fps) {
                || s->carried || s->carry > 0.01f || s->shake > 0.01f || s->whim
                || fabsf(s->look_x) + fabsf(s->look_y) > 0.01f
                || fabsf(s->jig_x) + fabsf(s->jig_y) + 0.05f * (fabsf(s->jig_vx) + fabsf(s->jig_vy)) > 0.003f
-               || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for; /* the mouse is doing something */
+               || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for /* the mouse is doing something */
+               || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
     return r < fps ? r : fps;

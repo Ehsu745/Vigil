@@ -82,6 +82,16 @@ static void add_edge(Shape *s, int a, int b) {
     s->e[s->ne][0] = a; s->e[s->ne][1] = b; s->ne++;
 }
 
+static void add_tri(Shape *s, int a, int b, int c) {
+    if (s->nt >= MAX_T) return;
+    s->t[s->nt][0] = a; s->t[s->nt][1] = b; s->t[s->nt][2] = c; s->nt++;
+}
+
+static int edge_of(const Shape *s, int a, int b) {
+    for (int i = 0; i < s->ne; i++) if ((s->e[i][0] == a && s->e[i][1] == b) || (s->e[i][0] == b && s->e[i][1] == a)) return i;
+    return -1;
+}
+
 /* geodesic sphere: each icosahedron face split into n*n triangles and pushed out to the sphere */
 static void geo(Shape *s, int n) {
     float iv[12][3];
@@ -103,6 +113,8 @@ static void geo(Shape *s, int n) {
             add_edge(s, g[a][b], g[a + 1][b]);
             add_edge(s, g[a][b], g[a][b + 1]);
             add_edge(s, g[a + 1][b], g[a][b + 1]);
+            add_tri(s, g[a][b], g[a + 1][b], g[a][b + 1]);                      /* pointing one way */
+            if (b + 1 <= n - a - 1) add_tri(s, g[a + 1][b], g[a + 1][b + 1], g[a][b + 1]); /* and the other */
         }
     }
 }
@@ -116,7 +128,25 @@ int shape_make(Shape *s, const char *name) {
     else return 0;
     for (int i = 0; i < s->ne; i++) for (int k = 0; k < 2; k++) {
         int v = s->e[i][k];
-        if (s->nadj[v] < MAX_DEG) s->adj[v][s->nadj[v]++] = i;
+        if (s->nadj[v] < MAX_DEG) { s->vn[v][s->nadj[v]] = s->e[i][1 - k]; s->adj[v][s->nadj[v]++] = i; }
+    }
+    /* triangle normals, which triangles share each edge, and the triangles around each vertex */
+    for (int i = 0; i < s->ne; i++) s->et[i][0] = s->et[i][1] = -1;
+    for (int t = 0; t < s->nt; t++) {
+        float n[3] = {0, 0, 0};
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) n[q] += s->v[s->t[t][k]][q];
+        float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        for (int q = 0; q < 3; q++) s->tn[t][q] = n[q] / l;
+        for (int k = 0; k < 3; k++) {
+            int e = edge_of(s, s->t[t][k], s->t[t][(k + 1) % 3]);
+            if (e >= 0) s->et[e][s->et[e][0] < 0 ? 0 : 1] = t;
+            int v = s->t[t][k];
+            if (s->nvt[v] < MAX_DEG) s->vt[v][s->nvt[v]++] = t;
+        }
+    }
+    for (int t = 0; t < s->nt; t++) for (int k = 0; k < 3; k++) {
+        int e = edge_of(s, s->t[t][k], s->t[t][(k + 1) % 3]);
+        s->tnb[t][k] = e < 0 ? -1 : s->et[e][0] == t ? s->et[e][1] : s->et[e][0];
     }
     s->df = sqrtf(30.0f / (float)s->ne);
     return 1;
