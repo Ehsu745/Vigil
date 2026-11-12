@@ -167,6 +167,7 @@ static void wheel_spin(Session *s, float notches) {
 /* --record SCENE FILE (to make the README's animations): the demo on a fixed clock, a scripted pointer in place of
  * the real one (the real mouse is never read or moved), and every frame of the panel's own windows written to FILE */
 static char g_rec_scene[16], g_rec_file[1024];
+static int g_on_set; static POINT g_on;  /* --on X,Y: the monitor (the one with that desktop point) for --record and the Settings window */
 static double g_rec_now;            /* the made-up clock (0: the real one) */
 static POINT g_rec_mouse;           /* the scripted pointer */
 static int g_rec_still;             /* the demo sessions stop changing state */
@@ -3523,7 +3524,8 @@ static void settings_open(void) {
         g_pv.mem = CreateCompatibleDC(NULL);
     }
     if (!IsWindowVisible(g_set)) {
-        POINT c; GetCursorPos(&c);
+        POINT c; GetCursorPos(&c); /* the monitor the pointer is on, or the one --on names */
+        if (g_on_set) c = g_on;
         RECT wa = work_at((float)c.x, (float)c.y);
         int W = SW_W(), H = SW_H();
         SetWindowPos(g_set, HWND_TOPMOST, (wa.left + wa.right - W) / 2, (wa.top + wa.bottom - H) / 2, W, H, SWP_NOACTIVATE);
@@ -3532,9 +3534,10 @@ static void settings_open(void) {
         g_pv_last = now;
         g_sl_dirty = 1;
         g_hot = -1;
-        ShowWindow(g_set, SW_SHOW);
+        ShowWindow(g_set, g_set_shot[0] || g_rec_scene[0] ? SW_SHOWNA : SW_SHOW); /* (a screenshot shows it without taking the foreground) */
         settings_tick(now);
     }
+    if (g_set_shot[0] || g_rec_scene[0]) return; /* a screenshot never takes the keyboard (a game may be running) */
     mask_alt();
     SetForegroundWindow(g_set);
     SetFocus(g_set);
@@ -3668,7 +3671,8 @@ static void rec_run(void) {
     snprintf(g_frame, sizeof g_frame, "diamond");
     if (carry) g_gravity = GRAVITIES[0]; /* Floaty: a flick breaks them loose */
     int W = (int)((carry ? 1300 : 1000) * g_dpi), H = (int)((carry ? 560 : input ? 620 : 440) * g_dpi), m = carry ? 0 : (int)(40 * g_dpi);
-    SetRect(&g_rec_rc, g_work.right - m - W, g_work.bottom - m - H, g_work.right - m, g_work.bottom - m);
+    RECT wk = g_on_set ? work_at((float)g_on.x, (float)g_on.y) : g_work; /* --on: that monitor */
+    SetRect(&g_rec_rc, wk.right - m - W, wk.bottom - m - H, wk.right - m, wk.bottom - m);
     float L = (float)g_rec_rc.left, T = (float)g_rec_rc.top;
     g_mx = L + (carry ? .5f : .8f) * W; g_my = T + (input ? .36f : .5f) * H;
     float cx = g_mx, cy = g_my;
@@ -3986,6 +3990,7 @@ static void usage(void) {
         "  --settings           open the Settings window at once\n"
         "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n"
         "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
+        "  --on X,Y             --record and the Settings window go on the monitor with that desktop point\n"
         "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab motions open it on the Motions page\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
@@ -4019,6 +4024,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--stats")) g_stats = 1;
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
         else if (!strcmp(a, "--settings-tab") && v) { g_tab = !strcmp(v, "motions"); g_open_settings = 1; i++; }
+        else if (!strcmp(a, "--on") && v && sscanf(v, "%ld,%ld", &g_on.x, &g_on.y) == 2) { g_on_set = 1; i++; }
         else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
         else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
