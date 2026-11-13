@@ -325,8 +325,13 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 | `src/motion.c` | 每個狀態怎麼動：轉動、碎片、尖刺、每種動作一個 routine、閒置時的小動作 |
 | `win/panel.c` | Windows 面板：分層視窗、軌道物理、設定視窗 |
 | `src/main.c` | 主迴圈、終端機設定、三種輸出方式、demo |
+| `src/wasm.c` | 把共用的 C 編成 WebAssembly，給 `web/` 裡的網頁用 |
+| `web/bestiary.html` | Core Bestiary：每種動作的提案與現況；**Today** 跑的是面板自己的 C |
+| `web/settings-mock.html` | 重新設計的設定視窗模型（拉動瀏覽器視窗大小試試） |
 
 顏色在 `src/session.c` 的 `LOOKS` 表；每個狀態怎麼動是 `src/motion.c` 裡的 routine。
+
+`web/` 裡的網頁直接從磁碟打開就能用。Bestiary 的 **Today** 要先把 C 編成瀏覽器用的版本：`sudo apt install clang lld wasi-libc libclang-rt-dev-wasm32`，然後 `make wasm`（產生 `web/vigil.wasm` 和 `web/vigil-wasm.js`，這兩個不進版控）。打開 `web/bestiary.html#today` 會直接從 Today 開始。
 
 </details>
 
