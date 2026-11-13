@@ -1238,6 +1238,8 @@ static const char *DEMO_REPLY[] = {
     "Scratch test done. Nothing to keep.",
 };
 static const char *DEMO_NOTICE = "Claude needs your permission to use Bash";
+static const char *DEMO_PROMPT[] = {"Fading looks wrong per frame. Make it per tap and check the BER curve against the reference.",
+    "The lock double-unlocks sometimes", "幫我整理今天的筆記", "Bump the bootloader and rebuild", "Find the best match frequency", "Try the scratch test"};
 
 static void put_utf8(char **o, unsigned c) {
     char *p = *o;
@@ -1249,6 +1251,7 @@ static void put_utf8(char **o, unsigned c) {
 }
 
 /* the string value of "field" in a flat JSON object, as UTF-8 (malloc'd), or NULL */
+static char *json_unq(const char *c);
 static char *json_str(const char *j, const char *field) {
     char key[40];
     snprintf(key, sizeof key, "\"%s\"", field);
@@ -1256,7 +1259,11 @@ static char *json_str(const char *j, const char *field) {
     if (!c) return NULL;
     c += strlen(key);
     while (*c == ' ' || *c == ':') c++;
-    if (*c != '"') return NULL;
+    return json_unq(c);
+}
+/* a JSON string (c at its opening quote) as UTF-8, NULL when it is not one or empty */
+static char *json_unq(const char *c) {
+    if (!c || *c != '"') return NULL;
     char *out = malloc(strlen(c) * 2 + 1), *o = out;
     for (c++; *c && *c != '"'; c++) {
         if (*c != '\\') { *o++ = *c; continue; }
@@ -1286,6 +1293,115 @@ done:
     return out;
 }
 
+/* walking the msg file's nested parts (the turns): skip a value, find a key of an object */
+static const char *js_ws(const char *c) { while (*c == ' ' || *c == '\n' || *c == '\r' || *c == '\t') c++; return c; }
+static const char *js_skip(const char *c) {
+    c = js_ws(c);
+    if (*c == '"') { for (c++; *c && *c != '"'; c++) if (*c == '\\' && c[1]) c++; return *c ? c + 1 : c; }
+    if (*c == '{' || *c == '[') {
+        int depth = 0;
+        for (; *c; c++) {
+            if (*c == '"') { c = js_skip(c) - 1; continue; }
+            if (*c == '{' || *c == '[') depth++;
+            else if ((*c == '}' || *c == ']') && --depth == 0) return c + 1;
+        }
+        return c;
+    }
+    while (*c && *c != ',' && *c != '}' && *c != ']') c++;
+    return c;
+}
+/* the value of key in the object at obj ('{'), or NULL; *kname, when given, walks every key instead (key NULL) */
+static const char *js_key(const char *obj, const char *key) {
+    if (!obj || *(obj = js_ws(obj)) != '{') return NULL;
+    size_t n = strlen(key);
+    for (const char *c = js_ws(obj + 1); *c == '"';) {
+        int hit = !strncmp(c + 1, key, n) && c[1 + n] == '"';
+        c = js_ws(js_skip(c));
+        if (*c != ':') return NULL;
+        c = js_ws(c + 1);
+        if (hit) return c;
+        c = js_ws(js_skip(c));
+        if (*c != ',') return NULL;
+        c = js_ws(c + 1);
+    }
+    return NULL;
+}
+/* the elements of an array: start with c = the '[', each call gives the next element or NULL */
+static const char *js_next(const char **c) {
+    const char *p = js_ws(*c);
+    if (*p == '[') p = js_ws(p + 1);
+    else if (*p == ',') p = js_ws(p + 1);
+    if (!*p || *p == ']') return NULL;
+    *c = js_skip(p);
+    return p;
+}
+
+/* The last few turns as Claude Code's terminal shows them: the prompt, its steps (a tool and what it works on),
+ * the reply; the hook keeps up to 5 in "turns" (the last one is going on), and the step running now in "run". */
+enum { MT_MAX = 5, MT_STEPS = 8 };
+typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; } MTurn;
+static MTurn g_mt[MT_MAX];
+static int g_mt_n;
+static char *g_run_tool, *g_run_what;
+
+static void mt_free(void) {
+    for (int i = 0; i < g_mt_n; i++) {
+        MTurn *t = &g_mt[i];
+        free(t->p); free(t->r); free(t->tally);
+        for (int k = 0; k < t->ns; k++) { free(t->tool[k]); free(t->what[k]); }
+    }
+    memset(g_mt, 0, sizeof g_mt);
+    g_mt_n = 0;
+    free(g_run_tool); free(g_run_what); g_run_tool = g_run_what = NULL;
+}
+static int js_int(const char *v) { return v ? atoi(v) : 0; }
+static void mt_load(const char *buf) {
+    const char *top = js_ws(buf), *arr = js_key(top, "turns"), *run = js_key(top, "run"), *e;
+    if (run && *run == '[') { const char *c = run, *a = js_next(&c), *b = a ? js_next(&c) : NULL; g_run_tool = json_unq(a); g_run_what = json_unq(b); }
+    if (!arr || *arr != '[') return;
+    const char *all[64];
+    int n = 0;
+    for (const char *c = arr; (e = js_next(&c)) && n < 64;) all[n++] = e;
+    for (int i = n > MT_MAX ? n - MT_MAX : 0; i < n; i++) {
+        MTurn *t = &g_mt[g_mt_n++];
+        t->p = json_unq(js_key(all[i], "p"));
+        t->r = json_unq(js_key(all[i], "r"));
+        t->n = js_int(js_key(all[i], "n"));
+        const char *s = js_key(all[i], "s"), *st;
+        if (s && *s == '[')
+            for (const char *c = s; (st = js_next(&c)) && t->ns < MT_STEPS;) {
+                const char *d = st, *a = js_next(&d), *b = a ? js_next(&d) : NULL;
+                char *tool = json_unq(a);
+                if (!tool) continue;
+                t->tool[t->ns] = tool; t->what[t->ns] = json_unq(b); t->ns++;
+            }
+        /* the tally of a finished turn: "12 steps · Bash 5 · Edit 4 · Read 3", the most used first */
+        const char *cnt = js_key(all[i], "c");
+        char name[12][41]; int num[12], m = 0;
+        if (cnt && *cnt == '{')
+            for (const char *c = js_ws(cnt + 1); *c == '"' && m < 12;) {
+                char *k = json_unq(c);
+                c = js_ws(js_skip(c));
+                if (*c != ':') { free(k); break; }
+                c = js_ws(c + 1);
+                if (k) { snprintf(name[m], 41, "%s", k); num[m++] = atoi(c); free(k); }
+                c = js_ws(js_skip(c));
+                if (*c != ',') break;
+                c = js_ws(c + 1);
+            }
+        for (int a = 0; a < m; a++) for (int b = a + 1; b < m; b++) if (num[b] > num[a]) {
+            int tn = num[a]; num[a] = num[b]; num[b] = tn;
+            char tmp[41]; memcpy(tmp, name[a], 41); memcpy(name[a], name[b], 41); memcpy(name[b], tmp, 41);
+        }
+        if (t->n) {
+            char line[300];
+            int at = snprintf(line, sizeof line, "%d step%s", t->n, t->n == 1 ? "" : "s");
+            for (int a = 0; a < m && a < 4 && at < (int)sizeof line - 60; a++) at += snprintf(line + at, sizeof line - at, " \xC2\xB7 %s %d", name[a], num[a]);
+            t->tally = _strdup(line);
+        }
+    }
+}
+
 static char g_msg_sid[72], *g_msg_reply, *g_msg_notice, *g_msg_tmux;
 static FILETIME g_msg_mtime;
 static double g_msg_checked;
@@ -1297,9 +1413,22 @@ static void msg_load(const Session *s, double now) {
     if (g_demo_n) {
         if (same) return;
         free(g_msg_reply); free(g_msg_notice); free(g_msg_tmux); g_msg_reply = g_msg_notice = g_msg_tmux = NULL;
+        mt_free();
         snprintf(g_msg_sid, sizeof g_msg_sid, "%s", s->sid);
         int i;
-        if (sscanf(s->sid, "demo-%d", &i) == 1 && i >= 0 && i < 6) { g_msg_reply = _strdup(DEMO_REPLY[i]); g_msg_notice = _strdup(DEMO_NOTICE); }
+        if (sscanf(s->sid, "demo-%d", &i) == 1 && i >= 0 && i < 6) {
+            g_msg_reply = _strdup(DEMO_REPLY[i]); g_msg_notice = _strdup(DEMO_NOTICE);
+            char demo[6000]; /* an earlier turn, then this one with its steps */
+            snprintf(demo, sizeof demo, "{\"turns\": [{\"p\": \"Run the tests first\", \"r\": \"All 42 pass; two are slow (over 3 s).\", \"n\": 2, \"c\": {\"Bash\": 2}},"
+                     " {\"p\": \"%s\", \"r\": \"%s\", \"n\": 5, \"s\": [[\"Grep\", \"rayleigh\"], [\"Read\", \"channel.py\"], [\"Edit\", \"channel.py\"], [\"Bash\", \"pytest -q\"]],"
+                     " \"c\": {\"Read\": 2, \"Edit\": 1, \"Bash\": 1, \"Grep\": 1}}]}", DEMO_PROMPT[i], "-");
+            mt_load(demo);
+            if (g_mt_n == 2) { /* this turn's reply as the demo has it; the second session still at work */
+                free(g_mt[1].r);
+                g_mt[1].r = i == 1 ? NULL : _strdup(DEMO_REPLY[i]);
+                if (i == 1) { g_run_tool = _strdup("Bash"); g_run_what = _strdup("pytest -q tests/test_lock.py"); }
+            }
+        }
         return;
     }
     char path[1200];
@@ -1308,16 +1437,18 @@ static void msg_load(const Session *s, double now) {
     int ok = g_dir[0] && strcmp(s->sid, "ghost") && GetFileAttributesExA(path, GetFileExInfoStandard, &fa);
     if (same && ok && !CompareFileTime(&fa.ftLastWriteTime, &g_msg_mtime)) return;
     free(g_msg_reply); free(g_msg_notice); free(g_msg_tmux); g_msg_reply = g_msg_notice = g_msg_tmux = NULL;
+    mt_free();
     snprintf(g_msg_sid, sizeof g_msg_sid, "%s", s->sid);
     memset(&g_msg_mtime, 0, sizeof g_msg_mtime);
     if (!ok) return;
     g_msg_mtime = fa.ftLastWriteTime;
     FILE *f = fopen(path, "rb");
     if (!f) return;
-    char *buf = malloc(64 * 1024);
-    size_t len = fread(buf, 1, 64 * 1024 - 1, f);
+    char *buf = malloc(256 * 1024);
+    size_t len = fread(buf, 1, 256 * 1024 - 1, f);
     fclose(f);
     buf[len] = 0;
+    mt_load(buf);
     g_msg_reply = json_str(buf, "reply");
     g_msg_notice = json_str(buf, "notice");
     g_msg_tmux = json_str(buf, "tmux");
@@ -1354,6 +1485,9 @@ static wchar_t *g_chat_title, *g_chat_body;
 static COLORREF g_chat_accent;
 static HFONT g_chat_tf, g_chat_bf, g_chat_mf; /* title, body, monospaced */
 static int g_chat_title_h, g_chat_body_h, g_chat_view_h, g_chat_line, g_chat_scroll;
+static int g_chat_auto = 1;          /* the box follows the conversation: the newest turn from its prompt, or its end while it runs */
+static int g_pin = -1, g_pin_hot;    /* the prompt pinned at the top while its turn is scrolled through; the pointer on it shows it whole */
+static RECT g_pin_rc;
 static RECT g_chat_view;             /* where the reply is drawn in the box (window pixels), for clicks on links */
 static char g_chat_sid[72];          /* whose text the box shows */
 
@@ -1468,7 +1602,7 @@ static void input_close(void);
  * once per reply (chat_layout), drawn from the list of runs (chat_proc). */
 enum { F_BODY, F_BOLD, F_MONO, F_ITAL, F_BOLDITAL, F_H1, F_H2, F_COUNT };
 enum { DECO_UNDER = 1, DECO_STRIKE = 2 };
-enum { SH_RULE = -1, SH_BAR = -2, SH_VLINE = -3 }; /* a rule across, a quote's bar, a thin line down (table borders) */
+enum { SH_RULE = -1, SH_BAR = -2, SH_VLINE = -3, SH_FILL = -4 }; /* a rule across, a quote's bar, a thin line down (table borders), a prompt's band */
 typedef struct { int x, y, f, at, n, w, deco, url, url_n; COLORREF c; } Run; /* y: the baseline; a rule: x, y, w; a bar: x, y (top), n tall; url: where a link's address is in the text */
 static Run *g_runs;
 static int g_runs_n, g_runs_cap, g_lay_w;
@@ -1504,6 +1638,10 @@ static void lay_put(int x, int base, int f, COLORREF c, const wchar_t *t, int n,
     lay_add((Run){.x = x, .y = base, .f = f, .n = n, .w = w, .deco = deco, .url = -1, .c = c}, t);
     if (x + w > g_lay_w) g_lay_w = x + w;
 }
+/* where each prompt is in the laid-out conversation: its band (y0..y1), its runs, its first line (for the pinned strip) */
+typedef struct { int y0, y1, r0, r1; wchar_t line[200]; } PromptAt;
+static PromptAt g_pr[8];
+static int g_pr_n;
 static void lay_shape(int kind, int x, int y, int len, COLORREF c) { lay_add((Run){.x = x, .y = y, .f = kind, .n = kind == SH_RULE ? 0 : len, .w = kind == SH_RULE ? len : 0, .url = -1, .c = c}, NULL); }
 
 static int text_w(HDC dc, int f, const wchar_t *t, int n) { return mix_text(dc, lay_font(f), t, n, 0, 0, 0); }
@@ -1667,9 +1805,88 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     int unit = text_w(dc, F_BODY, L"  ", 2) * 2; /* one level of nesting */
     /* Terminal mode looks like Claude Code: the reply opens with its mark, and every line sits two columns in */
     int lead = g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0, marked = 0;
+    g_pr_n = 0;
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
+        if (*ln >= 1 && *ln <= 6) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
+            int kind = *ln, pad = lh / 4;
+            in_code = 0;
+            if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
+            else if (kind == 1) { /* the prompt: every line of it in one band, "> " before the first, like the terminal */
+                if (!blank) y += gap;
+                int fi = g_runs_n, top = y, first = 1, gw = text_w(dc, F_BODY, L"> ", 2);
+                lay_shape(SH_FILL, 0, top, 0, MD_RULE); /* its height once the lines are laid out */
+                PromptAt *pa = g_pr_n < 8 ? &g_pr[g_pr_n++] : NULL;
+                if (pa) pa->line[0] = 0;
+                y += pad;
+                for (; ln && *ln == 1;) {
+                    nl = wcschr(ln, L'\n'); end = nl ? nl : ln + wcslen(ln);
+                    while (end > ln && (end[-1] == L'\r' || end[-1] == L' ')) end--;
+                    if (first) {
+                        lay_put(lead, y + asc, F_BODY, MD_MARK, L">", 1, text_w(dc, F_BODY, L">", 1), 0);
+                        if (pa) { int n = (int)(end - ln - 1); if (n > 199) n = 199; wcsncpy(pa->line, ln + 1, (size_t)n); pa->line[n] = 0; }
+                    }
+                    int x = lead + gw;
+                    y = lay_inline(dc, ln + 1, end, &x, lead + gw, y, lh, asc, maxw - pad, 0, MD_BODY, 0) + lh;
+                    first = 0;
+                    ln = nl ? nl + 1 : NULL;
+                }
+                y += pad;
+                g_runs[fi].n = y - top;
+                if (pa) { pa->y0 = top; pa->y1 = y; pa->r0 = fi + 1; pa->r1 = g_runs_n; }
+                y += gap / 2;
+                blank = 1; marked = 0;
+                continue;
+            } else if (kind == 2 || kind == 3) { /* a step: "● Bash(make -j)", the one running now in the accent colour */
+                const wchar_t *tab = ln + 1, *te;
+                while (tab < end && *tab != L'\t') tab++;
+                if (tab >= end) tab = NULL;
+                te = tab ? tab : end;
+                int x = lead;
+                COLORREF dot = kind == 3 ? RGB(255, 170, 90) : RGB(110, 200, 140);
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2);
+                lay_put(0, y + asc, F_BODY, dot, L"\x25CF", 1, dw, 0);
+                x = dw;
+                int tw = text_w(dc, F_BOLD, ln + 1, (int)(te - ln - 1));
+                lay_put(x, y + asc, F_BOLD, MD_BOLD, ln + 1, (int)(te - ln - 1), tw, 0);
+                x += tw;
+                if (tab && tab + 1 < end) {
+                    wchar_t what[160];
+                    int n = (int)(end - tab - 1);
+                    if (n > 150) n = 150;
+                    what[0] = L'(';
+                    memcpy(what + 1, tab + 1, sizeof(wchar_t) * (size_t)n);
+                    what[n + 1] = L')';
+                    n += 2;
+                    int ew = text_w(dc, F_BODY, L"\x2026)", 2), room = maxw - x - (kind == 3 ? text_w(dc, F_BODY, L" \x2026", 2) : 0);
+                    int w = text_w(dc, F_BODY, what, n);
+                    if (w > room) { /* one line: cut, with an ellipsis before the bracket */
+                        while (n > 2 && text_w(dc, F_BODY, what, n - 2) + ew > room) n--;
+                        n -= 1; what[n++] = 0x2026; what[n++] = L')';
+                        w = text_w(dc, F_BODY, what, n);
+                    }
+                    lay_put(x, y + asc, F_BODY, MD_QUOTE, what, n, w, 0);
+                    x += w;
+                }
+                if (kind == 3) lay_put(x, y + asc, F_BODY, dot, L" \x2026", 2, text_w(dc, F_BODY, L" \x2026", 2), 0);
+                y += lh; blank = 0; marked = 0;
+            } else if (kind == 4) { /* the steps of a finished turn in one line, or how many came before those shown */
+                int x = lead, n = (int)(end - ln - 1);
+                lay_put(x, y + asc, F_BODY, MD_MARK, L"\x2514 ", 2, text_w(dc, F_BODY, L"\x2514 ", 2), 0);
+                x += text_w(dc, F_BODY, L"\x2514 ", 2);
+                while (n > 0 && x + text_w(dc, F_BODY, ln + 1, n) > maxw) n--;
+                lay_put(x, y + asc, F_BODY, MD_MARK, ln + 1, n, text_w(dc, F_BODY, ln + 1, n), 0);
+                y += lh; blank = 0; marked = 0;
+            } else if (kind == 6) { /* the permission notice, waiting for you */
+                if (!blank) y += gap / 2;
+                int x = lead;
+                y = lay_inline(dc, ln + 1, end, &x, lead, y, lh, asc, maxw, 0, RGB(255, 184, 119), 0) + lh;
+                blank = 0;
+            }
+            ln = nl ? nl + 1 : NULL;
+            continue;
+        }
         const wchar_t *c = ln;
         int sp = 0;
         while (c < end && (*c == L' ' || *c == L'\t')) { sp += *c == L'\t' ? 4 : 1; c++; }
@@ -1839,7 +2056,39 @@ static void chat_scroll(float notches) {
     int to = g_chat_scroll - (int)(notches * 3 * g_chat_line);
     if (to < 0) to = 0;
     if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
-    if (to != g_chat_scroll) { g_chat_scroll = to; InvalidateRect(g_chat, NULL, FALSE); }
+    if (to != g_chat_scroll) { g_chat_scroll = to; g_chat_auto = 0; InvalidateRect(g_chat, NULL, FALSE); }
+}
+
+/* a prompt's band: the box's colour a little lighter (darker on a light box); the pinned strip a little more */
+static COLORREF chat_band(int pinned) {
+    COLORREF b = chat_bg();
+    int k = pinned ? 16 : 9, to = box_light() ? 0 : 255;
+    return RGB(GetRValue(b) + (to - GetRValue(b)) * k / 100, GetGValue(b) + (to - GetGValue(b)) * k / 100, GetBValue(b) + (to - GetBValue(b)) * k / 100);
+}
+/* the laid-out runs i0..i1 in view, the body's top at `top` */
+static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
+    for (int i = i0; i < i1; i++) {
+        const Run *rn = &g_runs[i];
+        int by = top + rn->y, x = view.left + rn->x, th = (int)fmax(1, g_dpi);
+        if (by + (rn->f == SH_VLINE || rn->f == SH_FILL ? rn->n : 0) + 3 * g_chat_line < view.top || by - 3 * g_chat_line > view.bottom) continue;
+        if (rn->f == SH_FILL) { RECT fr = {view.left, by, view.right, by + rn->n}; HBRUSH br = CreateSolidBrush(chat_band(0)); FillRect(dc, &fr, br); DeleteObject(br); continue; }
+        if (rn->f == SH_RULE || rn->f == SH_BAR || rn->f == SH_VLINE) { /* a rule, a quote's bar, a table's line down */
+            RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th}
+                    : rn->f == SH_VLINE ? (RECT){x, by, x + th, by + rn->n} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
+            HBRUSH br = CreateSolidBrush(ink(rn->c));
+            FillRect(dc, &sr, br);
+            DeleteObject(br);
+            continue;
+        }
+        SetTextColor(dc, rn->c == MD_BODY || rn->c == MD_BOLD ? text_body() : ink(rn->c)); /* the text in the chosen colour; code, links and quotes keep theirs */
+        mix_text(dc, lay_font(rn->f), g_lay_text + rn->at, rn->n, 1, x, by);
+        if (rn->deco) { /* a link's underline, a strike through */
+            HBRUSH br = CreateSolidBrush(ink(rn->c));
+            if (rn->deco & DECO_UNDER) { RECT ur = {x, by + 2 * th, x + rn->w, by + 3 * th}; FillRect(dc, &ur, br); }
+            if (rn->deco & DECO_STRIKE) { int sy = by - g_fasc[rn->f] * 3 / 10; RECT sr = {x, sy, x + rn->w, sy + th}; FillRect(dc, &sr, br); }
+            DeleteObject(br);
+        }
+    }
 }
 
 static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1869,26 +2118,35 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SelectObject(dc, g_chat_bf);
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
-        for (int i = 0; i < g_runs_n; i++) {
-            const Run *rn = &g_runs[i];
-            int by = body.top + rn->y, x = view.left + rn->x, th = (int)fmax(1, g_dpi);
-            if (by + (rn->f == SH_VLINE ? rn->n : 0) + 3 * g_chat_line < view.top || by - 3 * g_chat_line > view.bottom) continue;
-            if (rn->f == SH_RULE || rn->f == SH_BAR || rn->f == SH_VLINE) { /* a rule, a quote's bar, a table's line down */
-                RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th}
-                        : rn->f == SH_VLINE ? (RECT){x, by, x + th, by + rn->n} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
-                HBRUSH br = CreateSolidBrush(ink(rn->c));
-                FillRect(dc, &sr, br);
-                DeleteObject(br);
-                continue;
+        chat_runs(dc, 0, g_runs_n, view, body.top);
+        /* the prompt of the turn being read stays at the top as one line once it has scrolled away (as in the
+         * terminal); the pointer on it shows it whole, a click goes back to it */
+        g_pin = -1;
+        SetRectEmpty(&g_pin_rc);
+        for (int i = 0; i < g_pr_n; i++) if (g_pr[i].y0 <= g_chat_scroll) g_pin = i; /* the turn at the top */
+        if (g_pin >= 0 && g_pr[g_pin].y0 == g_chat_scroll) g_pin = -1;             /* its prompt in full view there */
+        if (g_pin >= 0) {
+            const PromptAt *pa = &g_pr[g_pin];
+            int full = g_pin_hot && pa->y1 - pa->y0 < g_chat_view_h, sh = full ? pa->y1 - pa->y0 : g_chat_line + (int)(8 * g_dpi);
+            RECT strip = {view.left, view.top, view.right, view.top + sh};
+            HBRUSH fb = CreateSolidBrush(chat_band(1));
+            FillRect(dc, &strip, fb);
+            DeleteObject(fb);
+            if (full) chat_runs(dc, pa->r0, pa->r1, view, view.top - pa->y0);
+            else {
+                SetTextAlign(dc, TA_TOP | TA_LEFT);
+                RECT tr = {view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), view.top, view.right - (int)(6 * g_dpi), view.top + sh};
+                wchar_t line[220];
+                swprintf(line, 220, L"> %ls", pa->line);
+                SelectObject(dc, g_chat_bf);
+                SetTextColor(dc, text_body());
+                DrawTextW(dc, line, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
             }
-            SetTextColor(dc, rn->c == MD_BODY || rn->c == MD_BOLD ? text_body() : ink(rn->c)); /* the text in the chosen colour; code, links and quotes keep theirs */
-            mix_text(dc, lay_font(rn->f), g_lay_text + rn->at, rn->n, 1, x, by);
-            if (rn->deco) { /* a link's underline, a strike through */
-                HBRUSH br = CreateSolidBrush(ink(rn->c));
-                if (rn->deco & DECO_UNDER) { RECT ur = {x, by + 2 * th, x + rn->w, by + 3 * th}; FillRect(dc, &ur, br); }
-                if (rn->deco & DECO_STRIKE) { int sy = by - g_fasc[rn->f] * 3 / 10; RECT sr = {x, sy, x + rn->w, sy + th}; FillRect(dc, &sr, br); }
-                DeleteObject(br);
-            }
+            RECT edge = {view.left, strip.bottom, view.right, strip.bottom + (int)fmax(1, g_dpi)};
+            HBRUSH eb = CreateSolidBrush(ink(MD_RULE));
+            FillRect(dc, &edge, eb);
+            DeleteObject(eb);
+            g_pin_rc = strip;
         }
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
@@ -1906,6 +2164,23 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_ERASEBKGND) return 1;
     if (msg == WM_MOUSEWHEEL) { chat_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; }
+    if (msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE) { /* the pinned prompt shows whole while the pointer is on it */
+        POINT pt = {(short)LOWORD(lp), (short)HIWORD(lp)};
+        int hot = msg == WM_MOUSEMOVE && g_pin >= 0 && PtInRect(&g_pin_rc, pt);
+        if (msg == WM_MOUSEMOVE) { TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, w, 0}; TrackMouseEvent(&tme); }
+        if (hot != g_pin_hot) { g_pin_hot = hot; InvalidateRect(w, NULL, FALSE); }
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP && g_pin >= 0) { /* a click on it: back to that prompt */
+        POINT pt = {(short)LOWORD(lp), (short)HIWORD(lp)};
+        if (PtInRect(&g_pin_rc, pt)) {
+            int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_pr[g_pin].y0;
+            g_chat_scroll = y < mx ? y : mx; g_chat_auto = 0; g_pin_hot = 0;
+            InvalidateRect(w, NULL, FALSE);
+            return 0;
+        }
+    }
+    if (msg == WM_SETCURSOR && g_pin >= 0) { POINT pt; GetCursorPos(&pt); ScreenToClient(w, &pt); if (PtInRect(&g_pin_rc, pt)) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; } }
     if (msg == WM_SETCURSOR || msg == WM_LBUTTONUP) { /* a link under the pointer: the hand, and a click opens it */
         POINT pt;
         GetCursorPos(&pt);
@@ -1978,6 +2253,46 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
     *ox = at[pick][0]; *oy = at[pick][1];
 }
 
+/* The conversation for the box, as chat_layout reads it: each turn's prompt (lines marked 1), its steps (2, the one
+ * running now 3; a finished turn has them in one line, 4), its reply as Markdown, a rule between turns (5), and
+ * the permission notice at the end while it waits (6). NULL when the hook keeps no turns (an older hook). */
+static void conv_put(char **o, int mark, const char *t, int lines) {
+    for (const char *c = t; c && *c;) {
+        if (lines && mark) *(*o)++ = (char)mark;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 6) *(*o)++ = *c;
+        *(*o)++ = '\n';
+        if (*c) c++;
+    }
+}
+static char *chat_conv(int st) {
+    if (!g_mt_n) return NULL;
+    size_t cap = 4096 + (g_msg_notice ? strlen(g_msg_notice) * 2 : 0);
+    for (int i = 0; i < g_mt_n; i++) {
+        MTurn *t = &g_mt[i];
+        cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
+    }
+    char *out = malloc(cap), *o = out;
+    for (int i = 0; i < g_mt_n; i++) {
+        MTurn *t = &g_mt[i];
+        int live = i == g_mt_n - 1 && !t->r;
+        if (i) conv_put(&o, 5, " ", 1);
+        if (t->p) conv_put(&o, 1, t->p, 1);
+        if (live) { /* going on: the last steps one by one, the running one last */
+            char line[300];
+            if (t->n > t->ns) { snprintf(line, sizeof line, "%d earlier step%s", t->n - t->ns, t->n - t->ns == 1 ? "" : "s"); conv_put(&o, 4, line, 1); }
+            for (int k = 0; k < t->ns; k++) {
+                snprintf(line, sizeof line, "%s\t%s", t->tool[k], t->what[k] ? t->what[k] : "");
+                conv_put(&o, k == t->ns - 1 && g_run_tool ? 3 : 2, line, 1);
+            }
+            if (!t->ns && (st == ST_THINK || st == ST_WORK)) conv_put(&o, 3, "Thinking", 1);
+        } else if (t->tally) conv_put(&o, 4, t->tally, 1);
+        if (t->r) conv_put(&o, 0, t->r, 0);
+    }
+    if (st == ST_WAIT && g_msg_notice) conv_put(&o, 6, g_msg_notice, 1);
+    *o = 0;
+    return out;
+}
+
 static void chat_show(const Session *s, RECT beside, int cy, double now) {
     msg_load(s, now);
     int st = session_shown(s, now);
@@ -1990,8 +2305,15 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
+    char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
+    if (conv) body = conv;
     wchar_t *wt = chat_text(title), *wb;
     { int n = MultiByteToWideChar(CP_UTF8, 0, body, -1, NULL, 0); wb = malloc(sizeof(wchar_t) * (size_t)n); MultiByteToWideChar(CP_UTF8, 0, body, -1, wb, n); } /* as written: laid out below */
+    free(conv);
+    /* a new turn (or another session) is followed again, wherever the box was scrolled to */
+    static unsigned last_turn;
+    unsigned turn_key = (unsigned)g_mt_n * 2654435761u;
+    if (g_mt_n && g_mt[g_mt_n - 1].p) for (const char *c = g_mt[g_mt_n - 1].p; *c; c++) turn_key = turn_key * 31 + (unsigned char)*c;
     Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; /* single core: the session's own colour, else its state colour */
     COLORREF acc = RGB((int)(fminf(1, c.r) * 255), (int)(fminf(1, c.g) * 255), (int)(fminf(1, c.b) * 255));
     static RECT last_beside;
@@ -2000,7 +2322,8 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     int moved = memcmp(&beside, &last_beside, sizeof beside) != 0 || last_middle != g_chat_middle || last_input != input_open();
     last_input = input_open();
     int changed = !g_chat_title || wcscmp(wt, g_chat_title) || body_new || !IsWindowVisible(g_chat) || moved || other;
-    if (other || body_new) g_chat_scroll = 0; /* another reply starts at its top */
+    if (other || turn_key != last_turn) { g_chat_scroll = 0; g_chat_auto = 1; } /* another reply starts at its top */
+    last_turn = turn_key;
     snprintf(g_chat_sid, sizeof g_chat_sid, "%s", s->sid);
     last_beside = beside;
     last_middle = g_chat_middle;
@@ -2034,6 +2357,10 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (most < g_chat_line * 3) most = g_chat_line * 3;
     g_chat_view_h = g_chat_body_h < most ? g_chat_body_h : most;
     if (g_chat_scroll > g_chat_body_h - g_chat_view_h) g_chat_scroll = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0;
+    if (g_chat_auto && g_pr_n) { /* following: the newest prompt at the top, or the end while the turn runs */
+        int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
+        g_chat_scroll = live || g_pr[g_pr_n - 1].y0 > mx ? mx : g_pr[g_pr_n - 1].y0;
+    }
     int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
     int w = (t.right > b.right ? t.right : b.right), h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad;
     if (w > maxw) w = maxw;
