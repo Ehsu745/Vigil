@@ -1242,7 +1242,8 @@ static void r_hole(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M; Want *w = c->w; HoleRS *H = &m->rs.hole;
     const float BANG = 2.6f;
     float dt = fminf(.05f, c->dt), e = c->e;
-    H->wake += ((s->hover > .3f ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4));
+    H->wake += ((s->lock_to > .5f ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4)); /* resting on it (lock-on) wakes it; a glance does not */
+    H->flow += dt * (1 + 1.2f * s->hover + 0.8f * s->carry); /* the disc turns faster while pointed at or carried */
     for (int i = 0; i < NDUST; i++) { /* the dust disc turns, and slowly falls in */
         Dust *d = &H->dust[i];
         d->a += dt * 1.15f / powf(d->r, 1.5f); d->r -= dt * .05f / d->r;
@@ -1318,7 +1319,12 @@ static void r_hole(Ctx *c) {
     H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 1.1f : 4)));
     /* grown: now and then one of its own actions (jets, feeding on a star, a flare, a ripple, a slow precession) */
     static const float ACT_DUR[HA_N] = {0, 2.6f, 4.5f, 2.2f, 2.8f, 6};
-    if (H->grow < .95f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
+    if (H->grow > .5f && wake < .1f && s->press_at > H->press_seen + 1e-6) { /* a press: matter dropped in from that side */
+        H->press_seen = s->press_at; H->act = HA_FEED; H->act_at = c->now; H->act_p = atan2f(s->press_y, s->press_x) / 3.14159265f;
+    }
+    if (H->grow > .5f && wake < .1f && s->defend_at > H->defend_seen + 1e-6) { H->defend_seen = s->defend_at; H->act = HA_JETS; H->act_at = c->now; H->act_p = 0; } /* rushed at: it fires its jets */
+    if (H->grow < .5f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
+    else if (H->grow < .95f) H->act_next = 0;
     else if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
     else if (H->act == HA_NONE && c->now >= H->act_next) { H->act = 1 + (int)(mrand(s) * (HA_N - 1)) % (HA_N - 1); H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
     else if (H->act != HA_NONE && c->now - H->act_at > ACT_DUR[H->act]) { H->act = HA_NONE; H->act_next = c->now + rnd(s, 6, 14); }
@@ -1381,7 +1387,7 @@ const Routine ROUTINES[RT_N] = {
     [RT_UNLOCK] = {"Unlock", ST_CHEER, 0, 0, r_unlock, NULL, "Charges, bursts open with spikes and a ring, turns a full circle, then locks back click by click."},
     [RT_BLOOM] = {"Bloom", ST_CHEER, 4.6f, 0, r_bloom, NULL, "Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals."},
     [RT_ZIP] = {"Zip", ST_CHEER, 3.7f, 0, r_zip, NULL, "A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain."},
-    [RT_DORMANT] = {"Dormant", ST_SLEEP, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s."},
+    [RT_DORMANT] = {"Dormant", -1, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s. (Asleep: off by default, the black hole is)"},
     [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo; then jets, feeding, flares, ripples. Asleep only."},
     [RT_BROADCAST] = {"Broadcast", ST_SPEAK, 0, 0, r_broadcast, NULL, "The patches rise and fall with the voice, like the bars of an equaliser."},
     [RT_RECEIVER] = {"Receiver", ST_LISTEN, 0, 0, r_receiver, NULL, "Holds still; the patches facing you open with the microphone level."},

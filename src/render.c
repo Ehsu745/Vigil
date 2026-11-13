@@ -354,7 +354,7 @@ static Col hole_col(float x) {
     return x < 0.45f ? mix(EMBER, ORANGE, x / 0.45f) : x < 0.9f ? mix(ORANGE, GOLD, (x - 0.45f) / 0.45f) : mix(GOLD, HOT, clamp01((x - 0.9f) / 0.6f));
 }
 static float hole_env(float u) { return u <= 0 || u >= 1 ? 0 : u < 0.15f ? u / 0.15f : 1 - (u - 0.15f) / 0.85f; } /* quick in, slow out */
-static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, float R, float ks, double t, double now) {
+static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, float ox, float oy, float R, float ks, double t, double now) {
     /* rh0: the hole as it opens; once the shell is swallowed (grow) the whole picture grows with it until the disc's
      * reach is the tile's, its outer edge fading before the tile's edge */
     const HoleRS *H = &mo->rs.hole;
@@ -363,21 +363,23 @@ static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, 
     static const float DUR[HA_N] = {1, 2.6f, 4.5f, 2.2f, 2.8f, 6};
     int act = H->act;
     float au = act ? clamp01((float)(now - H->act_at) / DUR[act]) : 0, env = hole_env(au), sw = sinf(3.14159265f * au);
-    float tf = (float)t, flick = 1 + 0.06f * sinf(tf * 1.3f) + 0.04f * sinf(tf * 3.7f + 1) + 0.03f * sinf(tf * 7.9f); /* accretion never steady */
-    float boost = flick * (act == HA_FLARE ? 1 + 1.3f * env : 1);
-    float tilt = 0.17f + (act == HA_PRECESS ? 0.17f * sw * sw : 0), rot = -0.08f + (act == HA_PRECESS ? 0.14f * sw * H->act_p : 0);
+    float tf = (float)t, fl = H->flow, flick = 1 + 0.06f * sinf(tf * 1.3f) + 0.04f * sinf(tf * 3.7f + 1) + 0.03f * sinf(tf * 7.9f); /* accretion never steady */
+    float boost = flick * (act == HA_FLARE ? 1 + 1.3f * env : 1) * (1 + 0.25f * s->hover + 0.4f * s->carry);
+    /* the disc's lean: its own slow drift and the hand's drag (the shell's turn, ax / ay), and the precession */
+    float tilt = fminf(0.3f, fmaxf(0.07f, 0.17f + 0.1f * sinf(s->ax * 0.7f))) + (act == HA_PRECESS ? 0.17f * sw * sw : 0), rot = -0.08f + 0.22f * sinf(s->ay * 0.5f) + (act == HA_PRECESS ? 0.14f * sw * H->act_p : 0);
+    float lk = sqrtf(s->look_x * s->look_x + s->look_y * s->look_y) + 1e-3f, lx = s->look_x / lk, ly = s->look_y / lk, lit = s->hover * clamp01(lk * 1.5f); /* your side, pointed at */
     float rs = rh * 0.62f, cr = cosf(rot), sr = sinf(rot);
     float eout = fminf(4.4f, R * 1.25f / rs); /* the disc's outer edge, in shadow radii */
     float feed_flash = act == HA_FEED && au > 0.82f ? 1 - (au - 0.82f) / 0.18f : 0;
     float ripple_r = act == HA_RIPPLE ? 1.1f + 2.3f * au : -9; /* the gravity wave's front, in shadow radii */
     blob(c, cl, ox, oy, fminf(rs * 3.2f, R * 1.1f), (Col){1, 0.5f, 0.15f}, 0, (Col){0.5f, 0.16f, 0.04f}, 0.12f * hb * boost, 0.02f); /* a warm haze */
-    blob(c, cl, ox - rs * 0.2f, oy - rs * 0.9f, rs * 1.6f, (Col){1, 0.85f, 0.6f}, 0, (Col){1, 0.6f, 0.25f}, 0.18f * hb * boost, 0.02f); /* the halo's bloom */
+    blob(c, cl, ox - rs * 0.2f - s->move_x * rs * 0.25f, oy - rs * 0.9f - s->move_y * rs * 0.25f, rs * 1.6f, (Col){1, 0.85f, 0.6f}, 0, (Col){1, 0.6f, 0.25f}, 0.18f * hb * boost, 0.02f); /* the halo's bloom (it leans back from a carry) */
     float ex = rs * eout + 2, ey = rs * 2.1f + 2;
     int bx0 = (int)fmaxf(cl.x0, floorf(ox - ex)), bx1 = (int)fminf(cl.x1, ceilf(ox + ex) + 1);
     int by0 = (int)fmaxf(cl.y0, floorf(oy - ey)), by1 = (int)fminf(cl.y1, ceilf(oy + ey) + 1);
     /* three hot spots riding the inner disc, each at its own orbital speed */
     float spot_e[3] = {1.6f, 2.05f, 2.6f}, spot_a[3];
-    for (int k = 0; k < 3; k++) spot_a[k] = tf * 0.9f / powf(spot_e[k], 1.5f) + k * 2.1f;
+    for (int k = 0; k < 3; k++) spot_a[k] = fl * 0.9f / powf(spot_e[k], 1.5f) + k * 2.1f;
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
         float dx = x + 0.5f - ox, dy = y + 0.5f - oy, u = dx * cr + dy * sr, v = -dx * sr + dy * cr; /* u along the disc, v across it (down: near side) */
         float r = sqrtf(dx * dx + dy * dy), rc = r / rs, side = u / (r + 1e-3f);
@@ -386,7 +388,7 @@ static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, 
         float e = sqrtf(u * u + (v / tilt) * (v / tilt)) / rs, disc = 0;
         if (e > 1.35f && e < eout) {
             float in = clamp01((e - 1.35f) / 0.3f), out = clamp01((eout - e) / (eout * 0.25f));
-            float ang = atan2f(v / tilt, u), om = tf / powf(e, 1.5f); /* how far this ring has turned (Kepler) */
+            float ang = atan2f(v / tilt, u), om = fl / powf(e, 1.5f); /* how far this ring has turned (Kepler) */
             float wave = ripple_r > 0 ? 0.25f * (1 - au) * expf(-(e - ripple_r) * (e - ripple_r) * 6) * sinf((e - ripple_r) * 18) : 0;
             float streak = 0.84f + 0.1f * sinf(e * 23 + 3 * sinf(e * 5.1f + ang * 3 - om * 2.2f) + wave * 9) + 0.06f * sinf(e * 61 + ang * 7 - om * 3.5f);
             float spot = 0;
@@ -402,9 +404,9 @@ static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, 
         if (rc > 1.0f && rc < 2.0f) {
             float top = clamp01(-v / (r + 1e-3f) * 1.25f + 0.15f), reach = 1.16f + 0.8f * top * top;
             float w = rc < 1.07f ? (rc - 1) / 0.07f : clamp01((reach - rc) / (reach - 1.07f));
-            lens = 1.5f * powf(w, 1.6f) * (0.25f + 0.75f * top) * (1.15f - 0.45f * side) * (0.88f + 0.08f * sinf(rc * 33 - tf * 0.35f) + 0.06f * sinf(atan2f(dy, dx) * 5 - tf * 0.7f));
+            lens = 1.5f * powf(w, 1.6f) * (0.25f + 0.75f * top) * (1.15f - 0.45f * side) * (0.88f + 0.08f * sinf(rc * 33 - fl * 0.35f) + 0.06f * sinf(atan2f(dy, dx) * 5 - fl * 0.7f)) * (1 + 0.6f * lit * fmaxf(0, (dx * lx + dy * ly) / (r + 1e-3f)));
         }
-        float ring = (1.3f + 2.2f * feed_flash) * expf(-((rc - 1.035f) * (rc - 1.035f)) / (0.016f * 0.016f)) * (1.1f - 0.35f * side); /* the photon ring */
+        float ring = (1.3f + 2.2f * feed_flash) * expf(-((rc - 1.035f) * (rc - 1.035f)) / (0.016f * 0.016f)) * (1.1f - 0.35f * side) * (1 + 1.2f * lit * fmaxf(0, (dx * lx + dy * ly) / (r + 1e-3f))); /* the photon ring, brighter on your side */
         float I = ((v > 0 ? disc : disc * (1 - shadow)) + lens) * boost + ring;
         float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
         if (shadow > 0) { float a = shadow * hb; p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a; } /* light taken away: see-through on the desktop */
@@ -623,7 +625,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
             glow_line(c, cl, pts[i][0], pts[i][1], pts[j][0], pts[j][1], L->eh, 0.5f * mo->inner * edge, L->eh, 0.4f * mo->inner * glow * edge, k);
         }
     }
-    if (mo->hole > 0.01f) draw_hole(c, cl, mo, ox, oy, Rpx, ks, t, now);
+    if (mo->hole > 0.01f) draw_hole(c, cl, s, mo, ox, oy, Rpx, ks, t, now);
     if (mo->scan_a > 0.01f) { /* the scan plane, seen edge-on: a flat ellipse at its height */
         float h = mo->scan_h, rx = sqrtf(fmaxf(0, 1.04f - h * h)) * CIRCUM * P.unit, ry = rx * 0.14f, cy = oy + h * CIRCUM * P.unit;
         for (int i = 0; i < 40; i++) {
