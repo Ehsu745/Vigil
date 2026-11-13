@@ -7,8 +7,8 @@ Vigil (formerly dodeca-core) shows every running Claude Code session as a glowin
 ## Build and run
 
 ```sh
-make                          # builds ./dodeca-core (C11, links zlib and libm)
-./dodeca-core --demo          # fake sessions cycling through every state; q quits
+make                          # builds ./vigil (C11, links zlib and libm)
+./vigil --demo                # fake sessions cycling through every state; q quits
 sh mac/build.sh               # builds Vigil.app and its launcher script ./vigil-panel (macOS floating panel)
 ./vigil-panel --demo
 ```
@@ -20,7 +20,7 @@ sh mac/build.sh               # builds Vigil.app and its launcher script ./vigil
 There is no test suite. To check a visual change without a terminal, render one demo frame to a file and look at it:
 
 ```sh
-./dodeca-core --snapshot /tmp/f.ppm --at 10 --size 720x400   # state of the 3-session demo 10 s in
+./vigil --snapshot /tmp/f.ppm --at 10 --size 720x400   # state of the 3-session demo 10 s in
 python3 -c "from PIL import Image; Image.open('/tmp/f.ppm').save('/tmp/f.png')"
 ```
 
