@@ -305,6 +305,13 @@ int session_shown(const Session *s, double now);
 void session_init(Session *s, const char *sid, double t, const Shape *sh);
 extern const char *STATE_TEXT[ST_N];                          /* "Idle", "Thinking", ... for text labels */
 double session_rate(const Session *s, double now, int fps); /* how many times a second its picture needs redrawing */
+/* the panels' Smoothness: pictures a second while idle, thinking, busy (working, waiting, done, a state change,
+ * a motion running), resting (asleep, away) and in the hand; 0 = the display's refresh rate */
+typedef struct { float idle, think, busy, rest, hand; } Smooth;
+enum { SM_SAVER, SM_BALANCED, SM_SMOOTH, SM_MAX, SM_CUSTOM, SM_N };
+extern const Smooth SMOOTH[SM_CUSTOM];
+extern const char *SMOOTH_NAME[SM_N];                       /* "saver", ... as kept in the settings files */
+double panel_rate(const Session *s, double now, const Smooth *sm, double hz); /* pictures a second, at most hz */
 
 void motion_init(Session *s);
 void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt);
@@ -324,7 +331,9 @@ void demo_start(Demo *d, int n, double now);
 void demo_run(Demo *d, Room *room, double now);
 
 /* ---- render.c: software renderer into a float RGB canvas -------------------------------------- */
-typedef struct { int w, h; float *p; } Canvas;
+/* sx, sy: render_one draws the core that many pixels right and down (a part-pixel place); ss: the canvas is ss times
+ * the size it will be shown at (supersampled; 0 or 1 = not), so sizes that depend on the shown size stay right */
+typedef struct { int w, h; float *p; float sx, sy; int ss; } Canvas;
 void canvas_resize(Canvas *c, int w, int h);
 void render_room(Canvas *c, const Room *r, const Shape *sh, double now, float glow, float core_frac);
 void render_one(Canvas *c, const Session *s, const Shape *sh, double now, float glow, float core_frac);

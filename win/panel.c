@@ -33,6 +33,7 @@
 #include <ole2.h>
 #include <richedit.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +59,15 @@ static float g_glow = 1.0f, g_core = 0.35f, g_font = 14, g_scale = 1; /* g_scale
 static float g_tip_size = 1;        /* Settings > Box size: how wide and tall the text box may grow */
 static float g_gravity = 2;         /* how hard the main core holds the small ones on their orbit (Settings > Gravity) */
 static char g_shape_name[16] = "geo2";
-static double g_dpi = 1;
+static double g_dpi = 1;            /* the scale of the monitor the main core is on (1 = 96 dpi); followed as it moves */
+static double g_sdpi = 1;           /* the Settings window's own monitor's */
+static double g_hz = 60;            /* that monitor's refresh rate */
+static long g_tick_n;               /* ticks so far: the small cores move on every n-th one */
+static double g_tick_hz = 60;       /* how many ticks a second the clock runs at now (a whole fraction of g_hz) */
+static double g_col_dip;            /* the core column's width in 96-dpi units (from the primary screen, or --width) */
+static int g_smooth = SM_BALANCED;  /* Smoothness: how often pictures are made (right-click > Smoothness) */
+static Smooth g_smooth_custom = {15, 22.5f, 30, 6, 60};
+static const Smooth *smooth_now(void) { return g_smooth == SM_CUSTOM ? &g_smooth_custom : &SMOOTH[g_smooth]; }
 static char g_dir[1024];            /* the events file's folder (a Windows path): msg\ and the saved positions */
 static char g_frame[16] = "segments"; /* --frame: drawn round a core while it is carried or locked on */
 static int g_labels = 1;            /* all cores: name and state above each core (--labels hover: none) */
@@ -76,6 +85,11 @@ static char g_set_shot[1024];       /* --settings-shot FILE: open it, let the pr
 static int g_stats;                 /* --stats: frames, pictures and window updates a second, to panel-stats.txt */
 static long g_stat_tick, g_stat_pic, g_stat_push;
 static double g_stat_ms, g_stat_since;
+static double g_stat_gap, g_stat_gap2, g_stat_gap_max, g_stat_last; /* the time from one tick to the next: mean, spread, worst */
+static long g_stat_late;            /* ticks that came more than half an interval late */
+static long g_stat_paint_edit, g_stat_paint_card; /* repaints of the reply line's field and of its card */
+static double g_stat_render_ms, g_stat_push_ms; /* of the tick time: making pictures, handing bitmaps to Windows */
+static double qpc_ms(void) { LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f); return q.QuadPart * 1000.0 / f.QuadPart; }
 
 /* single-core mode */
 static int g_single = 1;            /* --all: every core its own window */
@@ -121,7 +135,7 @@ static int rush_n;
 
 enum { ID_TIMER = 1, HK_MODE = 1, WM_UNHOOK = WM_APP + 1,
        ID_QUIT = 100, ID_PIN = 400, ID_MODE = 500, ID_FOLLOW, ID_RESET,
-       ID_COPY = 1200, ID_FRONT, ID_REPLY, ID_SENDKEYS = 1400, ID_SENDENTER, ID_SETTINGS = 1500 };
+       ID_COPY = 1200, ID_FRONT, ID_REPLY, ID_SENDKEYS = 1400, ID_SENDENTER, ID_SETTINGS = 1500, ID_SMOOTH = 1600 };
 static const char *SHAPES[4] = {"dodeca", "bucky", "geo2", "geo3"};
 static const float GLOWS[3] = {0.7f, 1.0f, 1.4f};
 static const float FONTS[5] = {12, 14, 16, 20, 24};
@@ -312,7 +326,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, tip_size; int others, labels, tip_middle, tip_mono, tip_bg, wheel_spin, text_col; unsigned tip_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
+static struct { float font, core, scale, glow, gravity, tip_size; int smooth; Smooth custom; int others, labels, tip_middle, tip_mono, tip_bg, wheel_spin, text_col; unsigned tip_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -321,6 +335,7 @@ static int settings_path(char *out, size_t n) {
 }
 
 static void remember_launch(void) {
+    g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom;
     g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.tip_size = g_tip_size; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.away = g_away_after; g_launch.tip_middle = g_tip_middle; g_launch.tip_mono = g_tip_mono;
     g_launch.tip_bg = g_tip_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.tip_custom = g_tip_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
@@ -330,6 +345,7 @@ static void remember_launch(void) {
 
 static void restore_launch(void) {
     motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
+    g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom;
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_tip_size = g_launch.tip_size; g_others = g_launch.others;
     g_labels = g_launch.labels; g_away_after = g_launch.away; g_tip_middle = g_launch.tip_middle; g_tip_mono = g_launch.tip_mono;
     g_tip_bg = g_launch.tip_bg; g_wheel_spin = g_launch.wheel_spin; g_tip_custom = g_launch.tip_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
@@ -390,6 +406,11 @@ static void settings_load(void) {
     char sh[16], *c = strstr(buf, "\"shape\"");
     if (c && sscanf(c, "\"shape\" : \"%15[a-z0-9]\"", sh) == 1) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh);
     if ((c = strstr(buf, "\"frame\"")) && sscanf(c, "\"frame\" : \"%15[a-z]\"", sh) == 1) snprintf(g_frame, sizeof g_frame, "%s", sh);
+    if ((c = strstr(buf, "\"smooth\"")) && sscanf(c, "\"smooth\" : \"%15[a-z]\"", sh) == 1)
+        for (int i = 0; i < SM_N; i++) if (!strcmp(sh, SMOOTH_NAME[i])) g_smooth = i;
+    Smooth cu;
+    if ((c = strstr(buf, "\"smoothCustom\"")) && sscanf(c, "\"smoothCustom\" : [ %f , %f , %f , %f , %f ]", &cu.idle, &cu.think, &cu.busy, &cu.rest, &cu.hand) == 5)
+        g_smooth_custom = cu;
     uint32_t rt[ST_N], act[ST_N]; /* Settings > Motions */
     MotionMap def[ST_N];
     motion_map_init();
@@ -415,7 +436,8 @@ static void settings_save(void) {
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
     fprintf(f, "], \"mapActions\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
-    fprintf(f, "]}\n");
+    const Smooth *cu = &g_smooth_custom;
+    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g]}\n", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand);
     fclose(f);
 }
 
@@ -452,7 +474,9 @@ static void pane_show(Pane *p, int x, int y) {
     POINT src = {0, 0}, dst = {x, y};
     SIZE size = {p->W, p->H};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    double u0 = g_stats ? qpc_ms() : 0;
     UpdateLayeredWindow(p->w, NULL, &dst, &size, p->mem, &src, 0, &blend, ULW_ALPHA);
+    if (g_stats) g_stat_push_ms += qpc_ms() - u0;
     p->x = x; p->y = y; p->dirty = 0;
     g_stat_push++;
     if (!p->shown) {
@@ -482,51 +506,105 @@ static void clamp_main(void) { /* the main core stays wholly on the monitor it i
     g_my = clampf(g_my, wa.top + r, wa.bottom - r);
 }
 
+/* ---- monitors: each has its own scale (dpi) and refresh rate. The panel is per-monitor DPI aware, so
+ * Windows never stretches its bitmaps: the cores are drawn at the scale of the monitor the main core is on. */
+static double dpi_at(float x, float y) {
+    static HRESULT(WINAPI * get)(HMONITOR, int, UINT *, UINT *);
+    static int tried;
+    if (!tried) { tried = 1; HMODULE sh = LoadLibraryW(L"shcore.dll"); if (sh) get = (void *)GetProcAddress(sh, "GetDpiForMonitor"); }
+    UINT dx = 96, dy = 96;
+    POINT p = {(LONG)x, (LONG)y};
+    if (get && get(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy) == S_OK) return dx / 96.0;
+    HDC screen = GetDC(NULL);
+    double d = GetDeviceCaps(screen, LOGPIXELSX) / 96.0;
+    ReleaseDC(NULL, screen);
+    return d;
+}
+static double hz_at(float x, float y) {
+    MONITORINFOEXW mi;
+    mi.cbSize = sizeof mi;
+    POINT p = {(LONG)x, (LONG)y};
+    DEVMODEW dm;
+    memset(&dm, 0, sizeof dm);
+    dm.dmSize = sizeof dm;
+    if (GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), (MONITORINFO *)&mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)
+        && dm.dmDisplayFrequency > 1)
+        return dm.dmDisplayFrequency;
+    return 60;
+}
+
 /* where it was put last, else near the top of the primary screen's right edge */
 static void main_place(void) {
+    g_dpi = dpi_at(g_work.right - 1.0f, g_work.top + 1.0f);
+    g_col_w = (int)(g_col_dip * g_dpi);
     g_cw = (int)(fmax(200 * g_dpi, fmin(320 * g_dpi, g_col_w)) * g_scale);
     Pos *p = pos_find("@main");
     if (p) { g_mx = (float)p->x; g_my = (float)p->y; }
     else { g_mx = g_work.right - g_cw * .5f; g_my = g_work.top + g_cw * .6f; }
     clamp_main();
+    void dpi_follow(int force);
+    dpi_follow(1);
 }
 
 /* ---- drawing -------------------------------------------------------------------------------------- */
 /* Each core's picture is kept and made again only as often as its state needs (session_rate, as in the macOS
  * panel: asleep 4 a second, idle 10, working 20, more while the mouse is on it, 60 while it is in the hand).
  * A window gets a new bitmap only when one of its pictures changed; moving it is just a new position. */
-typedef struct { char sid[72]; uint32_t *img; int px; size_t cap; double due; } Pic; /* premultiplied BGRA */
+typedef struct { char sid[72]; uint32_t *img; int px; size_t cap; double due; float fx, fy; } Pic; /* premultiplied BGRA; drawn (fx, fy) px right and down */
 static Pic g_pic[MAX_SESS];
+static int g_orbiting;              /* small cores on screen that drift (single-core mode): something always moves */
+static double g_need_hz;            /* the highest picture rate a core on screen wants now: the clock keeps up with it */
 
+/* k: 1.5 for the cores on the desktop (the Smoothness as it is), lower or higher for the Settings preview */
 static double core_rate(const Session *s, double now, float k) {
-    if (g_down_sid[0] && !strcmp(s->sid, g_down_sid) && (g_dragging || g_moving)) return 60; /* in the hand */
-    if (s->hover_to > 0 || s->carried) return 60; /* the mouse on it: it answers at once */
-    double r = session_rate(s, now, 60) * k;
-    return r > 60 ? 60 : r < 2 ? 2 : r;
+    if (g_down_sid[0] && !strcmp(s->sid, g_down_sid) && (g_dragging || g_moving)) { /* in the hand */
+        double h = smooth_now()->hand;
+        return h <= 0 || h > g_hz ? g_hz : h;
+    }
+    double r = panel_rate(s, now, smooth_now(), g_hz) * k / 1.5;
+    return r > g_hz ? g_hz : r < 2 ? 2 : r;
 }
 
 static void pics_invalidate(void) { for (int i = 0; i < MAX_SESS; i++) g_pic[i].due = 0; }
 
 /* a session's picture at px pixels, made again if it is due; 1 if it changed */
-static int pic_make(Pic *p, const Session *s, int px, double now, float k) {
+static int pic_make_at(Pic *p, const Session *s, int px, double now, float k, float fx, float fy) {
     if (px < 8) px = 8;
-    if (p->img && p->px == px && now < p->due && !strcmp(p->sid, s->sid)) return 0;
+    if (p->img && p->px == px && now < p->due && !strcmp(p->sid, s->sid) && p->fx == fx && p->fy == fy) return 0;
     size_t need = (size_t)px * px;
     if (need > p->cap) { free(p->img); p->img = malloc(need * 4); p->cap = need; }
-    canvas_resize(&g_cv, px, px);
+    double r0 = g_stats ? qpc_ms() : 0;
+    int ss = px <= 96 ? 2 : 1; /* a small core is drawn at twice the size and shrunk: cleaner edges where pixels are few */
+    size_t big = need * ss * ss;
+    canvas_resize(&g_cv, px * ss, px * ss);
+    g_cv.sx = fx * ss; g_cv.sy = fy * ss; g_cv.ss = ss;
     render_one(&g_cv, s, &g_shape, now, g_glow, g_core);
-    if (need * 4 > g_rgba_cap) { free(g_rgba); g_rgba = malloc(need * 4); g_rgba_cap = need * 4; }
+    g_cv.sx = g_cv.sy = 0; g_cv.ss = 0;
+    if (big * 4 > g_rgba_cap) { free(g_rgba); g_rgba = malloc(big * 4); g_rgba_cap = big * 4; }
     canvas_rgba(&g_cv, g_rgba);
-    const uint8_t *src = g_rgba;
-    for (size_t j = 0; j < need; j++, src += 4) /* RGBA → BGRA, both premultiplied */
-        p->img[j] = (uint32_t)src[2] | (uint32_t)src[1] << 8 | (uint32_t)src[0] << 16 | (uint32_t)src[3] << 24;
+    if (ss == 1) {
+        const uint8_t *src = g_rgba;
+        for (size_t j = 0; j < need; j++, src += 4) /* RGBA → BGRA, both premultiplied */
+            p->img[j] = (uint32_t)src[2] | (uint32_t)src[1] << 8 | (uint32_t)src[0] << 16 | (uint32_t)src[3] << 24;
+    } else
+        for (int y = 0; y < px; y++) for (int x = 0; x < px; x++) { /* the average of each 2x2 (premultiplied, so a plain mean) */
+            const uint8_t *a = g_rgba + ((size_t)(2 * y) * px * 2 + 2 * x) * 4, *b = a + (size_t)px * 2 * 4;
+            unsigned c[4];
+            for (int k2 = 0; k2 < 4; k2++) c[k2] = (a[k2] + a[4 + k2] + b[k2] + b[4 + k2] + 2) / 4;
+            p->img[(size_t)y * px + x] = c[2] | c[1] << 8 | c[0] << 16 | c[3] << 24;
+        }
     snprintf(p->sid, sizeof p->sid, "%s", s->sid);
     p->px = px;
-    p->due = now + 1.0 / core_rate(s, now, k) - 0.004;
+    p->fx = fx; p->fy = fy;
+    if (g_stats) g_stat_render_ms += qpc_ms() - r0;
+    double ticks = floor(g_tick_hz / core_rate(s, now, k) + 0.5); /* every n-th tick, not "about every 1/rate s" */
+    if (ticks < 1) ticks = 1;
+    p->due = now + (ticks - 0.5) / g_tick_hz;
     g_stat_pic++;
     return 1;
 }
 
+static int pic_make(Pic *p, const Session *s, int px, double now, float k) { return pic_make_at(p, s, px, now, k, 0, 0); }
 static int pic_update(int i, const Session *s, int px, double now, float k) { return pic_make(&g_pic[i], s, px, now, k); }
 
 /* the same at a fractional position (bilinear), so a slowly drifting core moves smoothly, not in whole pixels */
@@ -1041,18 +1119,32 @@ static void draw_single(Room *room, int n, double now) {
         int m = frame_margin(w4), pw = w4 + 2 * m + 1;
         float fx = ob->px - w4 / 2.0f - m, fy = ob->py - w4 / 2.0f - m;
         int ix = (int)floorf(fx), iy = (int)floorf(fy);
-        int pc = pic_update(i, &room->s[i], w4, now, 1.5f);
+        /* a small core in eighths of a pixel (it is drawn on its beat anyway, so a slow drift glides); the main core in
+         * halves, so its last tiny easing toward its place does not ask for a new picture every tick */
+        float qd = i == fi ? 2 : 8, qx = floorf((fx - ix) * qd + 0.5f) / qd, qy = floorf((fy - iy) * qd + 0.5f) / qd;
+        if (qx >= 1) { ix++; qx = 0; }
+        if (qy >= 1) { iy++; qy = 0; }
+        if (i != fi && i != dragged) {
+            /* a small core moves and turns on one steady beat: its place and its picture change together, every n-th
+             * tick (Balanced: 30 a second), never in between, so neither the glide nor the turning stutters */
+            double busy = smooth_now()->busy, hz = busy <= 0 || busy > g_tick_hz ? g_tick_hz : busy;
+            long every = (long)floor(g_tick_hz / hz + 0.5);
+            if (every < 1) every = 1;
+            if (sp->shown && sp->W == pw && !sp->dirty && g_tick_n % every) continue;
+            g_pic[i].due = 0;
+        }
+        int pc = pic_make_at(&g_pic[i], &room->s[i], w4, now, 1.5f, qx, qy);
         static float lfx[MAX_SESS], lfy[MAX_SESS];
-        int shifted = fabsf((fx - ix) - lfx[i]) > .02f || fabsf((fy - iy) - lfy[i]) > .02f;
+        int shifted = qx != lfx[i] || qy != lfy[i];
         SetRect(&g_core_rc[i], ix + m, iy + m, ix + m + w4, iy + m + w4);
         if (pc || shifted || sp->dirty || !sp->shown || sp->W != pw) {
             pane_size(sp, pw, pw);
             memset(sp->px, 0, (size_t)pw * pw * 4);
-            blit_pic_at(sp, m + (fx - ix), m + (fy - iy), &g_pic[i]);
+            blit_pic(sp, m, m, &g_pic[i]);
             RECT lr = {m, m, m + w4, m + w4};
             focus_frame(sp, lr, &room->s[i], now);
             pane_show(sp, ix, iy);
-            lfx[i] = fx - ix; lfy[i] = fy - iy;
+            lfx[i] = qx; lfy[i] = qy;
         } else pane_move(sp, ix, iy);
     }
     for (int i = n; i < MAX_SESS; i++) pane_hide(&g_pane[i]);
@@ -1064,9 +1156,34 @@ static void draw_single(Room *room, int n, double now) {
     SetRect(&g_cluster_rc, (int)(g_mx - rx - small), (int)(g_my - ry - small), (int)(g_mx + rx + small), (int)(g_my + ry + small));
 }
 
+/* the main core is on another monitor now (carried there, or the layout changed): sizes, fonts and pictures
+ * follow that monitor's scale, and the clock its refresh rate */
+void dpi_follow(int force) {
+    float x = g_single ? g_mx : g_work.right - 1.0f, y = g_single ? g_my : g_work.top + 1.0f;
+    double d = dpi_at(x, y);
+    g_hz = hz_at(x, y);
+    if (!force && fabs(d - g_dpi) < 0.01) return;
+    double k = d / g_dpi;
+    g_dpi = d;
+    g_col_w = (int)(g_col_dip * g_dpi);
+    g_cw = (int)(fmax(200 * g_dpi, fmin(320 * g_dpi, g_col_w)) * g_scale);
+    for (int i = 0; i < g_orbit_n; i++) { /* the small cores keep their place round the main one, at the new scale */
+        Orbit *o = &g_orbit[i];
+        o->px = g_mx + (o->px - g_mx) * (float)k; o->py = g_my + (o->py - g_my) * (float)k;
+        o->vx *= (float)k; o->vy *= (float)k; o->w *= (float)k;
+    }
+    if (g_label_font) { DeleteObject(g_label_font); g_label_font = NULL; }
+    if (k != 1) { void tip_rescale(void); tip_rescale(); }
+    pics_invalidate();
+}
+
 static void draw(double now) {
     Room *room = shown_room();
     int n = room->n > MAX_SESS ? MAX_SESS : room->n;
+    dpi_follow(0);
+    g_need_hz = 0;
+    for (int i = 0; i < n; i++) { double r = core_rate(&room->s[i], now, 1.5f); if (r > g_need_hz) g_need_hz = r; }
+    g_orbiting = g_single && g_others && n > 1;
     if (g_single) {
         pane_hide(&g_cluster); /* (only the owner of the clock, the hotkey and the menus now) */
         draw_single(room, n, now);
@@ -1304,6 +1421,11 @@ static void tip_fonts(void) {
 }
 
 static int input_open(void);
+/* Typing a reply: the pointer is hidden over the panel's windows until the mouse moves. It usually rests on the core
+ * just double-clicked, whose window gets new pictures many times a second; each made Windows show the pointer again
+ * while "hide pointer while typing" hid it on every key: it blinked. */
+static int g_hide_pointer;
+static POINT g_hide_at;
 static void input_close(void);
 
 /* ---- the reply as Markdown, laid out like Claude Code's terminal: a line of the reply is a line here, a
@@ -1827,11 +1949,18 @@ static void tip_show(const Session *s, RECT beside, int cy, double now) {
     if (x < wa.left) x = wa.left;
     if (y + h + below > wa.bottom) y = wa.bottom - h - below;
     if (y < wa.top) y = wa.top;
-    SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    int rad = (int)(12 * g_dpi);
-    SetWindowRgn(g_tip, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
+    static RECT was;
+    RECT now_rc = {x, y, x + w, y + h};
+    if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_tip)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
+        SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (w != was.right - was.left || h != was.bottom - was.top) {
+            int rad = (int)(12 * g_dpi);
+            SetWindowRgn(g_tip, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
+        }
+        was = now_rc;
+        if (input_open()) input_place();
+    }
     InvalidateRect(g_tip, NULL, FALSE);
-    if (input_open()) input_place();
 }
 
 /* ---- typing a reply: a double-click on a core opens a line under its box. Enter sends it to the session
@@ -1854,6 +1983,7 @@ static HFONT g_input_tf, g_input_sf;  /* the reply box's title and hint line */
 static wchar_t g_attach[MAX_ATTACH][600]; /* as WSL paths */
 static wchar_t g_attach_name[MAX_ATTACH][120];
 static int g_attach_id[MAX_ATTACH];       /* the N of its token */
+static int g_restyle;               /* pasted or a token put in: the whole text is styled again once */
 static int g_attach_n, g_attach_next;     /* g_attach_next: the last N given out for this reply */
 
 static int input_open(void) { return g_input && IsWindowVisible(g_input); }
@@ -1887,9 +2017,15 @@ static void input_place(void) {
     int gap = (int)(6 * g_dpi), h = input_h(), y = tr.bottom + gap; /* the box made room for it */
     RECT wa = work_at((tr.left + tr.right) / 2.0f, (tr.top + tr.bottom) / 2.0f); /* the text box's monitor */
     if (y + h > wa.bottom) y = wa.bottom - h;
-    SetWindowPos(g_input, HWND_TOPMOST, tr.left, y, tr.right - tr.left, h, SWP_NOACTIVATE);
-    int rad = (int)(12 * g_dpi);
-    SetWindowRgn(g_input, CreateRoundRectRgn(0, 0, tr.right - tr.left + 1, h + 1, rad, rad), TRUE);
+    RECT ir;
+    GetWindowRect(g_input, &ir);
+    int w = tr.right - tr.left;
+    if (ir.left == tr.left && ir.top == y && ir.right - ir.left == w && ir.bottom - ir.top == h) return; /* already there: no repaint */
+    SetWindowPos(g_input, HWND_TOPMOST, tr.left, y, w, h, SWP_NOACTIVATE);
+    if (ir.right - ir.left != w || ir.bottom - ir.top != h) {
+        int rad = (int)(12 * g_dpi);
+        SetWindowRgn(g_input, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
+    }
 }
 
 /* "\\wsl.localhost\Ubuntu\home\..." → "Ubuntu"; 0 if the events file is not in WSL */
@@ -1973,7 +2109,13 @@ static void edit_style(void) {
     cf.crTextColor = text_body();
     cf.bCharSet = DEFAULT_CHARSET;
     wcsncpy(cf.szFaceName, mono_face(), LF_FACESIZE - 1);
-    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+    static COLORREF set_col = (COLORREF)-1;
+    static HWND set_for;
+    static wchar_t set_face[LF_FACESIZE];
+    if (set_for != g_edit || set_col != cf.crTextColor || wcscmp(set_face, cf.szFaceName)) { /* (each time repaints all the text: a blink per key) */
+        SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+        set_for = g_edit; set_col = cf.crTextColor; wcscpy(set_face, cf.szFaceName);
+    }
     const wchar_t *cj = cjk_face();
     wchar_t *t = edit_text();
     int n = (int)wcslen(t), any = 0;
@@ -2007,6 +2149,7 @@ static void insert_tokens(int first) {
     if (a > 0 && t[a - 1] != L' ' && t[a - 1] != L'\n') wcscat(ins, L" ");
     for (int k = first; k < g_attach_n; k++) { wchar_t tok[32]; swprintf(tok, 32, L"[Image #%d] ", g_attach_id[k]); wcscat(ins, tok); }
     free(t);
+    g_restyle = 1;
     SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)ins);
     InvalidateRect(g_input, NULL, FALSE);
 }
@@ -2096,10 +2239,33 @@ static void type_enter(void) {
     SendInput(2, in, sizeof in[0]);
 }
 
+/* The face for what is typed next, set before it arrives: Chinese (through the IME) in its own face, anything else
+ * in the terminal's. Re-styling the whole text after each key moved the selection run by run, which hid and showed
+ * the caret and repainted the text: a blink per key. */
+static void edit_typing_face(HWND w, int cjk) {
+    const wchar_t *cj = cjk_face();
+    if (cjk && !cj) return;
+    CHARFORMAT2W cf;
+    memset(&cf, 0, sizeof cf);
+    cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_FACE | CFM_CHARSET | CFM_COLOR; /* the colour too: the control's own default is black */
+    cf.crTextColor = text_body();
+    wcsncpy(cf.szFaceName, cjk ? cj : mono_face(), LF_FACESIZE - 1);
+    cf.bCharSet = cjk ? CHINESEBIG5_CHARSET : DEFAULT_CHARSET;
+    SendMessageW(w, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+}
 static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_PAINT) g_stat_paint_edit++;
+    if (msg == WM_CHAR || msg == WM_IME_COMPOSITION) {
+        if (!g_hide_pointer) { GetCursorPos(&g_hide_at); g_hide_pointer = 1; }
+        SetCursor(NULL);
+    }
+    if (msg == WM_SETCURSOR && g_hide_pointer) { SetCursor(NULL); return TRUE; }
+    if (msg == WM_IME_STARTCOMPOSITION) edit_typing_face(w, 1);
+    if (msg == WM_CHAR && wp >= 32) edit_typing_face(w, cjk_char((wchar_t)wp));
     if (msg == WM_KEYDOWN && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) { send_reply(); return 0; }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
-    if (msg == WM_PASTE) { SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
+    if (msg == WM_PASTE) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
     if (msg == WM_CHAR && (wp == L'\r' || wp == 27) && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
     if (msg == WM_MOUSEWHEEL) { tip_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
@@ -2109,6 +2275,7 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 static void add_drop(HDROP d, int finish);
 
 static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_PAINT) g_stat_paint_card++;
     switch (msg) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { /* like the text box: dark card, the session's colour down the left edge, a rounded field */
@@ -2164,11 +2331,23 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DROPFILES: { int first = g_attach_n; add_drop((HDROP)wp, 1); insert_tokens(first); return 0; }
-    case WM_COMMAND: if (HIWORD(wp) == EN_CHANGE) { edit_style(); InvalidateRect(w, NULL, FALSE); } return 0; /* CJK in its face; the hint lists the images still in the text */
+    case WM_COMMAND: /* after a paste or a token, every run in its face again; the hint (images still in the text) only when there are images */
+        if (HIWORD(wp) == EN_CHANGE) {
+            if (g_restyle) { g_restyle = 0; edit_style(); }
+            if (g_attach_n) InvalidateRect(w, NULL, FALSE);
+        }
+        return 0;
     case WM_ACTIVATE: if (LOWORD(wp) == WA_INACTIVE) input_close(); return 0; /* clicked elsewhere */
     case WM_SETFOCUS: SetFocus(g_edit); return 0;
     }
     return DefWindowProc(w, msg, wp, lp);
+}
+
+void tip_rescale(void) {
+    if (g_tip_tf) { DeleteObject(g_tip_tf); DeleteObject(g_tip_bf); DeleteObject(g_tip_mf); g_tip_tf = g_tip_bf = g_tip_mf = NULL; }
+    for (int i = 0; i < F_COUNT; i++) if (g_tip_xf[i]) { DeleteObject(g_tip_xf[i]); g_tip_xf[i] = NULL; }
+    free(g_tip_title); g_tip_title = NULL;
+    tip_hide();
 }
 
 void input_refont(void) {
@@ -2250,7 +2429,7 @@ static void input_open_for(const Session *s) {
         ic.lpszClassName = L"VigilInput";
         RegisterClass(&ic);
         g_input_bg = CreateSolidBrush(RGB(36, 38, 46));
-        g_input = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, L"VigilInput", L"Vigil reply", WS_POPUP, 0, 0, 10, 10, NULL, NULL, ic.hInstance, NULL);
+        g_input = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, L"VigilInput", L"Vigil reply", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 10, 10, NULL, NULL, ic.hInstance, NULL);
         LoadLibraryW(L"Msftedit.dll"); /* a rich edit: a font per run, so Chinese can have its own face, as in the terminal */
         g_edit = CreateWindowEx(0, MSFTEDIT_CLASS, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 10, 10, g_input, NULL, ic.hInstance, NULL);
         SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, tip_field());
@@ -2404,6 +2583,10 @@ static void set_transparent(Pane *p, int transparent) {
 static void track_mouse(double now) {
     POINT scr;
     cursor_pos(&scr);
+    if (g_hide_pointer && (!input_open() || abs(scr.x - g_hide_at.x) + abs(scr.y - g_hide_at.y) > 2)) { /* the mouse moved, or the reply closed: back */
+        g_hide_pointer = 0;
+        POINT p; GetCursorPos(&p); SetCursorPos(p.x, p.y); /* (makes Windows ask the window under it for its pointer again) */
+    }
     Room *room = shown_room();
     float lx = 0, ly = 0;
     int hit = core_at(scr, &lx, &ly), down = down_index();
@@ -2423,7 +2606,10 @@ static void track_mouse(double now) {
         int k = index_of(g_input_sid);
         if (k < 0) { input_close(); return; }
         RECT r = g_core_rc[k], beside = r;
-        if (g_single && k == g_top) beside = g_cluster_rc;
+        if (g_single) { /* beside the whole cluster, level with its middle: a small core drifts, and a box that */
+            beside = g_cluster_rc; /* followed it was moved, and the line typed in repainted, on every beat */
+            r = beside;
+        }
         tip_show(&room->s[k], beside, (r.top + r.bottom) / 2, now);
         return;
     }
@@ -2677,19 +2863,23 @@ static void write_stats(double now) {
     snprintf(path, sizeof path, "%s\\panel-stats.txt", g_dir[0] ? g_dir : ".");
     FILE *f = fopen(path, "a");
     if (f) {
-        fprintf(f, "%.0f  ticks %.1f/s  pictures %.1f/s  window updates %.1f/s  tick %.2f ms avg\n", now, g_stat_tick / span,
-                g_stat_pic / span, g_stat_push / span, g_stat_tick ? g_stat_ms / g_stat_tick : 0);
+        double n = g_stat_tick > 1 ? g_stat_tick - 1 : 1, mean = g_stat_gap / n, sd = sqrt(fmax(0, g_stat_gap2 / n - mean * mean));
+        fprintf(f, "%.0f  ticks %.1f/s  pictures %.1f/s  window updates %.1f/s  tick %.2f ms avg  gap %.1f ms (sd %.1f, max %.1f)  late %ld  monitor %.0f Hz, scale %.2f  smooth %s  pictures %.0f ms/s  windows %.0f ms/s  reply paints %.1f/s field, %.1f/s card\n",
+                now, g_stat_tick / span, g_stat_pic / span, g_stat_push / span, g_stat_tick ? g_stat_ms / g_stat_tick : 0,
+                mean, sd, g_stat_gap_max, g_stat_late, g_hz, g_dpi, SMOOTH_NAME[g_smooth], g_stat_render_ms / span, g_stat_push_ms / span, g_stat_paint_edit / span, g_stat_paint_card / span);
         fclose(f);
     }
-    g_stat_tick = g_stat_pic = g_stat_push = 0;
-    g_stat_ms = 0;
+    g_stat_tick = g_stat_pic = g_stat_push = g_stat_late = g_stat_paint_edit = g_stat_paint_card = 0;
+    g_stat_ms = g_stat_gap = g_stat_gap2 = g_stat_gap_max = g_stat_render_ms = g_stat_push_ms = 0;
     g_stat_since = now;
 }
 
 static void settings_tick(double now);
 static int set_open(void);
 
+static double tick_interval(void);
 static void tick(void) {
+    g_tick_n++;
     LARGE_INTEGER q0, q1, qf;
     QueryPerformanceCounter(&q0);
     double now = wall();
@@ -2713,6 +2903,14 @@ static void tick(void) {
     settings_tick(now);
     if (g_stats) {
         QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&qf);
+        double t0 = q0.QuadPart * 1000.0 / qf.QuadPart, want = tick_interval() * 1000;
+        if (g_stat_last > 0 && g_stat_tick > 0) {
+            double gap = t0 - g_stat_last;
+            g_stat_gap += gap; g_stat_gap2 += gap * gap;
+            if (gap > g_stat_gap_max) g_stat_gap_max = gap;
+            if (gap > want * 1.5) g_stat_late++;
+        }
+        g_stat_last = t0;
         g_stat_tick++;
         g_stat_ms += (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart;
         write_stats(now);
@@ -2721,7 +2919,12 @@ static void tick(void) {
 
 /* how long until the next tick: 60 a second while the mouse is on a core or something is in the hand, else 30 (pictures keep their
  * own, lower rates; a tick that has nothing due costs next to nothing) */
-static double tick_interval(void) { return g_moving || g_dragging || g_carrying || g_down_sid[0] || g_hover >= 0 || set_open() ? 1.0 / 60 : 1.0 / 30; }
+static double tick_interval(void) {
+    double hand = smooth_now()->hand, mv = hand <= 0 || hand > g_hz ? g_hz : hand < 30 ? 30 : hand; /* moving windows: smooth, aligned to the display */
+    if (g_moving || g_dragging || g_carrying || g_down_sid[0] || g_hover >= 0 || set_open() || g_orbiting) return 1.0 / mv;
+    double need = g_need_hz < 10 ? 10 : g_need_hz;
+    return 1.0 / (need > g_hz ? g_hz : need);
+}
 
 /* ---- the Settings window: a dark card (design "A, calm cards"), a live preview across the top (the cluster with
  * its gravity: drag the core; the state it shows; a reply in the text box's font), three cards below (Look, Motion,
@@ -2761,7 +2964,7 @@ static float g_pv_zoom = 1;         /* the wheel over the preview: 1 to 3 times,
 static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
 
-static float S(float v) { return v * (float)g_dpi; }
+static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
 static int SW_W(void) { return (int)lroundf(S(880)); }
 static int SW_H(void) { return (int)lroundf(S(830)); }
@@ -2934,6 +3137,13 @@ static void hit(float x0, float y0, float x1, float y1, int kind, int row, int v
 }
 static int is_hot(int kind, int row, int val) { return g_hot >= 0 && g_hits[g_hot].kind == kind && g_hits[g_hot].row == row && g_hits[g_hot].val == val; }
 
+static void set_fonts(void);
+/* the Settings window moved to a monitor with another scale: its fonts are made again at that size */
+static void set_refont(void) {
+    HFONT *f[7] = {&g_sf_title, &g_sf_card, &g_sf_text, &g_sf_label, &g_sf_small, &g_sf_aa, &g_sf_aam};
+    for (int i = 0; i < 7; i++) if (*f[i]) { DeleteObject(*f[i]); *f[i] = NULL; }
+    g_sl_dirty = 1;
+}
 static void set_fonts(void) {
     if (g_sf_title) return;
     const wchar_t *ui = L"Segoe UI";
@@ -3152,9 +3362,9 @@ static void set_build(void) {
     TEXTMETRICW tm;
     HDC mdc = pn->mem;
     SelectObject(mdc, g_tip_tf); GetTextMetricsW(mdc, &tm);
-    float th = tm.tmHeight / (float)g_dpi;
+    float th = tm.tmHeight / (float)g_sdpi;
     SelectObject(mdc, g_tip_bf); GetTextMetricsW(mdc, &tm);
-    float bh = tm.tmHeight / (float)g_dpi, sh = fminf(112, 22 + th + 6 + bh * 2);
+    float bh = tm.tmHeight / (float)g_sdpi, sh = fminf(112, 22 + th + 6 + bh * 2);
     box(pn, 580, 74, 840, 74 + sh, 10, tip_bgx(), 0, 0);
     box(pn, 580, 74, 583, 74 + sh, 1.5f, S_OR, 0, 0);
     tx(594, 84, 832, 84 + th, L"vigil · Done", g_tip_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
@@ -3431,6 +3641,14 @@ static void set_close(void) { if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag =
 static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     switch (msg) {
+    case WM_DPICHANGED: { /* dragged onto a monitor with another scale: drawn again at that scale */
+        const RECT *r = (const RECT *)lp;
+        g_sdpi = LOWORD(wp) / 96.0;
+        set_refont();
+        SetWindowPos(w, NULL, r->left, r->top, SW_W(), SW_H(), SWP_NOZORDER | SWP_NOACTIVATE);
+        settings_tick(wall());
+        return 0;
+    }
     case WM_NCHITTEST: { /* the top strip moves the window */
         POINT c = p; ScreenToClient(w, &c);
         if (c.y < (int)S(52) && c.x < (int)S(816) && set_hit_at(c) < 0) return HTCAPTION;
@@ -3527,6 +3745,8 @@ static void settings_open(void) {
         POINT c; GetCursorPos(&c); /* the monitor the pointer is on, or the one --on names */
         if (g_on_set) c = g_on;
         RECT wa = work_at((float)c.x, (float)c.y);
+        double d = dpi_at((float)c.x, (float)c.y);
+        if (fabs(d - g_sdpi) > 0.01) { g_sdpi = d; set_refont(); }
         int W = SW_W(), H = SW_H();
         SetWindowPos(g_set, HWND_TOPMOST, (wa.left + wa.right - W) / 2, (wa.top + wa.bottom - H) / 2, W, H, SWP_NOACTIVATE);
         for (int i = 1; i < 4; i++) g_pv_ob[i].init = 0;
@@ -3810,6 +4030,11 @@ static void menu(HWND w, int core) {
     swprintf(buf, 80, L"%ls%ls", g_single ? L"All cores" : L"Single core", hk);
     AppendMenu(m, MF_STRING, ID_MODE, buf);
     AppendMenu(m, MF_SEPARATOR, 0, NULL);
+    HMENU sm = CreatePopupMenu(); /* until the Settings window has its Performance page */
+    static const wchar_t *SM_TEXT[SM_N] = {L"Saver (least CPU)", L"Balanced", L"Smooth (up to 60)", L"Max (display rate)", L"Custom"};
+    for (int i = 0; i < SM_N; i++)
+        if (i != SM_CUSTOM || g_smooth == SM_CUSTOM) AppendMenu(sm, MF_STRING | (g_smooth == i ? MF_CHECKED : 0), ID_SMOOTH + i, SM_TEXT[i]);
+    AppendMenu(m, MF_POPUP, (UINT_PTR)sm, L"Smoothness");
     AppendMenu(m, MF_STRING, ID_SETTINGS, L"Settings...");
     AppendMenu(m, MF_SEPARATOR, 0, NULL);
     AppendMenu(m, MF_STRING, ID_QUIT, L"Quit Vigil");
@@ -3831,6 +4056,7 @@ static void menu(HWND w, int core) {
         return;
     }
     if (id == ID_SETTINGS) { settings_open(); return; }
+    if (id >= ID_SMOOTH && id < ID_SMOOTH + SM_N) { g_smooth = id - ID_SMOOTH; settings_save(); pics_invalidate(); return; }
     if (id >= ID_PIN && id < ID_PIN + MAX_SESS && id - ID_PIN < g_room.n) {
         snprintf(g_focus, sizeof g_focus, "%s", g_room.s[id - ID_PIN].sid);
         g_focus_pinned = 1;
@@ -3940,6 +4166,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SETCURSOR: /* moved by the mouse: the core is the pointer */
+        if (g_hide_pointer) { SetCursor(NULL); return TRUE; } /* typing a reply */
         if (g_moving) {
             POINT m; GetCursorPos(&m);
             if (g_carrying || abs(m.x - g_move_mouse.x) + abs(m.y - g_move_mouse.y) >= DRAG_AFTER) { SetCursor(NULL); return TRUE; }
@@ -3970,6 +4197,39 @@ static int parse_hotkey(const char *spec, UINT *mods, UINT *vk) {
     return *vk && *mods;
 }
 
+/* How long until the next tick, in 100 ns units. Ticks land just after the display's refresh (DWM's vblank), every
+ * k refreshes for the rate wanted: on a 60 Hz screen 60 a second while anything moves, 30, 20 or 15 otherwise, so
+ * a moving core steps the same distance each frame. Each due time follows the last, so the tick's own work no longer
+ * stretches the interval; a tick that ran late joins the grid again at the next refresh. */
+static LONGLONG next_wait(void) {
+    static LONGLONG next;
+    LARGE_INTEGER now, qf;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&qf);
+    double period = qf.QuadPart / (g_hz > 1 ? g_hz : 60);
+    LONGLONG vblank = now.QuadPart;
+    DWM_TIMING_INFO ti;
+    memset(&ti, 0, sizeof ti);
+    ti.cbSize = sizeof ti;
+    /* DWM's clock is the main display's; on a monitor with another refresh rate keep that monitor's period instead */
+    if (DwmGetCompositionTimingInfo(NULL, &ti) == S_OK && ti.qpcRefreshPeriod > 0 && fabs(qf.QuadPart / (double)ti.qpcRefreshPeriod - g_hz) < 1.5) {
+        period = (double)ti.qpcRefreshPeriod;
+        vblank = (LONGLONG)ti.qpcVBlank;
+    }
+    int k = (int)(tick_interval() * qf.QuadPart / period + 0.5);
+    if (k < 1) k = 1;
+    LONGLONG step = (LONGLONG)(k * period), at = next + step;
+    if (!next || at <= now.QuadPart || at > now.QuadPart + step + (LONGLONG)period) { /* first, late, or the rate changed: back onto the grid */
+        double since = (double)(now.QuadPart - vblank);
+        LONGLONG n = (LONGLONG)ceil(since / period + 0.05);
+        at = vblank + (LONGLONG)(n * period) + qf.QuadPart / 1000; /* 1 ms after a refresh */
+        if (at <= now.QuadPart) at += (LONGLONG)period;
+    }
+    next = at;
+    g_tick_hz = qf.QuadPart / (double)step;
+    return (at - now.QuadPart) * 10000000LL / qf.QuadPart;
+}
+
 static void usage(void) {
     MessageBoxA(NULL,
         "vigil-panel.exe: Vigil's floating panel for Windows\n\n"
@@ -3980,7 +4240,8 @@ static void usage(void) {
         "  --no-others          single core: only the session in focus, no small cores around it\n"
         "  --mode-hotkey KEYS   switch single core / all cores (default ctrl+alt+c; none = off)\n"
         "  --shape NAME         dodeca | bucky | geo2 (default) | geo3\n"
-        "  --width PIXELS       column width (default: 17% of the screen)\n"
+        "  --width PIXELS       column width, in 96-dpi pixels (default: 17% of the primary screen)\n"
+        "  --smooth NAME        how often cores are redrawn: saver, balanced (default), smooth or max\n"
         "  --font-size N        tooltip text size (default 14)\n"
         "  --glow X  --core X   glow strength, inner core radius (default 1, 0.35)\n"
         "  --frame NAME         focus frame: segments (default) | lens | polar | diamond | lock | orbits | none\n"
@@ -4015,6 +4276,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--mode-hotkey") && v) { snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", v); i++; }
         else if (!strcmp(a, "--shape") && v) { snprintf(g_shape_name, sizeof g_shape_name, "%s", v); i++; }
         else if (!strcmp(a, "--width") && v) { g_width = atoi(v); i++; }
+        else if (!strcmp(a, "--smooth") && v) {
+            int k = -1;
+            for (int j = 0; j < SM_CUSTOM; j++) if (!strcmp(v, SMOOTH_NAME[j])) k = j;
+            if (k < 0) { usage(); return 2; }
+            g_smooth = k; i++;
+        }
         else if (!strcmp(a, "--font-size") && v) { g_font = (float)atof(v); if (g_font < 8) g_font = 8; i++; }
         else if (!strcmp(a, "--glow") && v) { g_glow = (float)atof(v); i++; }
         else if (!strcmp(a, "--core") && v) { g_core = (float)atof(v); i++; }
@@ -4043,10 +4310,10 @@ int main(int argc, char **argv) {
     settings_load(); /* the Settings menu's choices win over the options */
     if (!shape_make(&g_shape, g_shape_name)) { snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name); }
     pos_read();
-    SetProcessDPIAware();
-    HDC screen = GetDC(NULL);
-    g_dpi = GetDeviceCaps(screen, LOGPIXELSX) / 96.0;
-    ReleaseDC(NULL, screen);
+    { /* per-monitor DPI aware (v2): every monitor at its own scale, nothing stretched by Windows */
+        BOOL(WINAPI * aware)(HANDLE) = (void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
+        if (!aware || !aware((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */)) SetProcessDPIAware();
+    }
 
     double now = wall();
     g_last = g_last_draw = now;
@@ -4061,8 +4328,11 @@ int main(int argc, char **argv) {
     }
 
     SystemParametersInfo(SPI_GETWORKAREA, 0, &g_work, 0);
-    int sw = g_work.right - g_work.left;
-    g_col_w = g_width > 0 ? g_width : (int)fmax(220 * g_dpi, fmin(360 * g_dpi, sw * 0.17));
+    g_dpi = g_sdpi = dpi_at(g_work.left + 1.0f, g_work.top + 1.0f);
+    g_hz = hz_at(g_work.left + 1.0f, g_work.top + 1.0f);
+    double sw = (g_work.right - g_work.left) / g_dpi; /* the primary screen's width in 96-dpi units */
+    g_col_dip = g_width > 0 ? g_width : fmax(220, fmin(360, sw * 0.17));
+    g_col_w = (int)(g_col_dip * g_dpi);
     WNDCLASS wc;
     memset(&wc, 0, sizeof wc);
     wc.style = CS_DBLCLKS;
@@ -4101,7 +4371,7 @@ int main(int argc, char **argv) {
         tick();
         if (g_set_shot[0] && wall() > shot_at) { settings_shot(g_set_shot); break; }
         LARGE_INTEGER due;
-        due.QuadPart = -(LONGLONG)(tick_interval() * 1e7);
+        due.QuadPart = -next_wait();
         SetWaitableTimer(clock, &due, 0, NULL, NULL, FALSE);
         for (;;) { /* messages until the timer fires */
             DWORD r = MsgWaitForMultipleObjectsEx(1, &clock, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);

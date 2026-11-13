@@ -31,6 +31,9 @@ static Event g_ev[1024];
 static Demo g_demo;
 static int g_demo_n, g_exit_empty, g_always, g_fit_pane, g_all_spaces;
 static float g_glow = 1.0f, g_core = 0.35f;
+static int g_smooth = SM_BALANCED; // Settings > Smoothness: how often the pictures are made (SMOOTH in session.c)
+// the panel's clock: 30 a second as before, 60 for Smooth and Max
+static double clock_hz(void) { return g_smooth == SM_SMOOTH || g_smooth == SM_MAX ? 60 : 30; }
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
@@ -112,16 +115,18 @@ static void pointer_visible(BOOL on) {
 
 // The right-click Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings.json (600) and
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
-static struct { int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away; } g_launch;
+static struct { int voice, auto_speak, summarize, confirm_send, labels_hover, smooth; CGFloat font_size; float glow; char shape[16], frame[16]; double away; } g_launch;
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
+    g_launch.smooth = g_smooth;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
 }
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
+    g_smooth = g_launch.smooth;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
@@ -139,6 +144,9 @@ static void load_settings(void) {
     if ((n = j[@"fontSize"]) && n.doubleValue >= 6) g_font_size = n.doubleValue;
     if ((n = j[@"glow"]) && n.floatValue > 0) g_glow = n.floatValue;
     if ((n = j[@"away"])) g_away_after = n.doubleValue;
+    NSString *sm = j[@"smooth"];
+    if ([sm isKindOfClass:[NSString class]])
+        for (int i = 0; i < SM_CUSTOM; i++) if (!strcmp(sm.UTF8String, SMOOTH_NAME[i])) g_smooth = i;
     NSString *fr = j[@"frame"];
     if ([fr isKindOfClass:[NSString class]] && fr.length < sizeof g_frame) snprintf(g_frame, sizeof g_frame, "%s", fr.UTF8String);
     NSString *sh = j[@"shape"];
@@ -147,7 +155,8 @@ static void load_settings(void) {
 static void save_settings(void) {
     NSDictionary *j = @{@"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
-                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame)};
+                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
+                        @"smooth": @(SMOOTH_NAME[g_smooth])};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
     [[NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted error:NULL] writeToFile:settings_file() atomically:YES];
@@ -731,7 +740,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             if (!_img[i] || now >= _due[i] || (int)CGImageGetWidth(_img[i]) != px) {
                 if (_img[i]) CGImageRelease(_img[i]);
                 _img[i] = [self newPictureOf:s pixels:px now:now];
-                double rate = session_rate(s, now, 20) * (i == fi ? 1.5 : 0.75); // the small ones need fewer frames
+                double rate = panel_rate(s, now, &SMOOTH[g_smooth], clock_hz()) * (i == fi ? 1 : 0.5); // the small ones need fewer frames
                 _due[i] = now + 1.0 / rate - 0.01;
             }
             _core[i] = at[i];
@@ -818,7 +827,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         if (!_img[i] || now >= _due[i] || (int)CGImageGetWidth(_img[i]) != px) {
             if (_img[i]) CGImageRelease(_img[i]);
             _img[i] = [self newPictureOf:s pixels:px now:now];
-            double rate = session_rate(s, now, 20) * 1.5; // drawing here is cheap, so run a little faster than in a terminal
+            double rate = panel_rate(s, now, &SMOOTH[g_smooth], clock_hz()); // Balanced: 1.5 times a terminal's rate
             _due[i] = now + 1.0 / rate - 0.01;
         }
         _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
@@ -971,13 +980,17 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 
     double now = wall();
     self.last = self.emptySince = now;
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+    self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / clock_hz() target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     // also while a menu is open or a drag is tracked (other run loop modes), so the cores never freeze
     [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
 
 - (void)tick:(NSTimer *)timer {
-    (void)timer;
+    if (fabs(timer.timeInterval - 1.0 / clock_hz()) > 1e-6) { // Smoothness changed: a clock at the new rate
+        [timer invalidate];
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / clock_hz() target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+        [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
+    }
     double now = wall();
     float dt = (float)(now - self.last);
     if (dt > 0.25f) dt = 0.25f;
@@ -1524,6 +1537,8 @@ static int rush_n;
     [self choice:m title:@"Labels" key:@"labels" current:@(g_labels_hover != 0) options:@[@[@"Always", @NO], @[@"On hover", @YES]]];
     [self choice:m title:@"Text size" key:@"fontSize" current:@(g_font_size)
          options:@[@[@"Small (12)", @12.0], @[@"Medium (16)", @16.0], @[@"Large (20)", @20.0], @[@"Extra large (24)", @24.0]]];
+    [self choice:m title:@"Smoothness" key:@"smooth" current:@(g_smooth)
+         options:@[@[@"Saver (least CPU)", @(SM_SAVER)], @[@"Balanced", @(SM_BALANCED)], @[@"Smooth (60 a second)", @(SM_SMOOTH)], @[@"Max", @(SM_MAX)]]];
     [self choice:m title:@"Glow" key:@"glow" current:@(g_glow) options:@[@[@"Soft", @0.7f], @[@"Normal", @1.0f], @[@"Bright", @1.4f]]];
     [self choice:m title:@"Shape" key:@"shape" current:@(g_shape_name)
          options:@[@[@"Dodecahedron", @"dodeca"], @[@"Buckyball", @"bucky"], @[@"Geodesic", @"geo2"], @[@"Fine geodesic", @"geo3"]]];
@@ -1568,6 +1583,7 @@ static int rush_n;
     else if ([key isEqualToString:@"summarize"]) { if ([v boolValue] && !g_voice) [self setVoice:YES]; g_summarize_claude = [v boolValue] && g_claude; }
     else if ([key isEqualToString:@"confirmSend"]) g_confirm_send = [v boolValue];
     else if ([key isEqualToString:@"glow"]) g_glow = [v floatValue];
+    else if ([key isEqualToString:@"smooth"]) g_smooth = [v intValue]; // the clock follows at the next tick
     else if ([key isEqualToString:@"away"]) g_away_after = [v doubleValue];
     else if ([key isEqualToString:@"frame"]) snprintf(g_frame, sizeof g_frame, "%s", [v UTF8String]);
     else if ([key isEqualToString:@"shape"]) {
@@ -1830,6 +1846,7 @@ static void usage(void) {
          "  --all-spaces       follow you to every Space instead of staying in the one it was opened in\n"
          "  --always           with --all-spaces: stay visible when iTerm2 is not the app in front\n"
          "  --glow X  --core X  --events PATH   as in vigil\n"
+         "  --smooth NAME      how often cores are redrawn: saver | balanced (default) | smooth | max\n"
          "  --hotkey KEYS      push-to-talk to the session that needs you most (default ctrl+opt+v; none = off)\n"
          "  --away SECONDS     no input this long = away: cores go to standby (default 120; 0 = never)\n"
          "  --voice            spoken reports (click a core) and push-to-talk (hold a core, or the hotkey)\n"
@@ -1868,6 +1885,12 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--font") && v) { g_font_name = [NSString stringWithUTF8String:v] ?: @"Monaco"; i++; }
             else if (!strcmp(a, "--font-size") && v) { g_font_size = atof(v); i++; }
             else if (!strcmp(a, "--glow") && v) { g_glow = (float)atof(v); i++; }
+            else if (!strcmp(a, "--smooth") && v) {
+                int k = -1;
+                for (int j = 0; j < SM_CUSTOM; j++) if (!strcmp(v, SMOOTH_NAME[j])) k = j;
+                if (k < 0) { usage(); return 2; }
+                g_smooth = k; i++;
+            }
             else if (!strcmp(a, "--core") && v) { g_core = (float)atof(v); i++; }
             else if (!strcmp(a, "--events") && v) { events = v; i++; }
             else if (!strcmp(a, "--tty") && v) { g_tty_path = v; i++; }
