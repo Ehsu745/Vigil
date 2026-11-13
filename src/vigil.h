@@ -195,7 +195,8 @@ typedef struct { float d[MAX_T]; unsigned char marks[MAX_T]; int k, flags; } Blo
 typedef struct { float shut_at[MAX_T], ax[3]; int k, flags; } ZipRS;
 typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int size, gone; } Piece; /* a piece blown out, falling back */
 typedef struct { float r, a, s; } Dust;
-typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow; int banged, beat_ring, moving; } HoleRS; /* grow: 0..1, the void after it has swallowed the shell */
+enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_RIPPLE, HA_PRECESS, HA_N }; /* the black hole's own actions */
+typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow, act_p; int banged, beat_ring, moving, act; double act_at, act_next; } HoleRS; /* act: playing now (HA_*), from act_at; act_p its random lean */ /* grow: 0..1, the void after it has swallowed the shell */
 typedef struct { double next; } DecodingRS;
 typedef struct { int flinched; } CrazyRS;
 typedef union {

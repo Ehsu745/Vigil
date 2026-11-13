@@ -1316,7 +1316,13 @@ static void r_hole(Ctx *c) {
     /* all swallowed: the void grows to 0.85 of the shell (back again as it wakes) */
     float gt = !alive && wake < .5f ? 1.0f : 0.0f;
     H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 1.1f : 4)));
-    H->moving = alive || wake > .01f || fabsf(gt - H->grow) > .01f; /* only the void and its dust left: motion_busy lets it rest */
+    /* grown: now and then one of its own actions (jets, feeding on a star, a flare, a ripple, a slow precession) */
+    static const float ACT_DUR[HA_N] = {0, 2.6f, 4.5f, 2.2f, 2.8f, 6};
+    if (H->grow < .95f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
+    else if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
+    else if (H->act == HA_NONE && c->now >= H->act_next) { H->act = 1 + (int)(mrand(s) * (HA_N - 1)) % (HA_N - 1); H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
+    else if (H->act != HA_NONE && c->now - H->act_at > ACT_DUR[H->act]) { H->act = HA_NONE; H->act_next = c->now + rnd(s, 6, 14); }
+    H->moving = 1; /* it never rests: the disc flows, hot spots orbit, the glow flickers (drawn in render.c) */
 }
 
 /* the panel's own states */
@@ -1376,7 +1382,7 @@ const Routine ROUTINES[RT_N] = {
     [RT_BLOOM] = {"Bloom", ST_CHEER, 4.6f, 0, r_bloom, NULL, "Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals."},
     [RT_ZIP] = {"Zip", ST_CHEER, 3.7f, 0, r_zip, NULL, "A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain."},
     [RT_DORMANT] = {"Dormant", ST_SLEEP, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s."},
-    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo. Asleep only."},
+    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo; then jets, feeding, flares, ripples. Asleep only."},
     [RT_BROADCAST] = {"Broadcast", ST_SPEAK, 0, 0, r_broadcast, NULL, "The patches rise and fall with the voice, like the bars of an equaliser."},
     [RT_RECEIVER] = {"Receiver", ST_LISTEN, 0, 0, r_receiver, NULL, "Holds still; the patches facing you open with the microphone level."},
     [RT_DECODING] = {"Decoding", ST_TRANSCRIBE, 0, 0, r_decoding, NULL, "Steps 36 degrees at a time while a scan plane reads the rows."},
