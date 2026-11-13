@@ -374,21 +374,53 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
 const char *STATE_TEXT[ST_N] = {"Idle", "Thinking", "Working", "Needs approval", "Done", "Sleeping",
                                "Speaking", "Listening", "Transcribing", "Standby", "Error"};
 
+/* The mouse is doing something to it (pointed at, scrolled, held, carried, shaken): it answers at once. */
+static int mouse_busy(const Session *s, double now) {
+    return s->hover_to > 0 || s->hover > 0.01f || s->held || fabsf(s->spin_x) + fabsf(s->spin_y) > 0.02f
+           || s->carried || s->carry > 0.01f || s->shake > 0.01f
+           || fabsf(s->look_x) + fabsf(s->look_y) > 0.01f
+           || fabsf(s->jig_x) + fabsf(s->jig_y) + 0.05f * (fabsf(s->jig_vx) + fabsf(s->jig_vy)) > 0.003f
+           || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for;
+}
+
 /* How often a session's picture is redrawn. A calm session moves slowly, so it needs far fewer frames.
  * A state change gets the full rate for a moment so the colours ease smoothly. */
 double session_rate(const Session *s, double now, int fps) {
     static const double RATE[ST_N] = {[ST_IDLE] = 10, [ST_THINK] = 15, [ST_WORK] = 20, [ST_WAIT] = 20, [ST_CHEER] = 20, [ST_SLEEP] = 4,
                                       [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20};
-    int busy = s->hover_to > 0 || s->hover > 0.01f || s->held || fabsf(s->spin_x) + fabsf(s->spin_y) > 0.02f
-               || s->carried || s->carry > 0.01f || s->shake > 0.01f || s->whim
-               || fabsf(s->look_x) + fabsf(s->look_y) > 0.01f
-               || fabsf(s->jig_x) + fabsf(s->jig_y) + 0.05f * (fabsf(s->jig_vx) + fabsf(s->jig_vy)) > 0.003f
-               || now - s->ring_at < TOUCH.ring_for || now - s->vol_at < TOUCH.vol_for /* the mouse is doing something */
-               || motion_busy(s, now);
+    int busy = mouse_busy(s, now) || s->whim || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
     if (s->mo.hole > 0.01f && r < 10) r = 10; /* the black hole's dust keeps turning */
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
     return r < fps ? r : fps;
+}
+
+/* The panels' Smoothness (Settings > Performance): pictures a second for each kind of moment, 0 meaning the
+ * refresh rate of the display the core is on. Balanced is what the panels did before there was a choice
+ * (session_rate × 1.5, and 60 in the hand). */
+const Smooth SMOOTH[SM_CUSTOM] = {
+    [SM_SAVER] = {.idle = 10, .think = 15, .busy = 20, .rest = 4, .hand = 30},
+    [SM_BALANCED] = {.idle = 15, .think = 22.5f, .busy = 30, .rest = 6, .hand = 60},
+    [SM_SMOOTH] = {.idle = 30, .think = 45, .busy = 60, .rest = 10, .hand = 60},
+    [SM_MAX] = {.idle = 0, .think = 0, .busy = 0, .rest = 15, .hand = 0},
+};
+const char *SMOOTH_NAME[SM_N] = {"saver", "balanced", "smooth", "max", "custom"};
+
+double panel_rate(const Session *s, double now, const Smooth *sm, double hz) {
+    if (hz < 1) hz = 60;
+    float r;
+    if (s->hover_to > 0 || s->held || s->carried) r = sm->hand; /* in the hand */
+    else if (mouse_busy(s, now) || s->whim || motion_busy(s, now) || now - s->state_t < 1.5) r = sm->busy;
+    else switch (session_shown(s, now)) {
+        case ST_IDLE: r = sm->idle; break;
+        case ST_THINK: r = sm->think; break;
+        case ST_SLEEP: case ST_STANDBY: r = sm->rest; break;
+        default: r = sm->busy;
+    }
+    double out = r <= 0 ? hz : r;
+    if (s->mo.hole > 0.01f && out < 15) out = 15; /* the black hole's dust keeps turning */
+    if (s->unread && out < 18) out = 18;         /* the flash of an unread reply */
+    return out > hz ? hz : out < 2 ? 2 : out;
 }
 
 /* ---- the built-in demo -------------------------------------------------------------------------- */

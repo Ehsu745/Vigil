@@ -123,21 +123,54 @@ static float glitch_val(double t) {
 }
 
 /* the core: a wide halo, a white-hot body, and a solid inner disc out to 2/3 of the core radius */
-static void draw_core(Canvas *c, Clip cl, float ox, float oy, float rc, const Look *L, float inten) {
-    float hR = rc * L->hr, bR = rc * 1.5f, sR = rc * 2.0f / 3.0f, lit = inten > 1 ? 1 : inten;
+/* light round the shell, so its outline is not a hard edge: rising from nothing at half the shell's radius R to its full
+ * at R, then easing to nothing at rmax (inside the picture). Smooth everywhere, so it shows no ring of its own. Painted
+ * by draw_core in the same pass as the core's glow (they cover nearly the same pixels). */
+typedef struct { float ox, oy, r2max, in2; Col col; float lut[512]; } Aura;
+enum { AURA_N = 512 };
+static void aura_make(Aura *au, float ox, float oy, float R, float rmax, Col col, float a) {
+    au->ox = ox; au->oy = oy; au->col = col;
+    if (a <= 0.001f || rmax <= R) { au->r2max = au->in2 = 0; return; }
+    au->r2max = rmax * rmax; au->in2 = 0.25f * R * R;
+    for (int i = 0; i < AURA_N; i++) { /* the curve against (r / rmax)² */
+        float r = rmax * sqrtf((float)i / (AURA_N - 1)), v;
+        if (r <= 0.5f * R) v = 0;
+        else if (r < R) { float t = (r - 0.5f * R) / (0.5f * R); v = t * t * (3 - 2 * t); }
+        else { float t = (r - R) / (rmax - R), w = 1 - t; v = w * w * w * (w * (w * 6 - 15) + 10); } /* smootherstep down */
+        au->lut[i] = a * v;
+    }
+}
+
+/* the core's glow against (r / its radius)², one smooth curve close to the old 0.5 / 0.22 at 0.14 / 0.06 at 0.4, reaching
+ * nothing at the edge with no kink (straight pieces left faint rings where they met); a table, since it is read for
+ * every pixel of a large disc */
+enum { HALO_N = 1024 };
+static float HALO_LUT[HALO_N];
+static void halo_lut(void) {
+    if (HALO_LUT[0] > 0) return;
+    for (int i = 0; i < HALO_N; i++) {
+        float u = sqrtf((float)i / (HALO_N - 1)), e = 1 - u * u * u * u;
+        HALO_LUT[i] = 0.5f * expf(-5.6f * u) * e * e;
+    }
+}
+static void draw_core(Canvas *c, Clip cl, float ox, float oy, float rc, const Look *L, float inten, const Aura *au) {
+    halo_lut();
+    float hR = rc * L->hr, bR = rc * 1.5f, sR = rc * 2.0f / 3.0f, lit = inten > 1 ? 1 : inten, hR2 = hR * hR;
     float solid = 0.08f + 0.5f * (1 - lit); /* a brightness floor: brighter than the shell when dim, nearly nothing when bright */
-    int bx0 = (int)floorf(ox - hR), bx1 = (int)ceilf(ox + hR) + 1, by0 = (int)floorf(oy - hR), by1 = (int)ceilf(oy + hR) + 1;
+    float ar = sqrtf(au->r2max); /* the aura round the shell, in the same pass */
+    int bx0 = (int)floorf(fminf(ox - hR, au->ox - ar)), bx1 = (int)ceilf(fmaxf(ox + hR, au->ox + ar)) + 1;
+    int by0 = (int)floorf(fminf(oy - hR, au->oy - ar)), by1 = (int)ceilf(fmaxf(oy + hR, au->oy + ar)) + 1;
     if (bx0 < cl.x0) bx0 = cl.x0;
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
-        float dx = x + 0.5f - ox, dy = y + 0.5f - oy, r = sqrtf(dx * dx + dy * dy);
-        if (r >= hR) continue;
-        float u = r / hR, a;
-        if (u < 0.14f) a = 0.5f + (0.22f - 0.5f) * u / 0.14f;
-        else if (u < 0.4f) a = 0.22f + (0.06f - 0.22f) * (u - 0.14f) / 0.26f;
-        else a = 0.06f * (1 - (u - 0.4f) / 0.6f);
+        float ax = x + 0.5f - au->ox, ay = y + 0.5f - au->oy, a2 = ax * ax + ay * ay;
+        if (a2 < au->r2max && a2 > au->in2) add(c, x, y, au->col, au->lut[(int)(a2 / au->r2max * (AURA_N - 1))]);
+        float dx = x + 0.5f - ox, dy = y + 0.5f - oy, d2 = dx * dx + dy * dy;
+        if (d2 >= hR2) continue;
+        float r = sqrtf(d2);
+        float u = r / hR, a = HALO_LUT[(int)(u * u * (HALO_N - 1))];
         add(c, x, y, L->halo, a * inten);
         if (r < bR) {
             float w = r / bR;
@@ -410,7 +443,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     if (!label || th - label_h < 12) label_h = 0;
     float m = fminf((float)tw, (float)(th - label_h));
     float unit = m * SHELL_FRAC / CIRCUM * ws, k = m / 600.0f;
-    float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit;
+    float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit + c->sx, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit + c->sy;
 
     /* the core */
     float gl = fminf(1, L->glitch + s->shake * s->shake * CARRY.shake_glitch + (motion_crazy(s, now) ? 0.9f : 0));
@@ -422,7 +455,17 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice * (1 + CARRY.lift * s->carry) * wb * mb * (1 - 0.85f * s->mo.hole) + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
     float gx = ox + (s->look_x * HOVER.gaze + s->jig_x) * CIRCUM * unit, gy = oy + (s->look_y * HOVER.gaze + s->jig_y) * CIRCUM * unit; /* the core looks at the cursor, and sloshes when carried */
-    draw_core(c, cl, gx, gy, rc, L, inten);
+    /* small cores (satellites, under ~150 px as shown): their many edges crowd into a few pixels and pile up into a
+     * bright disc with a hard rim at the outline, so each edge and node is fainter the smaller the core */
+    float shown_k = k / (c->ss > 1 ? c->ss : 1), crowd = shown_k < 0.25f ? 0.35f + 0.65f * shown_k / 0.25f : 1;
+    int crazy = motion_crazy(s, now);
+    float strobe = crazy ? (sinf((float)t * 90.0f) > 0 ? 0.45f : 1.0f) : 1.0f; /* going crazy: the threads stutter */
+    Aura au;
+    { /* to just inside the picture's edge, so nothing is cut off there either */
+        float half = fminf((float)tw, (float)(th - label_h)) * 0.5f - 1, R = CIRCUM * unit * (s->mo.scale > 0 ? s->mo.scale : 1);
+        aura_make(&au, ox, oy, R, fminf(R * 1.36f, half), L->eh, 0.07f * L->edge * strobe * crowd * glow);
+    }
+    draw_core(c, cl, gx, gy, rc, L, inten, &au);
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
     if (wave > 0 && wave <= 1) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
@@ -463,10 +506,9 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         }
         project(&P, base[i], q[i]);
     }
-    int crazy = motion_crazy(s, now), any = 0;
+    int any = 0;
     for (int t = 0; t < sh->nt && !any; t++) any = moved(mo, t);
-    float strobe = crazy ? (sinf((float)t * 90.0f) > 0 ? 0.45f : 1.0f) : 1.0f; /* going crazy: the threads stutter */
-    float edge = L->edge * strobe, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
+    float edge = L->edge * strobe * crowd, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
     float Rpx = CIRCUM * P.unit, ks = Rpx / 156.0f; /* the mock's pixel sizes, for a shell of this size */
     draw_trail(c, cl, &P, mo, k);
     draw_sparks(c, cl, &P, mo, L, ks);
