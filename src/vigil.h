@@ -195,7 +195,8 @@ typedef struct { float d[MAX_T]; unsigned char marks[MAX_T]; int k, flags; } Blo
 typedef struct { float shut_at[MAX_T], ax[3]; int k, flags; } ZipRS;
 typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int size, gone; } Piece; /* a piece blown out, falling back */
 typedef struct { float r, a, s; } Dust;
-typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow; int banged, beat_ring, moving; } HoleRS; /* grow: 0..1, the void after it has swallowed the shell */
+enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_RIPPLE, HA_PRECESS, HA_N }; /* the black hole's own actions */
+typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow, act_p, flow; int banged, beat_ring, moving, act; double act_at, act_next, press_seen, defend_seen; } HoleRS; /* flow: the disc's turn (faster while pointed at) */ /* act: playing now (HA_*), from act_at; act_p its random lean */ /* grow: 0..1, the void after it has swallowed the shell */
 typedef struct { double next; } DecodingRS;
 typedef struct { int flinched; } CrazyRS;
 typedef union {
@@ -246,6 +247,7 @@ typedef struct {
     float squash, sq_ax[3];              /* the shell pressed flat along sq_ax (Compressor) */
     float bright;                        /* core and threads brighter by this factor (1 = as usual) */
     float hole;                          /* the black hole's void, 0..1 (its dust and stars: rs.hole) */
+    int hole_want;                       /* a black-hole action asked for (hole_play), played once it has grown */
     float trail[MAX_TRAIL][3]; int ntrail; Col trail_col; /* a light trail over the shell, model space */
     Spark spark[MAX_SPARK];
     MRing ring[MAX_RING];
@@ -319,6 +321,11 @@ int motion_busy(const Session *s, double now);            /* moving on its own: 
 int motion_crazy(const Session *s, double now);           /* in the middle of a crazy fit (glitching) */
 void motion_play(Session *s, int rt);                     /* run routine rt now, in place of the one running (the Settings preview) */
 void whim_play(Session *s, int w, double now);            /* play action w now, wherever the core is (the Settings preview) */
+/* the black hole's own actions (HA_*): which it may play now and then (bit HA_x; the panels' Settings change it), their
+ * names and what they do; hole_play plays one now (it becomes a black hole first if it is not one) */
+extern uint32_t HOLE_ACTS;
+extern const char *HOLE_ACT_NAME[HA_N], *HOLE_ACT_ABOUT[HA_N];
+void hole_play(Session *s, int a);
 /* small 3x3 matrix helpers, row-major (shared with render.c) */
 void m3_mul(float *r, const float *a, const float *b);    /* r = a * b (r may be a or b) */
 void m3_rot(float *r, const float *axis, float angle);    /* about a unit axis */

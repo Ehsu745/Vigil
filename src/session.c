@@ -233,7 +233,7 @@ static float whim_weight(int w, int asleep) {
 
 static void whims(Session *s, int shown, double now, float dt) {
     uint32_t acts = MOTION_MAP[shown].act & ~1u; /* the actions this state may play (MOTION_MAP) */
-    int free = (acts || s->whim_forced) && !s->carried && !s->held && s->hover_to <= 0 && s->hover < 0.05f;
+    int free = (acts || s->whim_forced) && !s->carried && !s->held && s->hover_to <= 0 && s->hover < 0.05f && s->mo.hole < 0.3f; /* (a black hole has its own) */
     if (s->whim_forced) free = 1;
     ease(&s->whim_k, free ? 1.0f : 0.0f, 1.0f - expf(-dt * (free ? 2.0f : 8.0f)));
     int asleep = shown == ST_SLEEP;

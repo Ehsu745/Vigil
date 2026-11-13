@@ -1210,7 +1210,7 @@ static void r_dormant(Ctx *c) {
 /* Black hole: a big bang, then the fall. For 2.6 s the core gathers power (a quickening heartbeat, matter and
  * light drawn in, the shell squeezed and trembling, crackling, an implosion), then bursts: the patches are blown
  * apart, small ones fastest, each tumbling; at once the pull takes over and they fall back on a tightening spiral,
- * twisting harder and stretching thin, and are swallowed at the edge of the void with a violet flash. Then only
+ * twisting harder and stretching thin, and are swallowed at the edge of the void with a golden flash. Then only
  * the void and its dust disc. Pointing at it wakes it: the pieces come home. */
 static void hole_enter(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; HoleRS *H = &m->rs.hole;
@@ -1238,11 +1238,24 @@ static void hole_enter(Ctx *c) {
     for (int i = 0; i < NSTAR; i++) { H->star[i][0] = rnd(s, -1.6f, 1.6f); H->star[i][1] = rnd(s, -1.6f, 1.6f); H->star[i][2] = rnd(s, .6f, 1.4f); H->star[i][3] = rnd(s, 0, TAU); }
     H->moving = 1;
 }
+uint32_t HOLE_ACTS = (1u << HA_N) - 2; /* all of them */
+const char *HOLE_ACT_NAME[HA_N] = {"", "Jets", "Feeding", "Flare", "Ripple", "Precession"};
+const char *HOLE_ACT_ABOUT[HA_N] = {"", "Two beams shoot out of its poles, across the disc, and fade.",
+    "A star drifts in, is stretched into a streak as it spirals down, and vanishes into the shadow; the ring flashes.",
+    "A burst of gas falls in: the disc and its halo blaze, then settle.",
+    "A gravity wave: a faint ring spreads outward and the disc's lanes shiver as it passes.",
+    "The disc slowly tips to show its face, then settles back."};
+void hole_play(Session *s, int a) {
+    if (a <= HA_NONE || a >= HA_N) return;
+    if (s->mo.rt != RT_HOLE || s->mo.hole < 0.5f) motion_play(s, RT_HOLE); /* not a black hole yet: it becomes one, then plays it */
+    s->mo.hole_want = a;
+}
 static void r_hole(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M; Want *w = c->w; HoleRS *H = &m->rs.hole;
     const float BANG = 2.6f;
     float dt = fminf(.05f, c->dt), e = c->e;
-    H->wake += ((s->hover > .3f ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4));
+    H->wake += ((s->lock_to > .5f ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4)); /* resting on it (lock-on) wakes it; a glance does not */
+    H->flow += dt * (1 + 1.2f * s->hover + 0.8f * s->carry); /* the disc turns faster while pointed at or carried */
     for (int i = 0; i < NDUST; i++) { /* the dust disc turns, and slowly falls in */
         Dust *d = &H->dust[i];
         d->a += dt * 1.15f / powf(d->r, 1.5f); d->r -= dt * .05f / d->r;
@@ -1301,8 +1314,8 @@ static void r_hole(Ctx *c) {
         m3_mul(A, Sx, Rt);
         if (falling && pc->r < .16f && !pc->gone) { /* swallowed at the edge */
             pc->gone = 1;
-            spark_at(s, M, pos, .35f, 8 + 4.0f * pc->size, RGB255(195, 145, 255));
-            for (int k = 0; k < 4; k++) { float q2[3], v[3]; for (int q = 0; q < 3; q++) q2[q] = pos[q] + rnd(s, -.2f, .2f); float sp = rnd(s, 3, 5); for (int q = 0; q < 3; q++) v[q] = -q2[q] * sp; spark(s, M, q2, v, .2f, 0, 0, 1, SK_STREAK, 0, RGB255(215, 180, 255)); }
+            spark_at(s, M, pos, .35f, 8 + 4.0f * pc->size, RGB255(255, 196, 120));
+            for (int k = 0; k < 4; k++) { float q2[3], v[3]; for (int q = 0; q < 3; q++) q2[q] = pos[q] + rnd(s, -.2f, .2f); float sp = rnd(s, 3, 5); for (int q = 0; q < 3; q++) v[q] = -q2[q] * sp; spark(s, M, q2, v, .2f, 0, 0, 1, SK_STREAK, 0, RGB255(255, 222, 170)); }
         }
         alive += !pc->gone;
         float off[3], ac[3];
@@ -1316,7 +1329,24 @@ static void r_hole(Ctx *c) {
     /* all swallowed: the void grows to 0.85 of the shell (back again as it wakes) */
     float gt = !alive && wake < .5f ? 1.0f : 0.0f;
     H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 1.1f : 4)));
-    H->moving = alive || wake > .01f || fabsf(gt - H->grow) > .01f; /* only the void and its dust left: motion_busy lets it rest */
+    /* grown: now and then one of its own actions (jets, feeding on a star, a flare, a ripple, a slow precession) */
+    static const float ACT_DUR[HA_N] = {0, 2.6f, 4.5f, 2.2f, 2.8f, 6};
+    if (H->grow > .5f && wake < .1f && s->press_at > H->press_seen + 1e-6) { /* a press: matter dropped in from that side */
+        H->press_seen = s->press_at; H->act = HA_FEED; H->act_at = c->now; H->act_p = atan2f(s->press_y, s->press_x) / 3.14159265f;
+    }
+    if (H->grow > .5f && wake < .1f && s->defend_at > H->defend_seen + 1e-6) { H->defend_seen = s->defend_at; H->act = HA_JETS; H->act_at = c->now; H->act_p = 0; } /* rushed at: it fires its jets */
+    if (H->grow < .5f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
+    else if (H->grow < .95f) H->act_next = 0;
+    else if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
+    else if (m->hole_want && H->grow > .9f) { H->act = m->hole_want; H->act_at = c->now; H->act_p = rnd(s, -1, 1); m->hole_want = 0; } /* asked for (the Settings preview) */
+    else if (H->act == HA_NONE && c->now >= H->act_next) { /* one of those it may play (HOLE_ACTS), at random */
+        int on[HA_N], n = 0;
+        for (int a = 1; a < HA_N; a++) if (HOLE_ACTS >> a & 1) on[n++] = a;
+        if (n) { H->act = on[(int)(mrand(s) * n) % n]; H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
+        else H->act_next = c->now + 5;
+    }
+    else if (H->act != HA_NONE && c->now - H->act_at > ACT_DUR[H->act]) { H->act = HA_NONE; H->act_next = c->now + rnd(s, 6, 14); }
+    H->moving = 1; /* it never rests: the disc flows, hot spots orbit, the glow flickers (drawn in render.c) */
 }
 
 /* the panel's own states */
@@ -1375,8 +1405,8 @@ const Routine ROUTINES[RT_N] = {
     [RT_UNLOCK] = {"Unlock", ST_CHEER, 0, 0, r_unlock, NULL, "Charges, bursts open with spikes and a ring, turns a full circle, then locks back click by click."},
     [RT_BLOOM] = {"Bloom", ST_CHEER, 4.6f, 0, r_bloom, NULL, "Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals."},
     [RT_ZIP] = {"Zip", ST_CHEER, 3.7f, 0, r_zip, NULL, "A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain."},
-    [RT_DORMANT] = {"Dormant", ST_SLEEP, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s."},
-    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a void with a violet dust disc. Asleep only."},
+    [RT_DORMANT] = {"Dormant", -1, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s. (Asleep: off by default, the black hole is)"},
+    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo; then jets, feeding, flares, ripples. Asleep only."},
     [RT_BROADCAST] = {"Broadcast", ST_SPEAK, 0, 0, r_broadcast, NULL, "The patches rise and fall with the voice, like the bars of an equaliser."},
     [RT_RECEIVER] = {"Receiver", ST_LISTEN, 0, 0, r_receiver, NULL, "Holds still; the patches facing you open with the microphone level."},
     [RT_DECODING] = {"Decoding", ST_TRANSCRIBE, 0, 0, r_decoding, NULL, "Steps 36 degrees at a time while a scan plane reads the rows."},
