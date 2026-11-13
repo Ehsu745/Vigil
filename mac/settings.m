@@ -45,7 +45,13 @@ static NSDictionary<NSString *, NSArray *> *choices(void) {
 static NSArray *SHAPE_NAMES, *FRAME_NAMES, *WHEEL_NAMES, *TIP_BG_NAMES, *TEXT_NAMES, *AWAY_TEXT, *PV_NAMES;
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
 
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
+// the Motions page: Claude Code's states, then the panel's own
+static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR};
+static NSString *const MOT_STATE_NAMES[ST_N] = {@"Idle", @"Thinking", @"Working", @"Needs you", @"Done", @"Asleep",
+                                              @"Speaking", @"Listening", @"Transcribing", @"Away", @"Error"};
+static NSString *state_name(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return @"?"; }
+static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
 @interface Hit : NSObject
 @property NSRect r;
 @property int kind, val, n;
@@ -59,6 +65,7 @@ enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE };
 @interface PreviewView : NSView
 @property(weak) id<SettingsHost> host;
 @property int state;          // what the main core shows
+- (Session *)main;            // the main core's session (the Motions page plays a routine or an action on it)
 @property double lockUntil;   // the focus frame shows until then (a frame was just picked or is pointed at)
 @property float zoom;
 - (void)tick:(double)now;
@@ -89,6 +96,11 @@ enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE };
     self.state = ST_THINK;
 }
 - (float)num:(NSString *)k { return [[self.host setting:k] floatValue]; }
+- (Session *)main { [self setup:[[NSDate date] timeIntervalSince1970]]; return &_room.s[0]; }
+// a routine just switched off for a state makes way at once
+- (void)dropRoutine:(int)rt state:(int)st {
+    for (int i = 0; i < _room.n; i++) if (_room.s[i].mo.rt == rt && _room.s[i].mo.routine == st) _room.s[i].mo.routine = -1;
+}
 
 - (void)tick:(double)now {
     [self setup:now];
@@ -210,6 +222,8 @@ enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE };
 @property(strong) Hit *hot, *sliding;
 @property BOOL closeArmed;
 @property(copy) NSString *picking; // the colour row the colour panel is open for: tipCustom or textCustom
+@property int tab;                 // 0 General, 1 Motions
+@property double noteUntil;        // "a state needs at least one routine" shows until then
 @end
 
 @interface SettingsWindow ()
@@ -366,8 +380,15 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     box(0, 0, WW, WH, 18, S_BG, 0x2A2A30, 1);
     // title, tabs (one for now), close
     tx(28, 14, 400, 50, @"Settings", ui(18, NSFontWeightSemibold), S_TEXT, 0, NO);
-    box(132, 19, 220, 45, 13, S_CHIP, S_OR, 1.5);
-    tx(132, 19, 220, 45, @"General", ui(12.5, NSFontWeightRegular), 0xFFFFFF, 1, NO);
+    NSArray *tabs = @[@"General", @"Motions"];
+    for (int i = 0; i < 2; i++) { // the open page ringed in orange like a chosen chip, the other plain text
+        CGFloat a = 132 + i * 96;
+        BOOL on = self.tab == i, hot = [self isHot:K_TAB key:nil val:i];
+        if (on) box(a, 19, a + 88, 45, 13, S_CHIP, S_OR, 1.5);
+        else if (hot) box(a, 19, a + 88, 45, 13, S_CHIP_HOT, 0, 0);
+        tx(a, 19, a + 88, 45, tabs[i], ui(12.5, NSFontWeightRegular), on ? 0xFFFFFF : hot ? S_TEXT : 0xC4C7CF, 1, NO);
+        [self hit:a :19 :a + 88 :45 kind:K_TAB key:nil val:i];
+    }
     BOOL ch = [self isHot:K_CLOSE key:nil val:0];
     box(824, 16, 856, 48, 10, ch ? S_CLOSE_HOT : 0x26262B, 0, 0);
     NSBezierPath *x = [NSBezierPath bezierPath];
@@ -401,7 +422,13 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         [self hit:x0 :y0 :x1 :y0 + 28 kind:K_STATE key:nil val:i];
     }
 
+    if (self.tab == 1) [self motionsPage]; else [self generalPage];
+    [self foot];
+}
+
+- (void)generalPage {
     // the cards
+    unsigned bg = [self tipBg];
     const CGFloat y0 = 304, cw = (832 - 32) / 3.0, y1 = 770;
     CGFloat cx[3];
     NSArray *titles = @[@"Look", @"Motion", @"Replies"];
@@ -524,6 +551,10 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         [self toggle:a :807 :a + vw key:vk[i] title:vt[i] sub:nil enabled:en];
     }
 
+}
+
+- (void)foot {
+    NSFont *label = ui(12.5, NSFontWeightRegular);
     // the foot: rest time, reset
     int aw = [self current:@"away"];
     tx(28, 856, 120, 888, @"Rest after", label, S_MUTED, 0, NO);
@@ -535,6 +566,108 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     BOOL can = [self.host settingsSaved], hr = [self isHot:K_RESET key:nil val:0];
     tx(640, 856, 856, 888, @"Reset to defaults", label, can ? (hr ? 0xFFB877 : S_OR) : 0x55555E, 2, NO);
     if (can) [self hit:740 :860 :856 :884 kind:K_RESET key:nil val:0];
+}
+
+// ---- the Motions page: which routines and actions each state may use (MOTION_MAP), with a preview of each ----
+- (void)motionChip:(CGFloat)x0 :(CGFloat)y0 :(CGFloat)x1 :(CGFloat)y1 on:(BOOL)on off:(BOOL)dis row:(NSString *)row id:(int)i name:(const char *)name {
+    BOOL hot = [self isHot:K_MTOG key:row val:i], hp = [self isHot:K_MPLAY key:row val:i];
+    box(x0, y0, x1, y1, (y1 - y0) / 2, hot ? S_CHIP_HOT : S_TILE, on ? S_OR : (hot ? S_EDGE_HOT : S_EDGE), on ? 1.5 : 1);
+    tx(x0 + 10, y0, x1 - 19, y1, @(name) ?: @"?", ui(11.5, NSFontWeightRegular), on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, 0, NO);
+    CGFloat cy = (y0 + y1) / 2;
+    NSBezierPath *t = [NSBezierPath bezierPath]; // the play button
+    [t moveToPoint:NSMakePoint(x1 - 16, cy - 4)]; [t lineToPoint:NSMakePoint(x1 - 16, cy + 4)]; [t lineToPoint:NSMakePoint(x1 - 9, cy)]; [t closePath];
+    [hex_color(hp ? S_OR : S_MUTED) setFill]; [t fill];
+    if (!dis) [self hit:x0 :y0 :x1 - 22 :y1 kind:K_MTOG key:row val:i];
+    [self hit:x1 - 23 :y0 :x1 :y1 kind:K_MPLAY key:row val:i];
+}
+
+- (void)motionsPage {
+    const CGFloat y0 = 304, l = 40, r = 840;
+    int st = self.preview.state;
+    NSFont *label = ui(12.5, NSFontWeightRegular), *small = ui(11.5, NSFontWeightRegular);
+    box(24, y0, 856, 846, 16, S_CARD, 0, 0);
+    tx(l, y0 + 12, 300, y0 + 34, @"Motions", ui(15, NSFontWeightSemibold), S_TEXT, 0, NO);
+    tx(300, y0 + 12, r, y0 + 34, @"Each state picks one of its routines every time it starts; actions play now and then.", small, S_MUTED, 2, NO);
+    // the states: Claude Code's, then the panel's own
+    NSArray *rowname = @[@"Claude Code", @"Panel"];
+    for (int rw = 0; rw < 2; rw++) {
+        CGFloat y = y0 + 42 + rw * 32;
+        tx(l, y, l + 86, y + 26, rowname[rw], small, S_MUTED, 0, NO);
+        int n = rw ? 5 : 6, first = rw ? 6 : 0;
+        CGFloat cw = (r - (l + 88) - 5 * 6) / 6;
+        for (int i = 0; i < n; i++) {
+            int sti = MOT_STATES[first + i];
+            BOOL on = sti == st, hot = [self isHot:K_MSTATE key:nil val:sti];
+            CGFloat a = l + 88 + i * (cw + 6);
+            box(a, y, a + cw, y + 26, 13, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5 : 0);
+            Col h = LOOKS[sti].halo;
+            [[NSColor colorWithSRGBRed:h.r green:h.g blue:h.b alpha:1] setFill];
+            [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(a + 9.5, y + 9.5, 7, 7)] fill];
+            tx(a + 22, y, a + cw - 6, y + 26, MOT_STATE_NAMES[first + i], label, on ? S_TEXT : S_CHIP_TXT, 0, NO);
+            [self hit:a :y :a + cw :y + 26 kind:K_MSTATE key:nil val:sti];
+        }
+    }
+    // the routines: this state's own first
+    const MotionMap *mm = &MOTION_MAP[st];
+    tx(l, y0 + 108, r, y0 + 128, [NSString stringWithFormat:@"Routines for %@", state_name(st)], label, S_LABEL, 0, NO);
+    tx(l, y0 + 108, r, y0 + 128, @"click to use it here   ▶ to watch it", small, S_MUTED, 2, NO);
+    int order[RT_N], n = 0;
+    for (int pass = 0; pass < 2; pass++) for (int i = 1; i < RT_N; i++) if ((ROUTINES[i].home == st) == !pass) order[n++] = i;
+    CGFloat cw = (r - l - 6 * 5) / 7;
+    for (int i = 0; i < n; i++) {
+        int id = order[i];
+        CGFloat a = l + (i % 7) * (cw + 5), y = y0 + 132 + (i / 7) * 31;
+        [self motionChip:a :y :a + cw :y + 26 on:(mm->rt >> id) & 1 off:id == RT_HOLE && st != ST_SLEEP row:@"rt" id:id name:ROUTINES[id].name];
+    }
+    // the actions
+    CGFloat ya = y0 + 132 + ((n + 6) / 7) * 31 + 6;
+    tx(l, ya, r, ya + 20, [NSString stringWithFormat:@"Actions for %@", state_name(st)], label, S_LABEL, 0, NO);
+    CGFloat aw = (r - l - 7 * 5) / 8;
+    for (int w = 1; w < W_N; w++) {
+        CGFloat a = l + ((w - 1) % 8) * (aw + 5), y = ya + 24 + ((w - 1) / 8) * 31;
+        [self motionChip:a :y :a + aw :y + 26 on:(mm->act >> w) & 1 off:NO row:@"act" id:w name:WHIMS[w].name];
+    }
+    // what the chip under the pointer does, or a summary
+    CGFloat yd = ya + 24 + ((W_N - 2) / 8 + 1) * 31 + 2;
+    Hit *h = self.hot;
+    if (h && (h.kind == K_MTOG || h.kind == K_MPLAY)) {
+        NSString *line;
+        if ([h.key isEqualToString:@"rt"]) {
+            NSString *home = ROUTINES[h.val].home != st && ROUTINES[h.val].home >= 0 ? [NSString stringWithFormat:@" (made for %@)", state_name(ROUTINES[h.val].home)] : @"";
+            line = [NSString stringWithFormat:@"%s%@: %s", ROUTINES[h.val].name, home, ROUTINES[h.val].about ?: ""];
+        } else line = [NSString stringWithFormat:@"%s: %s", WHIMS[h.val].name, WHIMS[h.val].about ?: ""];
+        tx(l, yd, r, yd + 40, line, small, S_LABEL, 0, YES);
+    } else if ([[NSDate date] timeIntervalSince1970] < self.noteUntil) {
+        tx(l, yd, r, yd + 20, @"A state needs at least one routine: switch another on first.", small, 0xFFB877, 0, NO);
+    } else {
+        int nr = bits(mm->rt), na = bits(mm->act);
+        tx(l, yd, r, yd + 20, [NSString stringWithFormat:@"%@ uses %d routine%@ and %d action%@. Changes apply the next time a state starts, and are kept.",
+                               state_name(st), nr, nr == 1 ? @"" : @"s", na, na == 1 ? @"" : @"s"], small, S_MUTED, 0, NO);
+    }
+}
+
+- (void)motionPlay:(NSString *)row id:(int)i {
+    Session *m = [self.preview main];
+    if ([row isEqualToString:@"rt"]) motion_play(m, i);
+    else whim_play(m, i, [[NSDate date] timeIntervalSince1970]);
+    self.preview.lockUntil = 0;
+}
+- (void)motionToggle:(NSString *)row id:(int)i {
+    int st = self.preview.state;
+    BOOL rt = [row isEqualToString:@"rt"];
+    uint32_t *set = rt ? &MOTION_MAP[st].rt : &MOTION_MAP[st].act, bit = 1u << i;
+    if (rt && (*set & bit) && bits(*set) == 1) { // a state needs a routine
+        self.noteUntil = [[NSDate date] timeIntervalSince1970] + 3;
+        [self setNeedsDisplay:YES];
+        __weak SettingsView *me = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [me setNeedsDisplay:YES]; });
+        return;
+    }
+    *set ^= bit;
+    if (*set & bit) [self motionPlay:row id:i]; // switched on: shown at once
+    else if (rt) [self.preview dropRoutine:i state:st];
+    [self.host motionMapChangedForState:st routineOff:rt && !(*set & bit) ? i : -1];
+    [self setNeedsDisplay:YES];
 }
 
 // ---- the mouse ----
@@ -578,6 +711,10 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     case K_CYCLE: { int i = [self current:h.key]; [self choose:h.key value:choices()[h.key][(i + 1) % 4]]; return; }
     case K_STATE: self.preview.state = PV_STATES[h.val]; [self setNeedsDisplay:YES]; return;
     case K_RESET: [self.host resetSettings]; [self setNeedsDisplay:YES]; return;
+    case K_TAB: self.tab = h.val; self.hot = nil; [self setNeedsDisplay:YES]; return;
+    case K_MSTATE: self.preview.state = h.val; [self setNeedsDisplay:YES]; return;
+    case K_MTOG: [self motionToggle:h.key id:h.val]; return;
+    case K_MPLAY: [self motionPlay:h.key id:h.val]; return;
     }
 }
 - (void)mouseDragged:(NSEvent *)e { if (self.sliding) [self slide:self.sliding at:[self convertPoint:e.locationInWindow fromView:nil].x]; }
@@ -680,6 +817,7 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
 }
 
 - (void)changed { [self.view setNeedsDisplay:YES]; }
+- (void)showPage:(int)page { if (!self.panel) [self build]; self.view.tab = page; [self.view setNeedsDisplay:YES]; }
 
 - (BOOL)saveShot:(NSString *)path {
     if (!self.panel) return NO;

@@ -19,6 +19,8 @@ BOOL hex_light(unsigned rgb); // a light colour, that wants dark text on it
 - (const Shape *)shape;
 - (void)drawFocusFrame:(CGContextRef)ctx rect:(NSRect)r session:(const Session *)s now:(double)now;
 - (BOOL)canSummarize;                                // claude was found, so "Summaries by Claude" can be on
+// the Motions page changed MOTION_MAP for a state: keep it; rt (or -1) is a routine just switched off for it
+- (void)motionMapChangedForState:(int)st routineOff:(int)rt;
 @end
 
 @interface SettingsWindow : NSObject
@@ -27,5 +29,6 @@ BOOL hex_light(unsigned rgb); // a light colour, that wants dark text on it
 - (void)close;
 @property(readonly) BOOL visible;
 - (void)changed;                      // a value changed elsewhere (the menu, a reset): draw again
+- (void)showPage:(int)page;            // 0 General, 1 Motions
 - (BOOL)saveShot:(NSString *)path;    // the window as a PNG (--settings-shot)
 @end

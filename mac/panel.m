@@ -42,7 +42,7 @@ static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_C
 static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
 static int g_wheel_spin;                        // what ⌥-scroll on a core does: roll, roll back, turn, turn back, off
 static const char *g_settings_shot;             // --settings-shot FILE: open the Settings window, save it as a PNG, quit
-static int g_settings_open;                     // --settings: open it at start
+static int g_settings_open;                     // --settings [motions]: open it at start (1 General, 2 Motions)
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
@@ -144,6 +144,7 @@ static void restore_launch(void) {
     g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
     g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
     g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
+    motion_map_default(MOTION_MAP); // the motion map has no launch option: back to its defaults
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
@@ -171,13 +172,26 @@ static void load_settings(void) {
     if ((n = j[@"tipCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_tip_custom = n.unsignedIntValue;
     if ((n = j[@"textCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_text_custom = n.unsignedIntValue;
     if ((n = j[@"wheelSpin"]) && n.intValue >= 0 && n.intValue < 5) g_wheel_spin = n.intValue;
+    NSArray *rt = j[@"mapRoutines"], *act = j[@"mapActions"]; // Settings > Motions, as the Windows panel keeps it
+    motion_map_init();
+    if ([rt isKindOfClass:[NSArray class]] && [act isKindOfClass:[NSArray class]] && rt.count == ST_N && act.count == ST_N) {
+        MotionMap def[ST_N];
+        motion_map_default(def);
+        for (int i = 0; i < ST_N; i++) {
+            uint32_t r = (uint32_t)[rt[i] unsignedIntValue] & ((1u << RT_N) - 1);
+            MOTION_MAP[i].rt = r ? r : def[i].rt; // a state always has a routine
+            MOTION_MAP[i].act = (uint32_t)[act[i] unsignedIntValue] & ((1u << W_N) - 2);
+        }
+    }
     NSString *fr = j[@"frame"];
     if ([fr isKindOfClass:[NSString class]] && fr.length < sizeof g_frame) snprintf(g_frame, sizeof g_frame, "%s", fr.UTF8String);
     NSString *sh = j[@"shape"];
     if ([sh isKindOfClass:[NSString class]] && sh.length < sizeof g_shape_name) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh.UTF8String);
 }
 static void save_settings(void) {
-    NSDictionary *j = @{@"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
+    NSMutableArray *rt = [NSMutableArray array], *act = [NSMutableArray array];
+    for (int i = 0; i < ST_N; i++) { [rt addObject:@(MOTION_MAP[i].rt)]; [act addObject:@(MOTION_MAP[i].act)]; }
+    NSDictionary *j = @{@"mapRoutines": rt, @"mapActions": act, @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
                         @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
                         @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0),
@@ -1049,7 +1063,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
     if (g_reply_shot) [self performSelector:@selector(replyShot) withObject:nil afterDelay:2.0];
-    if (g_settings_open || g_settings_shot) [self openSettings];
+    if (g_settings_open || g_settings_shot) { [self openSettings]; [self.settings showPage:g_settings_open == 2]; }
     if (g_settings_shot) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self.settings saveShot:@(g_settings_shot)];
         [NSApp terminate:nil];
@@ -1744,6 +1758,11 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
 - (const Shape *)shape { return &g_shape; }
 - (void)drawFocusFrame:(CGContextRef)ctx rect:(NSRect)r session:(const Session *)s now:(double)now { focus_frame(ctx, r, s, now); }
 - (BOOL)canSummarize { return g_claude != nil; }
+- (void)motionMapChangedForState:(int)st routineOff:(int)rt {
+    if (rt >= 0) // a routine running on a real core makes way at once
+        for (int i = 0; i < g_room.n; i++) if (g_room.s[i].mo.rt == rt && g_room.s[i].mo.routine == st) g_room.s[i].mo.routine = -1;
+    save_settings();
+}
 
 - (void)applySetting:(NSString *)key value:(id)v {
     if ([key isEqualToString:@"voice"]) [self setVoice:[v boolValue]];
@@ -2042,7 +2061,7 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
-         "  --settings         open the Settings window at start (also right-click > Settings...)\n"
+         "  --settings [motions]  open the Settings window at start, on its Motions page if asked (also right-click > Settings...)\n"
          "  --settings-shot FILE  open the Settings window, save it as a PNG after 2 s and quit\n"
          "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
@@ -2080,7 +2099,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--debug")) g_debug = 1;
             else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
             else if (!strcmp(a, "--settings-shot") && v) { g_settings_shot = v; i++; }
-            else if (!strcmp(a, "--settings")) g_settings_open = 1;
+            else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } }
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;
             else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }
