@@ -19,7 +19,7 @@ ID=local.vigil.panel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cc -O2 -fobjc-arc -Wall -Wextra -o "$APP/Contents/MacOS/vigil-panel" \
-    mac/panel.m mac/speech.m mac/listen.m mac/tip.m mac/reply.m src/events.c src/geom.c src/session.c src/motion.c src/render.c -framework Cocoa -framework UniformTypeIdentifiers -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
+    mac/panel.m mac/speech.m mac/listen.m mac/tip.m mac/reply.m mac/settings.m src/events.c src/geom.c src/session.c src/motion.c src/render.c -framework Cocoa -framework UniformTypeIdentifiers -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
 
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

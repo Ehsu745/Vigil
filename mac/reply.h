@@ -15,7 +15,8 @@
 @property NSWindowCollectionBehavior behavior;
 @property(readonly) NSString *sid; // the session it is open for, nil when closed
 @property(readonly) BOOL open;
-@property(strong, nonatomic) NSColor *accent; // the session's colour, kept the same as its tooltip's
+@property(strong, nonatomic) NSColor *accent;
+@property(strong) NSColor *boxColor, *inkColor; // the text box's colours (Settings > Replies > Colours); nil: the usual // the session's colour, kept the same as its tooltip's
 - (CGFloat)height;
 // opens for a session (or brings it back with what was typed for it last time) and takes the keyboard
 - (void)openFor:(NSString *)sid name:(NSString *)name accent:(NSColor *)accent;

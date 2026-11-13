@@ -24,6 +24,7 @@
 #import "listen.h"
 #import "tip.h"
 #import "reply.h"
+#import "settings.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -33,6 +34,15 @@ static Demo g_demo;
 static int g_demo_n, g_exit_empty, g_always, g_fit_pane, g_all_spaces;
 static const char *g_reply_shot; // --reply-shot FILE: open a reply box, save it with its tooltip as a PNG, quit
 static float g_glow = 1.0f, g_core = 0.35f;
+// Settings window (Look, Motion, Replies): how big the cores are, the small cores, the text box's look
+static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
+static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
+static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
+static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_COLS (5: the custom colour)
+static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
+static int g_wheel_spin;                        // what ⌥-scroll on a core does: roll, roll back, turn, turn back, off
+static const char *g_settings_shot;             // --settings-shot FILE: open the Settings window, save it as a PNG, quit
+static int g_settings_open;                     // --settings: open it at start
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
@@ -114,17 +124,26 @@ static void pointer_visible(BOOL on) {
 
 // The right-click Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings.json (600) and
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
-static struct { int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away; } g_launch;
+static struct {
+    int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
+    float core, scale, tip_size; int others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin; unsigned tip_custom, text_custom;
+} g_launch;
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
+    g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
+    g_launch.tip_middle = g_tip_middle; g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
+    g_launch.tip_custom = g_tip_custom; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
 }
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
+    g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
+    g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
+    g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
@@ -141,6 +160,17 @@ static void load_settings(void) {
     if ((n = j[@"fontSize"]) && n.doubleValue >= 6) g_font_size = n.doubleValue;
     if ((n = j[@"glow"]) && n.floatValue > 0) g_glow = n.floatValue;
     if ((n = j[@"away"])) g_away_after = n.doubleValue;
+    if ((n = j[@"core"]) && n.floatValue > 0.05f && n.floatValue < 0.9f) g_core = n.floatValue;
+    if ((n = j[@"scale"]) && n.floatValue >= 0.5f && n.floatValue <= 2.5f) g_scale = n.floatValue;
+    if ((n = j[@"tipSize"]) && n.floatValue >= 0.5f && n.floatValue <= 2) g_tip_size = n.floatValue;
+    if ((n = j[@"others"])) g_others = n.boolValue;
+    if ((n = j[@"tipMono"])) g_tip_mono = n.boolValue;
+    if ((n = j[@"tipMiddle"])) g_tip_middle = n.boolValue;
+    if ((n = j[@"tipColor"]) && n.intValue >= 0 && n.intValue < 6) g_tip_bg = n.intValue;
+    if ((n = j[@"textColor"]) && n.intValue >= 0 && n.intValue < 6) g_text_col = n.intValue;
+    if ((n = j[@"tipCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_tip_custom = n.unsignedIntValue;
+    if ((n = j[@"textCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_text_custom = n.unsignedIntValue;
+    if ((n = j[@"wheelSpin"]) && n.intValue >= 0 && n.intValue < 5) g_wheel_spin = n.intValue;
     NSString *fr = j[@"frame"];
     if ([fr isKindOfClass:[NSString class]] && fr.length < sizeof g_frame) snprintf(g_frame, sizeof g_frame, "%s", fr.UTF8String);
     NSString *sh = j[@"shape"];
@@ -149,7 +179,10 @@ static void load_settings(void) {
 static void save_settings(void) {
     NSDictionary *j = @{@"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
-                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame)};
+                        @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
+                        @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0),
+                        @"tipMono": @(g_tip_mono != 0), @"tipMiddle": @(g_tip_middle != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
+                        @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin)};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
     [[NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted error:NULL] writeToFile:settings_file() atomically:YES];
@@ -631,10 +664,21 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (menu) [NSMenu popUpContextMenu:menu withEvent:e forView:self];
 }
 
-// the wheel sets this core's speech volume; the shell shows it for a moment
+// the wheel sets this core's speech volume, and the shell shows it for a moment; ⌥ + the wheel spins the core
+// instead (Settings > Motion > ⌥ + scroll on a core), as the wheel alone does on Windows
 - (void)scrollWheel:(NSEvent *)e {
     Session *s = session_by_sid([self sidAt:e]);
     if (!s) return;
+    if (e.modifierFlags & NSEventModifierFlagOption) {
+        float k = (float)e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.12f : 1.2f);
+        switch (g_wheel_spin) {
+        case 0: s->spin_x = fmaxf(-8, fminf(8, s->spin_x - k)); break; // roll: the top goes away as the wheel goes down
+        case 1: s->spin_x = fmaxf(-8, fminf(8, s->spin_x + k)); break;
+        case 2: s->spin_y = fmaxf(-8, fminf(8, s->spin_y - k)); break; // turn: round the upright axis
+        case 3: s->spin_y = fmaxf(-8, fminf(8, s->spin_y + k)); break;
+        }
+        return;
+    }
     float step = (float)e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.004f : 0.05f);
     s->vol = fmaxf(0, fminf(1, s->vol + step));
     s->vol_at = wall();
@@ -725,7 +769,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     float dt = (float)fmin(0.25, now - _lastDraw);
     _lastDraw = now;
     CGFloat big = W * 0.6, rx = W / 2 - 8, ry = rx * 1.15;
-    CGFloat small = n > 1 ? fmin(W * 0.2, 2 * M_PI * rx / (n - 1) * 0.75) : 0;
+    CGFloat small = n > 1 && g_others ? fmin(W * 0.2, 2 * M_PI * rx / (n - 1) * 0.75) : 0;
     rx -= small / 2;
     ry -= small / 2;
     CGFloat cx = W / 2, cy = H / 2; // the window is just the cluster
@@ -753,6 +797,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     for (int pass = 0; pass < 2; pass++) // the small ones first, the one in focus on top
         for (int i = 0; i < n; i++) {
             if ((i == fi) != (pass == 1)) continue;
+            if (i != fi && !g_others) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
             const Session *s = &room->s[i];
             int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
             if (px < 32) px = 32;
@@ -868,7 +913,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 
 // ---- the hover tooltip: name and state, then the first two lines of the last reply ----------------------
 // ---- the application ------------------------------------------------------------------------------------
-@interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions, ReplyBoxDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions, ReplyBoxDelegate, SettingsHost>
 @property(strong) NSPanel *panel;
 @property(strong) PanelView *view;
 @property(strong) NSTimer *timer;
@@ -894,6 +939,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @property unsigned short paneCols, paneRows;
 @property(strong) ReplyBox *reply;                  // double-click a core: type a reply under its tooltip
 @property(copy) NSString *dragSid;                  // the core image files are being dragged over
+@property(strong) SettingsWindow *settings;         // right-click > Settings...
 @end
 
 @implementation AppDelegate
@@ -912,10 +958,11 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         if (g_width <= 0) w = ws.ws_xpixel * k;
         h = ws.ws_ypixel * k;
     }
+    if (!g_fit_pane && g_width <= 0) w = round(w * g_scale); // Settings > Size on screen (a pane keeps its own size)
     if (w > f.size.width * 0.6) w = f.size.width * 0.6;
     if (h > f.size.height) h = f.size.height;
     if (g_single) { // just the cluster, where it was put last (else the top of the right edge)
-        CGFloat cw = fmax(200, fmin(320, w)), ch = ceil(cw * 1.2) + 8;
+        CGFloat cw = round(fmax(200, fmin(320, w)) * g_scale), ch = ceil(cw * 1.2) + 8; // Settings > Size on screen
         NSArray *at = positions()[screen_key(screen)];
         NSRect vis = screen.visibleFrame;
         NSRect r = NSMakeRect(NSMaxX(f) - cw, NSMaxY(vis) - ch, cw, ch);
@@ -975,6 +1022,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     self.reply.fontName = g_font_name;
     self.reply.fontSize = g_font_size;
     self.reply.behavior = p.collectionBehavior;
+    self.reply.boxColor = hex_color(tip_bg_hex());
+    self.reply.inkColor = tip_ink();
     self.overlay = [NSMutableDictionary dictionary];
     self.seen = [NSMutableDictionary dictionary];
     self.summarizing = [NSMutableSet set];
@@ -1000,6 +1049,11 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
     if (g_reply_shot) [self performSelector:@selector(replyShot) withObject:nil afterDelay:2.0];
+    if (g_settings_open || g_settings_shot) [self openSettings];
+    if (g_settings_shot) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self.settings saveShot:@(g_settings_shot)];
+        [NSApp terminate:nil];
+    });
     [self onSignal:SIGINT handler:^{ [NSApp terminate:nil]; }];
     [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(appChanged:)
                                                                name:NSWorkspaceDidActivateApplicationNotification object:nil];
@@ -1117,6 +1171,27 @@ static int rush_n;
     }
 }
 
+static unsigned tip_bg_hex(void) { return g_tip_bg >= 0 && g_tip_bg < 5 ? TIP_BGS[g_tip_bg] : g_tip_custom; }
+static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom) : g_text_col > 0 && g_text_col < 5 ? hex_color(TEXT_COLS[g_text_col]) : nil; }
+// the text box's look (Settings > Replies): font, size, colours, how wide it may grow
+- (void)styleTip:(TipView *)v {
+    v.fontSize = g_font_size;
+    v.monoBody = g_tip_mono;
+    v.monoName = g_font_name;
+    v.boxColor = hex_color(tip_bg_hex());
+    v.inkColor = tip_ink();
+    v.sizeK = g_tip_size;
+    v.title = nil; // measures itself again
+}
+- (void)styleTips {
+    if (self.tipView) { [self styleTip:self.tipView]; self.tipView.maxBodyLines = (int)lround(16 * g_tip_size); }
+    if (self.previewView) [self styleTip:self.previewView];
+    self.reply.fontSize = g_font_size;
+    self.reply.boxColor = hex_color(tip_bg_hex());
+    self.reply.inkColor = tip_ink();
+    [self.tip orderOut:nil];
+}
+
 // a small floating box that never takes clicks (the hover tooltip, the recognized-text preview)
 - (NSPanel *)newTipPanel:(TipView **)view {
     NSPanel *t = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 40)
@@ -1129,7 +1204,7 @@ static int rush_n;
     t.level = NSFloatingWindowLevel;
     t.collectionBehavior = self.panel.collectionBehavior;
     *view = [[TipView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
-    (*view).fontSize = g_font_size;
+    [self styleTip:*view];
     t.contentView = *view;
     return t;
 }
@@ -1139,7 +1214,7 @@ static int rush_n;
     if (!self.tip) {
         TipView *v;
         self.tip = [self newTipPanel:&v];
-        v.maxBodyLines = 16;
+        v.maxBodyLines = (int)lround(16 * g_tip_size);
         self.tipView = v;
     }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
@@ -1153,11 +1228,13 @@ static int rush_n;
     if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
         self.tipView.title = title;
         self.tipView.body = body;
-        // to the left of the panel, level with the core, kept on the screen
+        // to the left of the panel, level with the core, kept on the screen (or in the middle of it: Settings > Opens)
+        NSRect vis = (self.panel.screen ?: [NSScreen mainScreen]).visibleFrame;
+        self.tipView.maxWidth = g_tip_middle ? fmin(fmax(fmax(460, g_font_size * 36) * g_tip_size, vis.size.width * 0.45 * g_tip_size), 1000 * g_tip_size) : 0;
         NSSize sz = [self.tipView fit];
         NSPoint at = [self.panel convertPointToScreen:center];
         NSRect f = NSMakeRect(NSMinX(self.panel.frame) - sz.width - 8, at.y - sz.height / 2, sz.width, sz.height);
-        NSRect vis = (self.panel.screen ?: [NSScreen mainScreen]).visibleFrame;
+        if (g_tip_middle) f.origin = NSMakePoint(NSMidX(vis) - sz.width / 2, NSMidY(vis) - sz.height / 2);
         if (NSMinX(f) < NSMinX(vis)) f.origin.x = NSMinX(vis);
         if (NSMaxY(f) > NSMaxY(vis)) f.origin.y = NSMaxY(vis) - sz.height;
         if (NSMinY(f) < NSMinY(vis)) f.origin.y = NSMinY(vis);
@@ -1639,57 +1716,35 @@ static int rush_n;
     return m;
 }
 
-// ---- the Settings submenu: every choice applies at once and is remembered (see load_settings) ----------
+// ---- Settings...: the window (mac/settings.m); every choice applies at once and is remembered (see load_settings)
 - (NSMenuItem *)settingsItem {
-    NSMenuItem *top = [[NSMenuItem alloc] initWithTitle:@"Settings" action:NULL keyEquivalent:@""];
-    NSMenu *m = [[NSMenu alloc] initWithTitle:@"Settings"];
-    m.autoenablesItems = NO;
-    [self toggle:m title:@"Voice" key:@"voice" on:g_voice];
-    [self toggle:m title:@"Read new replies aloud" key:@"autoSpeak" on:g_auto_speak];
-    [self toggle:m title:@"Summaries by Claude" key:@"summarize" on:g_summarize_claude].enabled = g_claude != nil;
-    [self toggle:m title:@"Wait for a click before sending" key:@"confirmSend" on:g_confirm_send];
-    [m addItem:[NSMenuItem separatorItem]];
-    [self choice:m title:@"Labels" key:@"labels" current:@(g_labels_hover != 0) options:@[@[@"Always", @NO], @[@"On hover", @YES]]];
-    [self choice:m title:@"Text size" key:@"fontSize" current:@(g_font_size)
-         options:@[@[@"Small (12)", @12.0], @[@"Medium (16)", @16.0], @[@"Large (20)", @20.0], @[@"Extra large (24)", @24.0]]];
-    [self choice:m title:@"Glow" key:@"glow" current:@(g_glow) options:@[@[@"Soft", @0.7f], @[@"Normal", @1.0f], @[@"Bright", @1.4f]]];
-    [self choice:m title:@"Shape" key:@"shape" current:@(g_shape_name)
-         options:@[@[@"Dodecahedron", @"dodeca"], @[@"Buckyball", @"bucky"], @[@"Geodesic", @"geo2"], @[@"Fine geodesic", @"geo3"]]];
-    [self choice:m title:@"Focus frame" key:@"frame" current:@(g_frame)
-         options:@[@[@"Segments", @"segments"], @[@"Lens", @"lens"], @[@"Polar", @"polar"], @[@"Diamond", @"diamond"], @[@"Lock", @"lock"], @[@"Orbits", @"orbits"], @[@"None", @"none"]]];
-    [self choice:m title:@"Away after" key:@"away" current:@(g_away_after)
-         options:@[@[@"1 minute", @60.0], @[@"2 minutes", @120.0], @[@"5 minutes", @300.0], @[@"Never", @0.0]]];
-    [m addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *reset = [m addItemWithTitle:@"Use launch options again" action:@selector(menuResetSettings:) keyEquivalent:@""];
-    reset.target = self;
-    reset.enabled = [[NSFileManager defaultManager] fileExistsAtPath:settings_file()];
-    top.submenu = m;
-    return top;
-}
-- (NSMenuItem *)toggle:(NSMenu *)m title:(NSString *)title key:(NSString *)key on:(int)on {
-    NSMenuItem *i = [m addItemWithTitle:title action:@selector(menuSetting:) keyEquivalent:@""];
+    NSMenuItem *i = [[NSMenuItem alloc] initWithTitle:@"Settings..." action:@selector(menuOpenSettings:) keyEquivalent:@""];
     i.target = self;
-    i.state = on ? NSControlStateValueOn : NSControlStateValueOff;
-    i.representedObject = @[key, @(!on)];
     return i;
 }
-- (void)choice:(NSMenu *)m title:(NSString *)title key:(NSString *)key current:(id)current options:(NSArray *)options {
-    NSMenuItem *top = [m addItemWithTitle:title action:NULL keyEquivalent:@""];
-    NSMenu *sub = [[NSMenu alloc] initWithTitle:title];
-    for (NSArray *o in options) {
-        NSMenuItem *i = [sub addItemWithTitle:o[0] action:@selector(menuSetting:) keyEquivalent:@""];
-        i.target = self;
-        i.representedObject = @[key, o[1]];
-        i.state = [o[1] isEqual:current] ? NSControlStateValueOn : NSControlStateValueOff;
-    }
-    top.submenu = sub;
+- (void)menuOpenSettings:(NSMenuItem *)i { (void)i; [self openSettings]; }
+- (void)openSettings {
+    if (!self.settings) self.settings = [[SettingsWindow alloc] initWithHost:self];
+    [self.settings showOn:self.panel.screen behavior:self.panel.collectionBehavior];
 }
-- (void)menuSetting:(NSMenuItem *)item {
-    NSString *key = item.representedObject[0];
-    id v = item.representedObject[1];
-    [self applySetting:key value:v];
-    save_settings();
+
+// SettingsHost: what the window reads and changes
+- (id)setting:(NSString *)key {
+    NSDictionary *d = @{@"shape": @(g_shape_name), @"glow": @(g_glow), @"scale": @(g_scale), @"core": @(g_core), @"frame": @(g_frame),
+                        @"others": @(g_others != 0), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
+                        @"tipSize": @(g_tip_size), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
+                        @"textCustom": @(g_text_custom), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
+                        @"away": @(g_away_after), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0),
+                        @"summarize": @(g_summarize_claude != 0), @"confirmSend": @(g_confirm_send != 0), @"fontName": g_font_name};
+    return d[key];
 }
+- (void)chooseSetting:(NSString *)key value:(id)value { [self applySetting:key value:value]; save_settings(); }
+- (BOOL)settingsSaved { return [[NSFileManager defaultManager] fileExistsAtPath:settings_file()]; }
+- (void)resetSettings { [self menuResetSettings:nil]; }
+- (const Shape *)shape { return &g_shape; }
+- (void)drawFocusFrame:(CGContextRef)ctx rect:(NSRect)r session:(const Session *)s now:(double)now { focus_frame(ctx, r, s, now); }
+- (BOOL)canSummarize { return g_claude != nil; }
+
 - (void)applySetting:(NSString *)key value:(id)v {
     if ([key isEqualToString:@"voice"]) [self setVoice:[v boolValue]];
     else if ([key isEqualToString:@"autoSpeak"]) { if ([v boolValue] && !g_voice) [self setVoice:YES]; g_auto_speak = [v boolValue]; }
@@ -1698,20 +1753,34 @@ static int rush_n;
     else if ([key isEqualToString:@"glow"]) g_glow = [v floatValue];
     else if ([key isEqualToString:@"away"]) g_away_after = [v doubleValue];
     else if ([key isEqualToString:@"frame"]) snprintf(g_frame, sizeof g_frame, "%s", [v UTF8String]);
+    else if ([key isEqualToString:@"core"]) g_core = [v floatValue];
+    else if ([key isEqualToString:@"others"]) g_others = [v boolValue];
+    else if ([key isEqualToString:@"wheelSpin"]) g_wheel_spin = [v intValue];
+    else if ([key isEqualToString:@"scale"]) { g_scale = [v floatValue]; [self place]; }
+    else if ([key isEqualToString:@"tipMono"] || [key isEqualToString:@"tipSize"] || [key isEqualToString:@"tipMiddle"] || [key isEqualToString:@"tipColor"]
+             || [key isEqualToString:@"textColor"] || [key isEqualToString:@"tipCustom"] || [key isEqualToString:@"textCustom"]) {
+        if ([key isEqualToString:@"tipMono"]) g_tip_mono = [v boolValue];
+        else if ([key isEqualToString:@"tipSize"]) g_tip_size = [v floatValue];
+        else if ([key isEqualToString:@"tipMiddle"]) g_tip_middle = [v boolValue];
+        else if ([key isEqualToString:@"tipColor"]) g_tip_bg = [v intValue];
+        else if ([key isEqualToString:@"textColor"]) g_text_col = [v intValue];
+        else if ([key isEqualToString:@"tipCustom"]) g_tip_custom = [v unsignedIntValue];
+        else g_text_custom = [v unsignedIntValue];
+        [self styleTips];
+    }
     else if ([key isEqualToString:@"shape"]) {
         if (!shape_make(&g_shape, [v UTF8String])) return;
         snprintf(g_shape_name, sizeof g_shape_name, "%s", [v UTF8String]);
-    } else if ([key isEqualToString:@"labels"] || [key isEqualToString:@"fontSize"]) {
-        if ([key isEqualToString:@"labels"]) g_labels_hover = [v boolValue];
+    } else if ([key isEqualToString:@"labels"] || [key isEqualToString:@"labelsHover"] || [key isEqualToString:@"fontSize"]) {
+        if (![key isEqualToString:@"fontSize"]) g_labels_hover = [v boolValue];
         else {
             g_font_size = [v doubleValue];
-            self.tipView.fontSize = self.previewView.fontSize = self.reply.fontSize = g_font_size;
-            self.tipView.title = nil; // makes the tooltip measure itself again
-            [self.tip orderOut:nil];
+            [self styleTips];
         }
         [self place];
     }
     [self.view relayout]; // every picture is drawn again with the new setting
+    [self.settings changed];
 }
 - (void)menuResetSettings:(NSMenuItem *)i {
     (void)i;
@@ -1721,10 +1790,10 @@ static int rush_n;
     shape_make(&g_shape, g_shape_name);
     g_voice = !voice; [self setVoice:voice];
     g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize && g_claude;
-    self.tipView.fontSize = self.previewView.fontSize = self.reply.fontSize = g_font_size;
-    self.tipView.title = nil;
+    [self styleTips];
     [self place];
     [self.view relayout];
+    [self.settings changed];
 }
 
 - (void)menuReplay:(NSMenuItem *)i {
@@ -1777,7 +1846,7 @@ static int rush_n;
             self.hue[sid] = @(pick);
         }
         s->aura = HUES[self.hue[sid].intValue];
-        s->aura_a = g_single && room->n > 1 ? TOUCH.aura : 0; // one core alone needs no name tag
+        s->aura_a = g_single && room->n > 1 && g_others ? TOUCH.aura : 0; // one core alone needs no name tag
     }
     if (!g_single) return;
     Session *cur = session_by_sid(g_focus);
@@ -1973,6 +2042,8 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
+         "  --settings         open the Settings window at start (also right-click > Settings...)\n"
+         "  --settings-shot FILE  open the Settings window, save it as a PNG after 2 s and quit\n"
          "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
@@ -2008,6 +2079,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
             else if (!strcmp(a, "--debug")) g_debug = 1;
             else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
+            else if (!strcmp(a, "--settings-shot") && v) { g_settings_shot = v; i++; }
+            else if (!strcmp(a, "--settings")) g_settings_open = 1;
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;
             else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }

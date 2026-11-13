@@ -4,7 +4,7 @@
 #import "tip.h"
 
 static const CGFloat PAD = 11, BAR = 3, GAP = 6;
-#define MAXW fmax(460, [self size] * 36) /* wide enough for about the same line length at any font size */
+#define MAXW (self.maxWidth > 0 ? self.maxWidth : fmax(460, [self size] * 36) * (self.sizeK > 0 ? self.sizeK : 1)) /* about the same line length at any font size */
 
 @implementation TipView
 - (BOOL)isOpaque { return NO; }
@@ -14,21 +14,28 @@ static const CGFloat PAD = 11, BAR = 3, GAP = 6;
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.lineBreakMode = NSLineBreakByWordWrapping;
     para.minimumLineHeight = para.maximumLineHeight = [self lineH];
-    NSFont *f = title ? [NSFont systemFontOfSize:[self size] weight:NSFontWeightSemibold] : [NSFont systemFontOfSize:[self size]];
-    NSColor *c = title ? [self titleColor] : [NSColor colorWithSRGBRed:0.90 green:0.91 blue:0.94 alpha:1];
+    NSFont *f = title ? [NSFont systemFontOfSize:[self size] weight:NSFontWeightSemibold] : [self bodyFont];
+    NSColor *c = title ? [self titleColor] : [self textColor];
     return @{NSFontAttributeName: f, NSForegroundColorAttributeName: c, NSParagraphStyleAttributeName: para};
 }
-// the session's colour, lifted toward white so it reads on the dark box
+- (NSColor *)box { return self.boxColor ?: [NSColor colorWithSRGBRed:0.11 green:0.12 blue:0.15 alpha:1]; }
+- (BOOL)light { NSColor *b = [[self box] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]]; return 0.299 * b.redComponent + 0.587 * b.greenComponent + 0.114 * b.blueComponent > 0.55; }
+- (NSFont *)bodyFont {
+    if (!self.monoBody) return [NSFont systemFontOfSize:[self size]];
+    return [NSFont fontWithName:self.monoName ?: @"Monaco" size:[self size]] ?: [NSFont monospacedSystemFontOfSize:[self size] weight:NSFontWeightRegular];
+}
+// the session's colour, lifted toward white so it reads on a dark box (toward black on a light one)
 - (NSColor *)titleColor {
     NSColor *a = [self.accent colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: [NSColor whiteColor];
-    return [a blendedColorWithFraction:0.3 ofColor:[NSColor whiteColor]] ?: a;
+    return [a blendedColorWithFraction:0.3 ofColor:[self light] ? [NSColor blackColor] : [NSColor whiteColor]] ?: a;
 }
 // ---- the body, laid out like Claude Code's terminal: paragraphs with a gap between them, "- " items as
 // bullets with wrapped lines indented under the text, **bold**, `code` in a monospaced font, code blocks
 // indented and dimmed. (A small Markdown subset: what replies are made of.)
-- (NSColor *)textColor { return [NSColor colorWithSRGBRed:0.90 green:0.91 blue:0.94 alpha:1]; }
+- (NSColor *)textColor { return self.inkColor ?: ([self light] ? [NSColor colorWithSRGBRed:0.27 green:0.27 blue:0.29 alpha:1] : [NSColor colorWithSRGBRed:0.90 green:0.91 blue:0.94 alpha:1]); }
+- (NSColor *)strong { return [self light] ? [NSColor blackColor] : [NSColor whiteColor]; } // bold and headings
 - (NSColor *)codeColor { return [NSColor colorWithSRGBRed:0.68 green:0.70 blue:1.00 alpha:1]; }
-- (NSFont *)mono { return [NSFont monospacedSystemFontOfSize:[self size] * 0.95 weight:NSFontWeightRegular]; }
+- (NSFont *)mono { return self.monoBody ? [self bodyFont] : [NSFont monospacedSystemFontOfSize:[self size] * 0.95 weight:NSFontWeightRegular]; }
 
 static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regularExpressionWithPattern:p options:0 error:NULL]; }
 
@@ -43,7 +50,7 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
         if (m.range.location > at) [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line substringWithRange:NSMakeRange(at, m.range.location - at)] attributes:plain]];
         NSMutableDictionary *st = [plain mutableCopy];
         NSRange g;
-        if ([m rangeAtIndex:1].location != NSNotFound) { g = [m rangeAtIndex:1]; st[NSFontAttributeName] = [NSFont systemFontOfSize:font.pointSize weight:NSFontWeightBold]; st[NSForegroundColorAttributeName] = [NSColor whiteColor]; }
+        if ([m rangeAtIndex:1].location != NSNotFound) { g = [m rangeAtIndex:1]; st[NSFontAttributeName] = [[NSFontManager sharedFontManager] convertFont:font toHaveTrait:NSBoldFontMask]; st[NSForegroundColorAttributeName] = [self strong]; }
         else if ([m rangeAtIndex:2].location != NSNotFound) { g = [m rangeAtIndex:2]; st[NSFontAttributeName] = [self mono]; st[NSForegroundColorAttributeName] = [self codeColor]; }
         else { g = [m rangeAtIndex:3]; st[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle); }
         [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line substringWithRange:g] attributes:st]];
@@ -65,7 +72,7 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
 
 - (NSAttributedString *)rendered {
     NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
-    NSFont *font = [NSFont systemFontOfSize:[self size]];
+    NSFont *font = [self bodyFont];
     static NSRegularExpression *item, *heading;
     if (!item) { item = re(@"^(\\s*)([-*+•]|\\d+[.)])\\s+(.*)$"); heading = re(@"^#{1,6}\\s+(.*)$"); }
     BOOL code = NO, gap = NO, first = YES;
@@ -95,8 +102,8 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
                 [a appendAttributedString:[self inline:[line substringWithRange:[m rangeAtIndex:3]] font:font color:[self textColor] para:ps]];
                 piece = a;
             } else if (h) {
-                piece = [self inline:[t substringWithRange:[h rangeAtIndex:1]] font:[NSFont systemFontOfSize:[self size] weight:NSFontWeightBold]
-                               color:[NSColor whiteColor] para:[self paraIndent:0 rest:0 gap:!first]];
+                piece = [self inline:[t substringWithRange:[h rangeAtIndex:1]] font:[[NSFontManager sharedFontManager] convertFont:font toHaveTrait:NSBoldFontMask]
+                               color:[self strong] para:[self paraIndent:0 rest:0 gap:!first]];
             } else {
                 piece = [self inline:t font:font color:[self textColor] para:[self paraIndent:0 rest:0 gap:gap && !first]];
             }
@@ -133,7 +140,7 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
     (void)dirty;
     NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
     NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:b xRadius:8 yRadius:8];
-    [[NSColor colorWithSRGBRed:0.11 green:0.12 blue:0.15 alpha:0.98] setFill];
+    [[[self box] colorWithAlphaComponent:0.98] setFill];
     [box fill];
     [NSGraphicsContext saveGraphicsState]; // the colour bar down the left edge, clipped to the rounded box
     [box addClip];
