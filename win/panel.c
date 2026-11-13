@@ -3144,8 +3144,9 @@ static float g_size_w0, g_size_h0;
 static int g_krec = -1;             /* the shortcut being recorded (its row on the Shortcuts page), -1 none */
 static double g_kmsg_until;         /* "add Ctrl, Alt or Shift" shows until then */
 static const wchar_t *g_kmsg;
-static int g_mhov_played;           /* hovering a motion tile: it plays after a moment, once */
-static double g_mhov_at;
+static int g_md_row = -1, g_md_id, g_md_moved; /* a motion tile pressed: a click plays it, a drag moves it in or out of use */
+static POINT g_md_from, g_md_at;
+static RECT g_mzone[2][2];          /* [routines, actions][in use, more]: where a dragged tile may be dropped */
 
 static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
@@ -3778,6 +3779,7 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
 
 /* ---- the Motions page: every state at a glance on the left, the chosen one's motions on the right */
 static void mot_tile(Pane *pn, float x0, float y0, float x1, float y1, int row, int id, int on, int dis) {
+    if (g_md_row == row && g_md_id == id && g_md_moved) { frame(pn, x0, y0, x1, y1, 10, S_EDGE, 1); return; } /* its place, while it is carried */
     int hot = is_hot(K_MTOG, row, id);
     box(pn, x0, y0, x1, y1, 10, hot && !dis ? S_CHIP_HOT : S_TILE, on ? S_OR : dis ? S_EDGE : hot ? S_EDGE_HOT : S_RULE, on ? 1.5f : 1);
     unsigned ink = on ? S_OR : dis ? 0x55555E : S_MUTED;
@@ -3797,6 +3799,7 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     tx(x0 + 110, y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : L"played now and then while left alone", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     y += 26;
     for (int pass = 0; pass < 2; pass++) {
+        float zy = y;
         int k = 0;
         for (int id = first; id < last; id++) {
             int on = (set >> id) & 1;
@@ -3805,8 +3808,10 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
             mot_tile(pn, a, b, a + tw, b + 58, row, id, on, row == 0 && id == RT_HOLE && st != ST_SLEEP);
             k++;
         }
-        if (!pass && !k) { tx(x0, y, x1, y + 24, L"None. Pick from below.", g_sf_small, S_MUTED, DT_LEFT); k = cols; }
+        if (!pass && !k) { tx(x0, y + 4, x1, y + 52, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
         y += ((k + cols - 1) / cols) * 64;
+        g_mzone[row][pass] = SR(x0 - 4, zy - 4, x1 + 4, y); /* where a dragged tile lands in use (0) or out (1) */
+        if (g_md_row == row && g_md_moved && PtInRect(&g_mzone[row][pass], g_md_at)) frame(pn, x0 - 4, zy - 4, x1 + 4, y - 2, 12, S_OR, 1.5f); /* it would land here */
         if (!pass) { /* the rule between those in use and the rest */
             tx(x0, y + 4, x0 + 50, y + 20, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
             box(pn, x0 + 44, y + 12, x1, y + 13, 0, S_RULE, 0, 0);
@@ -3875,7 +3880,7 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
     else {
         wchar_t t[200];
-        swprintf(t, 200, L"Rest the pointer on a motion to watch it above; click it to use it in %ls or not.", state_wname(st));
+        swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
         tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     }
     float h0 = mot_tiles(pn, 0, ex0 + 16, ty, x1 - 16);
@@ -3984,6 +3989,13 @@ static void set_build(void) {
     lu_icon(pn, "rotateCcw", 29, HL - 34, 15, can ? (hra ? S_TEXT : S_MUTED) : 0x44444C);
     if (g_set_side) tx(48, HL - 48, SD - 10, HL - 20, L"Reset everything", g_sf_label, can ? (hra ? S_TEXT : S_MUTED) : 0x55555E, DT_LEFT);
     if (can) hit(10, HL - 50, SD - 10, HL - 18, K_RESET, 0, 0);
+    if (g_md_row >= 0 && g_md_moved) { /* a motion tile being carried: under the pointer, over everything */
+        float gx = g_md_at.x / (float)g_sdpi, gy = g_md_at.y / (float)g_sdpi, row = (float)g_md_row;
+        box(pn, gx - 46, gy - 29, gx + 46, gy + 29, 10, S_CHIP_HOT, S_OR, 1.5f);
+        lu_icon(pn, g_md_row == 0 ? MOT_RT_ICON[g_md_id] : MOT_W_ICON[g_md_id], gx, gy - 9, 19, S_OR);
+        txa(gx - 42, gy + 3, gx + 42, gy + 25, g_md_row == 0 ? ROUTINES[g_md_id].name : WHIMS[g_md_id].name, g_sf_small, S_TEXT, DT_CENTER | DT_END_ELLIPSIS);
+        (void)row;
+    }
     /* the size grip, and the edges that resize */
     for (int k = 0; k < 3; k++) aa_seg(pn, S(WL - 4 - 4 * k), S(HL - 4), S(WL - 4), S(HL - 4 - 4 * k), S(1.1f), hexc(0x55555E), 1);
     hit(WL - 7, 14, WL, HL - 18, K_SIZE, 0, 1);
@@ -4038,7 +4050,6 @@ static void settings_tick(double now) {
         s->aura_a = g_others ? TOUCH.aura : 0;
     }
     /* resting on a motion tile: it plays after a moment, once */
-    if (g_hot >= 0 && g_hits[g_hot].kind == K_MTOG && !g_mhov_played && now - g_mhov_at > 0.35) { mot_play(g_hits[g_hot].row, g_hits[g_hot].val); g_mhov_played = 1; }
     if (g_krec >= 0 || (g_kmsg_until > 0 && now > g_kmsg_until)) { if (now > g_kmsg_until) g_kmsg_until = 0; g_sl_dirty = 1; }
     if (g_sl_dirty) set_build();
     /* the cluster in the preview, scaled as Size scales it on the screen */
@@ -4198,10 +4209,15 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (g_slide >= 0) { set_slide_to(g_slide, p.x); return 0; }
+        if (g_md_row >= 0) { /* a motion tile carried */
+            if (!g_md_moved && abs(p.x - g_md_from.x) + abs(p.y - g_md_from.y) > 6) g_md_moved = 1;
+            g_md_at = p;
+            if (g_md_moved) g_sl_dirty = 1;
+            return 0;
+        }
         int h = set_hit_at(p);
         if (h != g_hot) {
             g_hot = h; g_sl_dirty = 1;
-            if (h >= 0 && g_hits[h].kind == K_MTOG) { g_mhov_at = wall(); g_mhov_played = 0; }
         }
         return 0;
     }
@@ -4233,7 +4249,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
             case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
-            case K_MTOG: mot_toggle(sh->row, sh->val); g_mhov_played = 1; break;
+            case K_MTOG: g_md_row = sh->row; g_md_id = sh->val; g_md_moved = 0; g_md_from = g_md_at = p; SetCapture(w); break; /* a click or a drag: told apart on the move */
             case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
             case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; settings_applied(1); break; }
             case K_KREC: if (g_krec == sh->val) krec_stop(); else { g_krec = sh->val; for (int i = 1; i <= 4; i++) UnregisterHotKey(g_cluster.w, i); g_sl_dirty = 1; } break; /* (no hotkey steals the keys meanwhile) */
@@ -4252,6 +4268,16 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONUP: {
+        if (g_md_row >= 0) { /* a motion tile let go: clicked, it plays; dragged across, it comes into use or goes out */
+            int row = g_md_row, id = g_md_id, moved = g_md_moved;
+            g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1;
+            ReleaseCapture();
+            if (!moved) { mot_play(row, id); return 0; }
+            uint32_t set = row == 0 ? MOTION_MAP[g_pv_st].rt : MOTION_MAP[g_pv_st].act;
+            int on = (set >> id) & 1;
+            if ((PtInRect(&g_mzone[row][0], p) && !on) || (PtInRect(&g_mzone[row][1], p) && on)) mot_toggle(row, id);
+            return 0;
+        }
         int h = set_hit_at(p), close = g_close_armed && h >= 0 && g_hits[h].kind == K_CLOSE;
         if (g_sizing) { g_sizing = 0; settings_save(); g_sl_dirty = 1; settings_tick(wall()); } /* let go: drawn in full at once */
         if (g_pv_drag || g_slide >= 0 || g_close_armed) { g_pv_drag = 0; g_slide = -1; g_close_armed = 0; g_sl_dirty = 1; }
@@ -4259,7 +4285,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (close) set_close();
         return 0;
     }
-    case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
+    case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_md_row >= 0) { g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1; } if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
         chat_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
     case WM_MOUSEWHEEL: { /* over the preview: zoom; over the page: scroll it */
