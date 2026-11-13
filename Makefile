@@ -7,7 +7,7 @@ vigil: $(SRC) src/vigil.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 demo: vigil
-	./dodeca-core --demo
+	./vigil --demo
 
 clean:
 	rm -f vigil
