@@ -1210,7 +1210,7 @@ static void r_dormant(Ctx *c) {
 /* Black hole: a big bang, then the fall. For 2.6 s the core gathers power (a quickening heartbeat, matter and
  * light drawn in, the shell squeezed and trembling, crackling, an implosion), then bursts: the patches are blown
  * apart, small ones fastest, each tumbling; at once the pull takes over and they fall back on a tightening spiral,
- * twisting harder and stretching thin, and are swallowed at the edge of the void with a violet flash. Then only
+ * twisting harder and stretching thin, and are swallowed at the edge of the void with a golden flash. Then only
  * the void and its dust disc. Pointing at it wakes it: the pieces come home. */
 static void hole_enter(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; HoleRS *H = &m->rs.hole;
@@ -1301,8 +1301,8 @@ static void r_hole(Ctx *c) {
         m3_mul(A, Sx, Rt);
         if (falling && pc->r < .16f && !pc->gone) { /* swallowed at the edge */
             pc->gone = 1;
-            spark_at(s, M, pos, .35f, 8 + 4.0f * pc->size, RGB255(195, 145, 255));
-            for (int k = 0; k < 4; k++) { float q2[3], v[3]; for (int q = 0; q < 3; q++) q2[q] = pos[q] + rnd(s, -.2f, .2f); float sp = rnd(s, 3, 5); for (int q = 0; q < 3; q++) v[q] = -q2[q] * sp; spark(s, M, q2, v, .2f, 0, 0, 1, SK_STREAK, 0, RGB255(215, 180, 255)); }
+            spark_at(s, M, pos, .35f, 8 + 4.0f * pc->size, RGB255(255, 196, 120));
+            for (int k = 0; k < 4; k++) { float q2[3], v[3]; for (int q = 0; q < 3; q++) q2[q] = pos[q] + rnd(s, -.2f, .2f); float sp = rnd(s, 3, 5); for (int q = 0; q < 3; q++) v[q] = -q2[q] * sp; spark(s, M, q2, v, .2f, 0, 0, 1, SK_STREAK, 0, RGB255(255, 222, 170)); }
         }
         alive += !pc->gone;
         float off[3], ac[3];
@@ -1376,7 +1376,7 @@ const Routine ROUTINES[RT_N] = {
     [RT_BLOOM] = {"Bloom", ST_CHEER, 4.6f, 0, r_bloom, NULL, "Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals."},
     [RT_ZIP] = {"Zip", ST_CHEER, 3.7f, 0, r_zip, NULL, "A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain."},
     [RT_DORMANT] = {"Dormant", ST_SLEEP, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s."},
-    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a void with a violet dust disc. Asleep only."},
+    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo. Asleep only."},
     [RT_BROADCAST] = {"Broadcast", ST_SPEAK, 0, 0, r_broadcast, NULL, "The patches rise and fall with the voice, like the bars of an equaliser."},
     [RT_RECEIVER] = {"Receiver", ST_LISTEN, 0, 0, r_receiver, NULL, "Holds still; the patches facing you open with the microphone level."},
     [RT_DECODING] = {"Decoding", ST_TRANSCRIBE, 0, 0, r_decoding, NULL, "Steps 36 degrees at a time while a scan plane reads the rows."},

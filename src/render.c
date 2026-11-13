@@ -344,55 +344,69 @@ static void draw_trail(Canvas *c, Clip cl, const Proj *P, const Motion *mo, floa
     }
     blob(c, cl, pts[n - 1][0], pts[n - 1][1], 14 * k, WHITE, 0.95f, tc, 0.55f, 0.25f);
 }
-/* the void, its dust disc, nebula light and a few stars, drawn over the collapsed shell */
+/* the black hole, drawn over the collapsed shell, as Gargantua: a black shadow ringed by a thin photon ring, a hot
+ * accretion disc seen almost edge-on that crosses in front of it, and the disc's far side bent by the hole's gravity
+ * into a glowing halo, wide over the top of the shadow and thin under it; the side turning toward you is brighter
+ * (Doppler). Light, worked out per pixel and coloured by how bright it is (ember, orange, gold, white-hot); the dust
+ * (rs.hole.dust, spiralling in) glints along the disc. */
+static Col hole_col(float x) {
+    const Col EMBER = {0.5f, 0.16f, 0.04f}, ORANGE = {1, 0.48f, 0.14f}, GOLD = {1, 0.78f, 0.45f}, HOT = {1, 0.97f, 0.9f};
+    return x < 0.45f ? mix(EMBER, ORANGE, x / 0.45f) : x < 0.9f ? mix(ORANGE, GOLD, (x - 0.45f) / 0.45f) : mix(GOLD, HOT, clamp01((x - 0.9f) / 0.6f));
+}
 static void draw_hole(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, float R, float ks, double t) {
-    /* rh0: the void as it opens; once the shell is swallowed (grow) the whole picture grows with it, the same tilt
-     * and proportions, until the void's edge (1.3 rh) is 0.85 of the shell. Only the dust disc's faint outer tail is
-     * drawn in, so it ends before the tile's edge (a full-size disc would be cut off square) */
+    /* rh0: the hole as it opens; once the shell is swallowed (grow) the whole picture grows with it until the disc's
+     * reach is the tile's, its outer edge fading before the tile's edge */
     float hb = mo->hole, g0 = clamp01(mo->rs.hole.grow), gr = g0 * g0 * (3 - 2 * g0), rh0 = R * 0.3f * (1 + 0.25f * hb), rh = rh0 + (R * 0.85f / 1.3f - rh0) * gr;
-    float tilt = 0.36f, rotA = -0.42f, ca = cosf(rotA), sa = sinf(rotA);
-    float dmax = R * 1.3f / rh, knee = 1.6f; /* the dust's reach, in rh: 3.2 as it opens; beyond the knee squeezed to fit */
-    float neb = fminf(rh, R * 0.5f);         /* the nebula light grows too, but stays inside the tile */
-    const Col VIOLET = {0.56f, 0.32f, 1}, MAGENTA = {1, 0.3f, 0.82f}, PALE = {0.86f, 0.8f, 1}, DEEP = {0.28f, 0.16f, 0.7f};
-    for (int i = 0; i < 3; i++) { /* nebula light, slowly drifting round */
-        float a = (float)t * 0.05f + i * 2.1f;
-        Col col = i == 1 ? MAGENTA : i == 2 ? DEEP : VIOLET;
-        blob(c, cl, ox + cosf(a) * neb * 0.8f, oy + sinf(a) * neb * 0.6f, neb * (1.9f + 0.3f * i), col, 0.13f * hb, col, 0.12f * hb, 0.02f); /* (kept inside the tile) */
+    float rs = rh * 0.62f, tilt = 0.17f, rot = -0.08f, cr = cosf(rot), sr = sinf(rot);
+    float eout = fminf(4.4f, R * 1.25f / rs); /* the disc's outer edge, in shadow radii */
+    blob(c, cl, ox, oy, fminf(rs * 3.2f, R * 1.1f), (Col){1, 0.5f, 0.15f}, 0, (Col){0.5f, 0.16f, 0.04f}, 0.12f * hb, 0.02f); /* a warm haze */
+    blob(c, cl, ox - rs * 0.2f, oy - rs * 0.9f, rs * 1.6f, (Col){1, 0.85f, 0.6f}, 0, (Col){1, 0.6f, 0.25f}, 0.18f * hb, 0.02f); /* the halo's bloom */
+    float ex = rs * eout + 2, ey = rs * 2.1f + 2;
+    int bx0 = (int)fmaxf(cl.x0, floorf(ox - ex)), bx1 = (int)fminf(cl.x1, ceilf(ox + ex) + 1);
+    int by0 = (int)fmaxf(cl.y0, floorf(oy - ey)), by1 = (int)fminf(cl.y1, ceilf(oy + ey) + 1);
+    float spin = (float)t * 0.35f;
+    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
+        float dx = x + 0.5f - ox, dy = y + 0.5f - oy, u = dx * cr + dy * sr, v = -dx * sr + dy * cr; /* u along the disc, v across it (down: near side) */
+        float r = sqrtf(dx * dx + dy * dy), rc = r / rs, side = u / (r + 1e-3f);
+        float shadow = rc < 0.95f ? 1 : rc < 1.03f ? (1.03f - rc) / 0.08f : 0;
+        /* the disc: an ellipse seen almost edge-on, hottest at its inner edge */
+        float e = sqrtf(u * u + (v / tilt) * (v / tilt)) / rs, disc = 0;
+        if (e > 1.35f && e < eout) {
+            float in = clamp01((e - 1.35f) / 0.3f), out = clamp01((eout - e) / (eout * 0.25f));
+            float ang = atan2f(v / tilt, u);
+            float streak = 0.84f + 0.1f * sinf(e * 23 + 3 * sinf(e * 5.1f + ang * 3 + spin)) + 0.06f * sinf(e * 61 + ang * 7 - spin * 2); /* lanes of gas, uneven */
+            disc = 1.7f * in * out * powf(1.6f / fmaxf(e, 1.6f), 1.5f) * streak * (1.3f - 0.65f * u / (e * rs));
+        }
+        /* the far side lensed into a halo: wide over the top, thin under */
+        float lens = 0;
+        if (rc > 1.0f && rc < 2.0f) {
+            float top = clamp01(-v / (r + 1e-3f) * 1.25f + 0.15f), reach = 1.16f + 0.8f * top * top;
+            float w = rc < 1.07f ? (rc - 1) / 0.07f : clamp01((reach - rc) / (reach - 1.07f));
+            lens = 1.5f * powf(w, 1.6f) * (0.25f + 0.75f * top) * (1.15f - 0.45f * side) * (0.9f + 0.1f * sinf(rc * 33 - spin));
+        }
+        float ring = 1.3f * expf(-((rc - 1.035f) * (rc - 1.035f)) / (0.016f * 0.016f)) * (1.1f - 0.35f * side); /* the photon ring */
+        float I = (v > 0 ? disc : disc * (1 - shadow)) + lens + ring;
+        float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
+        if (shadow > 0) { float a = shadow * hb; p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a; } /* light taken away: see-through on the desktop */
+        if (I <= 0.003f) continue;
+        Col col = hole_col(I);
+        float a = fminf(I, 1.5f) * 0.9f * hb;
+        p[0] += col.r * a; p[1] += col.g * a; p[2] += col.b * a;
     }
-    for (int front = 0; front < 2; front++) {
-        if (front) { /* the void (light taken away: see-through on the desktop), then its violet haze */
-            float vr = rh * 1.3f;
-            int bx0 = (int)fmaxf(cl.x0, floorf(ox - rh * 1.6f)), bx1 = (int)fminf(cl.x1, ceilf(ox + rh * 1.6f) + 1);
-            int by0 = (int)fmaxf(cl.y0, floorf(oy - rh * 1.6f)), by1 = (int)fminf(cl.y1, ceilf(oy + rh * 1.6f) + 1);
-            for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
-                float dx = x + 0.5f - ox, dy = y + 0.5f - oy, r = sqrtf(dx * dx + dy * dy), u = r / vr;
-                float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
-                if (u < 1) {
-                    float a = u < 0.62f ? hb : u < 0.85f ? hb * (1 - 0.4f * (u - 0.62f) / 0.23f) : 0.6f * hb * (1 - (u - 0.85f) / 0.15f);
-                    p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a;
-                }
-                float hu = (r - rh * 0.8f) / (rh * 0.8f); /* 0 at 0.8 rh, 1 at 1.6 rh */
-                if (hu > 0 && hu < 1) { float ha = 0.14f * hb * (hu < 0.35f ? hu / 0.35f : (1 - hu) / 0.65f); p[0] += VIOLET.r * ha; p[1] += VIOLET.g * ha; p[2] += VIOLET.b * ha; }
-            }
-        }
-        for (int i = 0; i < NDUST; i++) { /* the far side of the disc behind the void, the near side in front */
-            const Dust *d = &mo->rs.hole.dust[i];
-            float sn = sinf(d->a);
-            if ((sn > 0) != front) continue;
-            float dr = d->r;
-            if (dmax < 3.2f && dr > knee) dr = knee + (dr - knee) * fmaxf(0, dmax - knee) / (3.2f - knee);
-            float rr = dr * rh;
-            float x = cosf(d->a) * rr, y = sn * rr * tilt;
-            float al = hb * 0.8f * clamp01((3.2f - d->r) / 1.2f) * (front ? 0.9f : 0.55f);
-            Col col = d->r < 1.6f ? mix(PALE, VIOLET, clamp01((d->r - 1.15f) / 0.45f)) : mix(VIOLET, MAGENTA, clamp01((d->r - 1.6f) / 1.2f));
-            disc(c, cl, ox + x * ca - y * sa, oy + x * sa + y * ca, d->s * ks * (front ? 1.3f : 1), col, al);
-        }
+    for (int i = 0; i < NDUST; i++) { /* the dust: glints riding the disc (behind the shadow on the far side) */
+        const Dust *d = &mo->rs.hole.dust[i];
+        float sn = sinf(d->a), rr = rs * (1.5f + (d->r - 1.05f) * 1.25f);
+        if (rr > rs * eout) continue;
+        float px = cosf(d->a) * rr, py = sn * rr * tilt, X = ox + px * cr - py * sr, Y = oy + px * sr + py * cr;
+        if (sn < 0 && hypotf(X - ox, Y - oy) < rs * 1.05f) continue;
+        float al = hb * 0.35f * clamp01((3.2f - d->r) / 1.2f) * (1 - 0.5f * cosf(d->a));
+        disc(c, cl, X, Y, d->s * ks * 0.7f, hole_col(1.1f - 0.25f * d->r), al);
     }
     for (int i = 0; i < NSTAR; i++) { /* a few faint stars, holding still */
         const float *st = mo->rs.hole.star[i];
         float x = st[0] * R, y = st[1] * R;
         if (sqrtf(x * x + y * y) < rh * 2) continue;
-        disc(c, cl, ox + x, oy + y, st[2] * 0.8f * ks, PALE, hb * (0.4f + 0.1f * sinf((float)t * 0.4f + st[3])) * 0.6f);
+        disc(c, cl, ox + x, oy + y, st[2] * 0.8f * ks, (Col){1, 0.93f, 0.85f}, hb * (0.4f + 0.1f * sinf((float)t * 0.4f + st[3])) * 0.55f);
     }
 }
 static void draw_edge(Canvas *c, Clip cl, const float *a, const float *b, const Look *L, float edge, float thin, float halo, float gg, float k) {
