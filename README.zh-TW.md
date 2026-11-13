@@ -89,16 +89,16 @@ sh win/build.sh && ./vigil-win --demo       # Windows：在 WSL 裡執行（需�
 - **一顆或全部。** 預設一顆大核心顯示需要你的 session（沒有的話是最新回覆的那個），其他 session 是旁邊的小核心。`--all` 讓每個 session 各自一顆，放在你想放的位置。
 - **回覆。** Windows：雙擊核心、輸入、按 Enter，可以把圖片拖到核心上。macOS：按住核心說話（按住說話，在 Mac 上辨識），文字會打進那個 session 的 iTerm2 窗格。
 - **語音回報**（macOS，`--voice`）：點核心會念出它回覆的簡短摘要。
-- **設定**（Windows：右鍵 > Settings）：形狀、光暈、大小、重力、對焦框、滾輪讓核心往哪個方向轉、對話框的字型、大小、底色和文字顏色，以及每個狀態用哪些動作，附即時預覽。Mac 上右鍵 > Settings 是一個選單：語音、自動唸出新回覆、用 Claude 摘要、標籤、字體大小、流暢度、光暈、形狀和離開時間。
+- **設定**（Windows：右鍵 > Settings）：可以調整大小的視窗，附可放大的即時預覽和六頁（Look、Cluster、Replies、Motions、Shortcuts、Performance）：形狀、光暈、大小、重力、對焦框、對話框的字型和顏色、每個狀態用哪些動作，以及可以自己錄的全域快捷鍵。Mac 上右鍵 > Settings 是一個選單：語音、自動唸出新回覆、用 Claude 摘要、標籤、字體大小、流暢度、光暈、形狀和離開時間。
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/settings.png" alt="設定：上方是核心的即時預覽，下方是 Look、Motion、Replies"></td>
-    <td width="50%"><img src="assets/settings-motions.png" alt="設定 > Motions：每個狀態可以跑的常駐動作和小動作"></td>
+    <td width="50%"><img src="assets/settings.png" alt="設定 > Look：各頁的側欄、即時預覽，和一列列的設定"></td>
+    <td width="50%"><img src="assets/settings-motions.png" alt="設定 > Motions：每個狀態和它的常駐動作，以及選中狀態的常駐動作和小動作"></td>
   </tr>
 </table>
 
-<p align="center"><sub>Windows 面板的設定視窗，General 與 Motions，預覽放大到 2 倍。</sub></p>
+<p align="center"><sub>Windows 面板的設定視窗：Look 與 Motions。</sub></p>
 
 ## 隱私
 
@@ -234,9 +234,16 @@ Alt 等於 Mac 上的 ⌥：**Alt 拖曳**可以把整團（單核心）或那�
 
 右鍵點核心有 **Reply**、**Copy reply** 和 **Bring to front**：這裡沒有 iTerm2，所以它會叫出標題裡有資料夾名稱的終端機或 VS Code 視窗，否則是最近用過的 Windows Terminal 視窗，但無法選到分頁。
 
-右鍵 > **Settings...** 打開設定視窗：上方是即時預覽（叢集實際的樣子；拖動核心可以感受重力；在上面捲動滾輪可放大到 3 倍看細節，雙擊恢復；按鈕切換顯示各種狀態；一段用對話框字型和大小顯示的回覆），下方三張卡片。**Look**：形狀、光暈、螢幕上的大小、內核大小。**Motion**：在核心上捲動滾輪時怎麼轉（Roll、Roll back、Turn、Turn back 或 Off）、重力（Floaty 到 Firm：主核心把小核心拉在軌道上的力道；搬動時它們沿著軌道滑到後方跟著走，用力甩出去會在螢幕邊緣反彈）、顯示或隱藏其他 session、對焦框。**Replies**：對話框的顏色：Box（五種深色）和 Text（Auto、White、Cream、Mint、Sky），兩列各有一格調色盤，可以打開 Windows 的色彩視窗挑任何顏色（Auto 時，淺色框上的文字會變深色）；對話框大小；字型（終端機的等寬字型，讓回覆排列和 Claude Code 裡一樣，中文用微軟正黑體、每字佔兩格，和 Windows Terminal 相同；或 Segoe UI；回覆輸入框一律用終端機字型）、文字大小、出現的位置（核心旁邊，或螢幕中間），以及所有核心模式下核心上方的名稱。
+右鍵 > **Settings...** 打開設定視窗。左邊的側欄列出各頁（最上面的按鈕可以把它收成一排圖示）；頂端列有該頁的名稱、它的 Reset 和關閉，拖動它可以移動視窗（側欄的空白處也可以）；下面是即時預覽：叢集實際的樣子（拖動核心可以感受重力；− / + 或滾輪可放大到 3 倍，雙擊恢復）、要用哪個狀態顯示，在 Replies 頁還有一段用對話框字型和大小顯示的回覆。下方是該頁的內容：一張張卡片，每一列左邊是設定名稱、右邊是它的控制項；選中的按鈕用橘色框標出。視窗可以從右邊、下邊和右下角拉大縮小（最小 620 × 480），並記住大小和側欄是否收起。
 
-**Motions** 頁（上方的切換）為每個狀態選擇可以跑哪些常駐動作（每次進入狀態時挑一種；任何動作都可以給任何狀態，只有黑洞限睡眠時使用），以及沒被碰時偶爾做哪些小動作；按小卡上的 **▶** 會在預覽裡播放。最下面是多久沒操作後核心休息（STANDBY），以及 **Reset to defaults**。選了立刻生效，記在 `~/.dodeca-core/panel-settings-win.json`，在重設之前優先於啟動選項；按 Esc 關閉視窗。
+- **Look**：形狀、光暈、內核大小；螢幕上的大小、對焦框。
+- **Cluster**：單核心或所有核心、顯示或隱藏其他 session、所有核心模式下核心上方的名稱；重力（Floaty 到 Firm：主核心把小核心拉在軌道上的力道；搬動時它們沿著軌道滑到後方跟著走，用力甩出去會在螢幕邊緣反彈）和在核心上捲動滾輪時怎麼轉（Roll、Roll back、Turn、Turn back 或 Off）；多久沒操作後核心休息（STANDBY）。
+- **Replies**：對話框的字型（終端機的等寬字型，讓回覆排列和 Claude Code 裡一樣，中文用微軟正黑體、每字佔兩格，和 Windows Terminal 相同；或 Segoe UI；回覆輸入框一律用終端機字型）和文字大小；對話框大小、底色（五種深色）和文字顏色（Auto、White、Cream、Mint、Sky），兩列各有一格調色盤，可以打開 Windows 的色彩視窗挑任何顏色（Auto 時，淺色框上的文字會變深色），以及出現的位置（核心旁邊，或螢幕中間）。
+- **Motions**：左邊是每個狀態和它所用常駐動作的圖示；右邊是選中狀態的常駐動作（每次進入狀態時挑一種；任何動作都可以給任何狀態，只有黑洞限睡眠時使用）和小動作（沒被碰時偶爾做），用中的排在前面。點一下就在預覽裡試播；把它拖到上面用中的那一區就會用它，拖到下面的 MORE 就不再用。**Try it** 播放這個狀態的一種常駐動作；**Reset** 把這個狀態恢復預設。
+- **Shortcuts**：在任何程式裡都能用的快捷鍵：單核心 / 所有核心（Ctrl+Alt+C）、顯示或隱藏 Vigil（Ctrl+Alt+V）、回覆主核心（Ctrl+Alt+R）、打開設定（未設定）；點一下再按新的組合鍵（Esc 取消，Delete 清除）；被其他程式占用的會標出來。移動（拖曳）或搬動（點一下）核心時要按住的鍵：Alt、Ctrl 或 Shift。回覆列用 Enter 還是 Ctrl+Enter 送出。回覆列也接受命令列的按鍵：沒有選取文字時 Ctrl+C 清空整行（有選取時是複製），Ctrl+W 或 Ctrl+Backspace 刪掉游標前的一個字詞，Ctrl+U 刪掉游標前的全部。
+- **Performance**：流暢度，多久畫一次（Saver、Balanced、Smooth、Max）。
+
+每頁都有自己的 **Reset**；側欄最下面的 **Reset everything** 會回到啟動選項。選了立刻生效，記在 `~/.dodeca-core/panel-settings-win.json`，在重設之前優先於啟動選項；按 Esc 關閉視窗。
 
 右鍵 > **Smoothness** 設定每顆核心多久重畫一次：**Saver**（最省 CPU）、**Balanced**（預設）、**Smooth**（忙碌時每秒 60 張）或 **Max**（螢幕的更新率）。不論選哪個，移動中的核心都跟著螢幕的節奏走：面板依螢幕的更新率計時（有東西在動時每秒 60 次），漂浮的衛星不會再一頓一頓。啟動時可用 `--smooth NAME` 指定；`--stats` 每 5 秒把 tick、畫面數和它們的花費寫到事件檔旁的 `panel-stats.txt`。每個螢幕都用它自己的縮放（125%、100%……）來畫，所以核心在螢幕之間搬動時一樣清晰、一樣大小。
 
