@@ -1238,6 +1238,18 @@ static void hole_enter(Ctx *c) {
     for (int i = 0; i < NSTAR; i++) { H->star[i][0] = rnd(s, -1.6f, 1.6f); H->star[i][1] = rnd(s, -1.6f, 1.6f); H->star[i][2] = rnd(s, .6f, 1.4f); H->star[i][3] = rnd(s, 0, TAU); }
     H->moving = 1;
 }
+uint32_t HOLE_ACTS = (1u << HA_N) - 2; /* all of them */
+const char *HOLE_ACT_NAME[HA_N] = {"", "Jets", "Feeding", "Flare", "Ripple", "Precession"};
+const char *HOLE_ACT_ABOUT[HA_N] = {"", "Two beams shoot out of its poles, across the disc, and fade.",
+    "A star drifts in, is stretched into a streak as it spirals down, and vanishes into the shadow; the ring flashes.",
+    "A burst of gas falls in: the disc and its halo blaze, then settle.",
+    "A gravity wave: a faint ring spreads outward and the disc's lanes shiver as it passes.",
+    "The disc slowly tips to show its face, then settles back."};
+void hole_play(Session *s, int a) {
+    if (a <= HA_NONE || a >= HA_N) return;
+    if (s->mo.rt != RT_HOLE || s->mo.hole < 0.5f) motion_play(s, RT_HOLE); /* not a black hole yet: it becomes one, then plays it */
+    s->mo.hole_want = a;
+}
 static void r_hole(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M; Want *w = c->w; HoleRS *H = &m->rs.hole;
     const float BANG = 2.6f;
@@ -1326,7 +1338,13 @@ static void r_hole(Ctx *c) {
     if (H->grow < .5f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
     else if (H->grow < .95f) H->act_next = 0;
     else if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
-    else if (H->act == HA_NONE && c->now >= H->act_next) { H->act = 1 + (int)(mrand(s) * (HA_N - 1)) % (HA_N - 1); H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
+    else if (m->hole_want && H->grow > .9f) { H->act = m->hole_want; H->act_at = c->now; H->act_p = rnd(s, -1, 1); m->hole_want = 0; } /* asked for (the Settings preview) */
+    else if (H->act == HA_NONE && c->now >= H->act_next) { /* one of those it may play (HOLE_ACTS), at random */
+        int on[HA_N], n = 0;
+        for (int a = 1; a < HA_N; a++) if (HOLE_ACTS >> a & 1) on[n++] = a;
+        if (n) { H->act = on[(int)(mrand(s) * n) % n]; H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
+        else H->act_next = c->now + 5;
+    }
     else if (H->act != HA_NONE && c->now - H->act_at > ACT_DUR[H->act]) { H->act = HA_NONE; H->act_next = c->now + rnd(s, 6, 14); }
     H->moving = 1; /* it never rests: the disc flows, hot spots orbit, the glow flickers (drawn in render.c) */
 }

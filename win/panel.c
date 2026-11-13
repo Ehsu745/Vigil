@@ -357,6 +357,7 @@ static void remember_launch(void) {
 
 static void restore_launch(void) {
     motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
+    HOLE_ACTS = (1u << HA_N) - 2;
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom;
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_others = g_launch.others;
     g_labels = g_launch.labels; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
@@ -437,6 +438,7 @@ static void settings_load(void) {
     MotionMap def[ST_N];
     motion_map_init();
     motion_map_default(def);
+    if (json_num(buf, "holeActs", &v)) HOLE_ACTS = (uint32_t)v & ((1u << HA_N) - 2); /* the black hole's own actions */
     if (json_masks(buf, "mapRoutines", rt) && json_masks(buf, "mapActions", act))
         for (int i = 0; i < ST_N; i++) {
             uint32_t r = rt[i] & ((1u << RT_N) - 1);
@@ -456,7 +458,7 @@ static void settings_save(void) {
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
     fprintf(f, ", \"mapRoutines\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
-    fprintf(f, "], \"mapActions\": [");
+    fprintf(f, "], \"holeActs\": %lu, \"mapActions\": [", (unsigned long)HOLE_ACTS);
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
     const Smooth *cu = &g_smooth_custom;
     fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand);
@@ -3228,7 +3230,8 @@ static double g_kmsg_until;         /* "add Ctrl, Alt or Shift" shows until then
 static const wchar_t *g_kmsg;
 static int g_md_row = -1, g_md_id, g_md_moved; /* a motion tile pressed: a click plays it, a drag moves it in or out of use */
 static POINT g_md_from, g_md_at;
-static RECT g_mzone[2][2];          /* [routines, actions][in use, more]: where a dragged tile may be dropped */
+static RECT g_mzone[3][2];          /* [routines, actions, black hole][in use, more]: where a dragged tile may be dropped */
+static const char *HOLE_ICON[HA_N] = {"", "unfold", "sparkles", "sunDim", "waves", "rotateCcw"};
 
 static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
@@ -3393,7 +3396,7 @@ static void page_reset(int pg) {
     case PG_REPLIES:
         g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_bg = g_launch.chat_bg;
         g_text_col = g_launch.text_col; g_chat_middle = g_launch.chat_middle; chat_refont(); chat_hide(); break;
-    case PG_MOTIONS: motion_map_default(MOTION_MAP); break;
+    case PG_MOTIONS: motion_map_default(MOTION_MAP); HOLE_ACTS = (1u << HA_N) - 2; break;
     case PG_KEYS:
         snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
         snprintf(g_hk_reply, sizeof g_hk_reply, "%s", g_launch.hk[2]); snprintf(g_hk_set, sizeof g_hk_set, "%s", g_launch.hk[3]);
@@ -3580,15 +3583,20 @@ static void mot_refresh(int st, int rt) {
     for (int i = 0; i < g_room.n; i++) if (g_room.s[i].mo.rt == rt && g_room.s[i].mo.routine == st) g_room.s[i].mo.routine = -1;
     for (int i = 0; i < 4; i++) if (g_pv_room.s[i].mo.rt == rt && g_pv_room.s[i].mo.routine == st) g_pv_room.s[i].mo.routine = -1;
 }
+static const char *mot_name(int row, int id) { return row == 0 ? ROUTINES[id].name : row == 1 ? WHIMS[id].name : HOLE_ACT_NAME[id]; }
+static const char *mot_icon(int row, int id) { return row == 0 ? MOT_RT_ICON[id] : row == 1 ? MOT_W_ICON[id] : HOLE_ICON[id]; }
+static const char *mot_about(int row, int id) { return row == 0 ? ROUTINES[id].about : row == 1 ? (WHIMS[id].about ? WHIMS[id].about : "") : HOLE_ACT_ABOUT[id]; }
+static uint32_t mot_set(int row) { return row == 0 ? MOTION_MAP[g_pv_st].rt : row == 1 ? MOTION_MAP[g_pv_st].act : HOLE_ACTS; }
 static void mot_play(int row, int id) {
     Session *m = &g_pv_room.s[0];
     if (row == 0) motion_play(m, id);
+    else if (row == 2) hole_play(m, id); /* (it becomes a black hole first if it is not one) */
     else whim_play(m, id, wall());
     g_pv_lock_until = 0;
 }
 static void mot_toggle(int row, int id) {
     MotionMap *mm = &MOTION_MAP[g_pv_st];
-    uint32_t *set = row == 0 ? &mm->rt : &mm->act, bit = 1u << id;
+    uint32_t *set = row == 0 ? &mm->rt : row == 1 ? &mm->act : &HOLE_ACTS, bit = 1u << id;
     if (row == 0 && (*set & bit) && bits(*set) == 1) { g_mot_msg_until = wall() + 3; g_sl_dirty = 1; return; } /* a state needs a routine */
     *set ^= bit;
     if (*set & bit) mot_play(row, id); /* switched on: shown at once */
@@ -3865,20 +3873,22 @@ static void mot_tile(Pane *pn, float x0, float y0, float x1, float y1, int row, 
     int hot = is_hot(K_MTOG, row, id);
     box(pn, x0, y0, x1, y1, 10, hot && !dis ? S_CHIP_HOT : S_TILE, on ? S_OR : dis ? S_EDGE : hot ? S_EDGE_HOT : S_RULE, on ? 1.5f : 1);
     unsigned ink = on ? S_OR : dis ? 0x55555E : S_MUTED;
-    lu_icon(pn, row == 0 ? MOT_RT_ICON[id] : MOT_W_ICON[id], (x0 + x1) / 2, y0 + 20, 19, ink);
-    txa(x0 + 4, y0 + 32, x1 - 4, y1 - 4, row == 0 ? ROUTINES[id].name : WHIMS[id].name, g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
+    lu_icon(pn, mot_icon(row, id), (x0 + x1) / 2, y0 + 20, 19, ink);
+    txa(x0 + 4, y0 + 32, x1 - 4, y1 - 4, mot_name(row, id), g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
     if (!dis) hit(x0, y0, x1, y1, K_MTOG, row, id);
 }
 /* the tiles of one kind: those in use, a MORE rule, the rest; returns the height used */
 static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     int st = g_pv_st;
-    uint32_t set = row == 0 ? MOTION_MAP[st].rt : MOTION_MAP[st].act;
-    int first = 1, last = row == 0 ? RT_N : W_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (96 + 6)));
+    uint32_t set = mot_set(row);
+    int first = 1, last = row == 0 ? RT_N : row == 1 ? W_N : HA_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (96 + 6)));
     float tw = (x1 - x0 - 6 * (cols - 1)) / cols, y = y0;
     wchar_t head[80];
-    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : L"ACTIONS \x00B7 %d", bits(set & ~1u));
-    tx(x0, y, x0 + 120, y + 18, head, g_sf_cap, S_MUTED, DT_LEFT);
-    tx(x0 + 110, y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : L"played now and then while left alone", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : row == 1 ? L"ACTIONS \x00B7 %d" : L"BLACK HOLE \x00B7 %d", bits(set & ~1u));
+    float hx = x0;
+    if (row == 2) { lu_icon(pn, MOT_RT_ICON[RT_HOLE], x0 + 7, y + 9, 13, S_OR); hx += 20; } /* the black hole's own: marked as its */
+    tx(hx, y, hx + 120, y + 18, head, g_sf_cap, row == 2 ? S_TEXT : S_MUTED, DT_LEFT);
+    tx(hx + (row == 2 ? 120 : 110), y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : row == 1 ? L"played now and then while left alone" : L"its own actions, now and then, once it is a black hole", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     y += 26;
     for (int pass = 0; pass < 2; pass++) {
         float zy = y;
@@ -3891,6 +3901,7 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
             k++;
         }
         if (!pass && !k) { tx(x0, y + 4, x1, y + 52, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
+        if (pass && !k) { tx(x0, y, x1, y + 30, L"All in use. Drag one down here to stop it.", g_sf_small, 0x6E6E78, DT_CENTER); y += 34; } /* still a place to drop on */
         y += ((k + cols - 1) / cols) * 64;
         g_mzone[row][pass] = SR(x0 - 4, zy - 4, x1 + 4, y); /* where a dragged tile lands in use (0) or out (1) */
         if (g_md_row == row && g_md_moved && PtInRect(&g_mzone[row][pass], g_md_at)) frame(pn, x0 - 4, zy - 4, x1 + 4, y - 2, 12, S_OR, 1.5f); /* it would land here */
@@ -3938,7 +3949,8 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     float ey = cw >= 720 ? y0 : y0 + lh + 12;
     int st = g_pv_st;
     float iy = ey + 16 + 30 + 10, ty = iy + 44 + 16;
-    float th = mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16); /* (measured off the page) */
+    int hole = st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1); /* asleep as a black hole: its own actions first */
+    float th = mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16) + (hole ? 16 + 24 + mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28) : 0); /* (measured off the page) */
     float eh = (ty - ey) + th + 16;
     box(pn, ex0, ey, x1, ey + eh, 12, S_CARD, 0, 0);
     aa_disc(pn, S(ex0 + 22), S(ey + 31), S(5), LOOKS[st].halo, 1);
@@ -3956,8 +3968,8 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     char line[400];
     if (g_hot >= 0 && g_hits[g_hot].kind == K_MTOG) {
         int row = g_hits[g_hot].row, id = g_hits[g_hot].val;
-        lu_icon(pn, row == 0 ? MOT_RT_ICON[id] : MOT_W_ICON[id], ex0 + 36, iy + 22, 18, S_OR);
-        snprintf(line, sizeof line, "%s: %s", row == 0 ? ROUTINES[id].name : WHIMS[id].name, row == 0 ? ROUTINES[id].about : WHIMS[id].about ? WHIMS[id].about : "");
+        lu_icon(pn, mot_icon(row, id), ex0 + 36, iy + 22, 18, S_OR);
+        snprintf(line, sizeof line, "%s: %s", mot_name(row, id), mot_about(row, id));
         txa(ex0 + 54, iy, x1 - 26, iy + 44, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
     } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
     else {
@@ -3965,8 +3977,15 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
         swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
         tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     }
-    float h0 = mot_tiles(pn, 0, ex0 + 16, ty, x1 - 16);
-    mot_tiles(pn, 1, ex0 + 16, ty + h0 + 16, x1 - 16);
+    float hh = 0;
+    if (hole) { /* the black hole's own actions, in a frame of their own above the state's */
+        float hin = mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28);
+        box(pn, ex0 + 16, ty, x1 - 16, ty + hin + 24, 12, S_TILE, S_RULE, 1);
+        mot_tiles(pn, 2, ex0 + 28, ty + 12, x1 - 28);
+        hh = hin + 24 + 16;
+    }
+    float h0 = mot_tiles(pn, 0, ex0 + 16, ty + hh, x1 - 16);
+    mot_tiles(pn, 1, ex0 + 16, ty + hh + h0 + 16, x1 - 16);
     return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0);
 }
 
@@ -4075,8 +4094,8 @@ static void set_build(void) {
     if (g_md_row >= 0 && g_md_moved) { /* a motion tile being carried: under the pointer, over everything */
         float gx = g_md_at.x / (float)g_sdpi, gy = g_md_at.y / (float)g_sdpi, row = (float)g_md_row;
         box(pn, gx - 46, gy - 29, gx + 46, gy + 29, 10, S_CHIP_HOT, S_OR, 1.5f);
-        lu_icon(pn, g_md_row == 0 ? MOT_RT_ICON[g_md_id] : MOT_W_ICON[g_md_id], gx, gy - 9, 19, S_OR);
-        txa(gx - 42, gy + 3, gx + 42, gy + 25, g_md_row == 0 ? ROUTINES[g_md_id].name : WHIMS[g_md_id].name, g_sf_small, S_TEXT, DT_CENTER | DT_END_ELLIPSIS);
+        lu_icon(pn, mot_icon(g_md_row, g_md_id), gx, gy - 9, 19, S_OR);
+        txa(gx - 42, gy + 3, gx + 42, gy + 25, mot_name(g_md_row, g_md_id), g_sf_small, S_TEXT, DT_CENTER | DT_END_ELLIPSIS);
         (void)row;
     }
     /* the size grip, and the edges that resize */
@@ -4339,7 +4358,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
             case K_MTOG: g_md_row = sh->row; g_md_id = sh->val; g_md_moved = 0; g_md_from = g_md_at = p; SetCapture(w); break; /* a click or a drag: told apart on the move */
             case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
-            case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; settings_applied(1); break; }
+            case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; if (g_pv_st == ST_SLEEP) HOLE_ACTS = (1u << HA_N) - 2; settings_applied(1); break; }
             case K_KREC: if (g_krec == sh->val) krec_stop(); else { g_krec = sh->val; for (int i = 1; i <= 4; i++) UnregisterHotKey(g_cluster.w, i); g_sl_dirty = 1; } break; /* (no hotkey steals the keys meanwhile) */
             case K_RESET: if (sh->row == 1) page_reset(g_tab); else set_reset(); break;
             case K_SIZE: g_sizing = sh->val; GetCursorPos(&g_size_from); g_size_w0 = g_set_w; g_size_h0 = g_set_h; SetCapture(w); break;
@@ -4361,7 +4380,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1;
             ReleaseCapture();
             if (!moved) { mot_play(row, id); return 0; }
-            uint32_t set = row == 0 ? MOTION_MAP[g_pv_st].rt : MOTION_MAP[g_pv_st].act;
+            uint32_t set = mot_set(row);
             int on = (set >> id) & 1;
             if ((PtInRect(&g_mzone[row][0], p) && !on) || (PtInRect(&g_mzone[row][1], p) && on)) mot_toggle(row, id);
             return 0;
@@ -4953,7 +4972,8 @@ static void usage(void) {
         "  --on X,Y             --record and the Settings window go on the monitor with that desktop point\n"
         "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab NAME  open it on that page: look, cluster, replies, motions, shortcuts, performance\n"
-        "  --settings-fold      with its sidebar folded to icons\n\n"
+        "  --settings-fold      with its sidebar folded to icons\n"
+        "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, chat box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
@@ -4996,6 +5016,10 @@ int main(int argc, char **argv) {
             g_open_settings = 1; i++;
         }
         else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
+        else if (!strcmp(a, "--settings-state") && v) { /* the state its preview (and Motions) shows: idle, think, work, wait, cheer, sleep, ... */
+            for (int k = 0; k < ST_N; k++) if (!_strnicmp(v, STATE_NAME[k], 4)) g_pv_st = k;
+            i++;
+        }
         else if (!strcmp(a, "--on") && v && sscanf(v, "%ld,%ld", &g_on.x, &g_on.y) == 2) { g_on_set = 1; i++; }
         else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
         else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
