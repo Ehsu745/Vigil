@@ -21,7 +21,7 @@
 
 When you run several Claude Code sessions, or leave one working while you do something else, Vigil shows which ones are thinking, running a tool, waiting for your approval or done. It runs in a terminal pane, or as a small always-on-top window on macOS and Windows.
 
-In the window you can point at a session's core to read its last reply, and on Windows double-click it to type an answer, so you don't have to switch back to the terminal each time an agent finishes.
+In the window you can point at a session's core to read its last reply, and double-click it to type an answer, so you don't have to switch back to the terminal each time an agent finishes.
 
 A Claude Code hook appends one line per event to a file; a C program reads the file and draws the cores with its own renderer. Everything runs locally, with no network access, and needs only libc, libm and zlib.
 
@@ -81,13 +81,13 @@ sh win/build.sh && ./vigil-win --demo       # Windows: run from WSL (needs mingw
 <sub>Point at a core to see its last reply, or the approval it is waiting for. After 2 s the focus frame locks on.</sub></p>
 
 <p align="center"><img src="assets/demos/input.gif" width="800" alt="Scrolling a long reply, then typing an answer with an image attached"><br>
-<sub>The wheel scrolls a long reply. Double-click opens a reply box; an image dragged onto the core is added as <code>[Image #1]</code>. Enter sends it to that session (Windows).</sub></p>
+<sub>The wheel scrolls a long reply. Double-click opens a reply box; an image dragged onto the core is added as <code>[Image #1]</code>. Enter sends it to that session.</sub></p>
 
 <p align="center"><img src="assets/demos/carry.gif" width="806" alt="Carrying the cores: a fast move leaves the small ones behind; moving close brings them back"><br>
 <sub>Alt-click picks the cores up, and the small ones follow on their orbit. Move too fast and they drop off and bounce off the screen edge; bring the main core close to one and it returns to its orbit. Gravity: Floaty.</sub></p>
 
 - **One core or all.** In single-core mode one large core shows the session that needs you (else the one with the newest reply), and the other sessions are small cores around it; in all-cores mode each session is its own core. The Windows panel starts in single-core mode (`--all` for all cores, each placed where you like); the macOS panel starts with all cores in a column on the right edge (`--single` or `⌃⌥C` for single-core mode).
-- **Replying.** Windows: double-click a core, type, Enter; images can be dropped on the core. macOS: hold a core and speak (push-to-talk, recognised on the Mac); the text goes into that session's iTerm2 pane.
+- **Replying.** Double-click a core, type, Enter; images can be dropped on the core. On macOS you can also hold a core and speak (push-to-talk, recognised on the Mac); the text goes into that session's iTerm2 pane.
 - **Spoken reports** (macOS, `--voice`): clicking a core reads a short summary of its reply.
 - **Settings** (Windows: right-click > Settings): shape, glow, size, gravity, focus frame, which way the wheel spins a core, the text box's font, size, box and text colours, and which motions each state uses, with a live preview. On the Mac, right-click > Settings is a menu: voice, reading new replies aloud, summaries by Claude, labels, text size, glow, shape and away time.
 
@@ -165,7 +165,7 @@ The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel 
 | Unread reply | — | A slow, soft flash until you click it or send a new prompt |
 | Click | Speaks the report, or stops it; marks the reply as read | The patch you clicked goes in and the press travels out through its neighbours; then SPEAKING (teal) |
 | Hold (> 0.35 s), release | Push-to-talk: what you say is shown under the core for 1.5 s, then typed into that session with Return; click the core in that time to cancel | LISTENING while held (green, shell stops, glow follows the microphone), then TRANSCRIBING (violet sparks racing along the edges) |
-| Double-click | Brings that session's iTerm2 pane to the front | One shockwave ring |
+| Double-click | Opens a reply box under the core's tooltip: type, Enter sends it to that session (Shift+Enter: a new line; the pane gets it as one line), Esc or its ✕ closes it and keeps the draft; it stays open when you click elsewhere, so you can pick up an image in Finder or the screenshot thumbnail. Images dropped on the core or the box, or pasted with ⌘V, each put an `[Image #N]` token at the cursor, as in Claude Code; Backspace takes a whole token, and on send each token becomes the image's path. While Claude is working it asks first, as for a spoken reply | One shockwave ring; a core with images dragged over it reads them (TRANSCRIBING) |
 | Right-click | Menu: Replay, Copy reply, Mute this session, Bring to front, and **Settings** (voice, read new replies aloud, summaries by Claude, wait before sending, labels, text size, glow, shape, away time). Settings apply at once, are saved in `~/.dodeca-core/panel-settings.json` and win over the launch options; Settings > Use launch options again forgets them. With no session running, right-click shows Settings only | — |
 | Drag | Turns the polyhedron by hand; let go while moving and it spins on, slowing back to its own rotation | — |
 | Scroll | This core's speech volume | The shell gets thicker or thinner for a moment |
@@ -180,7 +180,7 @@ The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel 
 - A single click waits for the system's double-click time before it acts, so a double click never starts with a single one.
 - Hotkeys use `RegisterEventHotKey`, which needs no Accessibility permission. Esc is only taken while recording, so the terminal keeps it otherwise. `--hotkey ctrl+opt+v` changes the push-to-talk key (`cmd`, `opt`, `ctrl`, `shift` plus a letter, digit, `space`, `return`, `tab` or `f1`–`f12`; `none` turns it off). macOS already uses ⌃Space, ⌃⌥Space, ⌘Space and ⌥⌘Space, so the default is `⌃⌥V`.
 - Away is read from the system's "seconds since last input" (no Input Monitoring permission, no key logging). `--away SECONDS` changes the 120 s; `--away 0` turns it off.
-- Double-click and "Bring to front" need `DODECA_RICH` (the iTerm2 session id is kept in the msg file) and, the first time, your OK for the panel to control iTerm2 (System Settings > Privacy & Security > Automation).
+- Sending a reply and "Bring to front" need `DODECA_RICH` (the iTerm2 session id is kept in the msg file) and, the first time, your OK for the panel to control iTerm2 (System Settings > Privacy & Security > Automation).
 
 **Spoken reports.** A report starts with where it comes from: "notes 完成了：…" for a reply, "notes 需要你：…" with the permission request while a session needs you. Only one session speaks at a time, others wait their turn, and a permission request goes to the front of the queue.
 
@@ -206,7 +206,7 @@ The cores in `vigil-panel` react to the mouse and to a global hotkey. The panel 
 1. `sh mac/build.sh`, then start the panel with `--voice` (`DODECA_PANE_ARGS="--voice"` for the pane opened by `open_pane.sh`).
 2. `python3 install_hooks.py --rich --apply`, so replies and the iTerm2 session id are kept (start new Claude Code sessions afterwards).
 3. The first time you hold a core, macOS asks for the microphone and for speech recognition: allow both, then hold again.
-4. The first time a reply is sent or you double-click a core, macOS asks whether Vigil may control iTerm2: allow it (System Settings > Privacy & Security > Automation).
+4. The first time a reply is sent or you choose Bring to front, macOS asks whether Vigil may control iTerm2: allow it (System Settings > Privacy & Security > Automation).
 5. Optional: a better zh-TW voice (System Settings > Accessibility > Spoken Content > System Voice > Manage Voices); iTerm2 > Settings > General > Magic > Enable Python API, as the fallback for sending.
 - How each reaction looks is set in `src/session.c`: `LOOKS` (the SPEAKING, LISTENING, TRANSCRIBING and STANDBY rows), `HOVER` and `TOUCH`.
 

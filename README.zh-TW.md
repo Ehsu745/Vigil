@@ -21,7 +21,7 @@
 
 同時開好幾個 Claude Code session，或讓一個在背景跑、自己去做別的事時，Vigil 會顯示哪些在思考、在執行工具、在等你核准，或已經做完。它可以開在終端機的一個窗格裡，也可以是 macOS 和 Windows 上一個永遠在最上層的小視窗。
 
-在小視窗裡，指著某個 session 的核心就能看它最後一則回覆；Windows 上雙擊核心可以直接輸入回覆。agent 做完時，不用每次都切回終端機。
+在小視窗裡，指著某個 session 的核心就能看它最後一則回覆；雙擊核心可以直接輸入回覆。agent 做完時，不用每次都切回終端機。
 
 Claude Code 的 hook 每個事件在檔案裡加一行；一個 C 程式讀這個檔案，用自己的渲染器畫出核心。全部在本機執行，不連網路，只需要 libc、libm 和 zlib。
 
@@ -81,13 +81,13 @@ sh win/build.sh && ./vigil-win --demo       # Windows：在 WSL 裡執行（需�
 <sub>指著核心會顯示它最後一則回覆，或它在等的核准。停 2 秒後對焦框會鎖定。</sub></p>
 
 <p align="center"><img src="assets/demos/input.gif" width="800" alt="捲動一則長回覆，再輸入回覆並附上一張圖片"><br>
-<sub>滾輪捲動長回覆。雙擊打開回覆框；拖到核心上的圖片會變成 <code>[Image #1]</code>。按 Enter 送到那個 session（Windows）。</sub></p>
+<sub>滾輪捲動長回覆。雙擊打開回覆框；拖到核心上的圖片會變成 <code>[Image #1]</code>。按 Enter 送到那個 session。</sub></p>
 
 <p align="center"><img src="assets/demos/carry.gif" width="806" alt="拿著核心移動：移動太快小核心會掉下來，靠近就會回到軌道"><br>
 <sub>Alt 點一下就能拿起核心，小核心沿著軌道跟著走。移動太快它們會掉下來，撞到螢幕邊緣彈開；把主核心移到旁邊，它就會回到軌道上。重力：Floaty。</sub></p>
 
 - **一顆或全部。** 單核心模式是一顆大核心顯示需要你的 session（沒有的話是最新回覆的那個），其他 session 是旁邊的小核心；全部核心模式則每個 session 各自一顆。Windows 面板預設是單核心模式（`--all` 切成全部核心，每顆放在你想放的位置）；macOS 面板預設是全部核心，排在螢幕右緣一列（`--single` 或 `⌃⌥C` 切成單核心模式）。
-- **回覆。** Windows：雙擊核心、輸入、按 Enter，可以把圖片拖到核心上。macOS：按住核心說話（按住說話，在 Mac 上辨識），文字會打進那個 session 的 iTerm2 窗格。
+- **回覆。** 雙擊核心、輸入、按 Enter，可以把圖片拖到核心上。macOS 也可以按住核心說話（按住說話，在 Mac 上辨識），文字會打進那個 session 的 iTerm2 窗格。
 - **語音回報**（macOS，`--voice`）：點核心會念出它回覆的簡短摘要。
 - **設定**（Windows：右鍵 > Settings）：形狀、光暈、大小、重力、對焦框、滾輪讓核心往哪個方向轉、文字框的字型、大小、底色和文字顏色，以及每個狀態用哪些動作，附即時預覽。Mac 上右鍵 > Settings 是一個選單：語音、自動唸出新回覆、用 Claude 摘要、標籤、字體大小、光暈、形狀和離開時間。
 
@@ -165,7 +165,7 @@ sh mac/build.sh
 | 有未讀回覆 | — | 規律的柔和閃光，直到你點它或送出新的 prompt |
 | 單擊 | 念出回報，或停止；回覆標成已讀 | 被點的碎片凹進去，這一下會往周圍的碎片傳出去；然後 SPEAKING（青綠色） |
 | 長按（> 0.35 秒）後放開 | 按住說話：說的話會在核心下方顯示 1.5 秒，然後打進那個 session 並按 Enter；這段時間內點核心可以取消 | 按住時 LISTENING（綠色、外殼停轉、光暈隨麥克風音量變大），放開後 TRANSCRIBING（紫色光點沿邊線快速繞行） |
-| 雙擊 | 把那個 session 的 iTerm2 窗格叫到最前面 | 一圈衝擊波 |
+| 雙擊 | 在核心的提示框下方打開回覆框：輸入後按 Enter 送到那個 session（Shift+Enter 換行，窗格收到時會合成一行），Esc 或右上角的 ✕ 會關閉並保留草稿；點其他地方時回覆框不會關，方便你到 Finder 或截圖縮圖上拿圖片。拖到核心或回覆框上、或用 ⌘V 貼上的圖片，會在游標處各放一個 `[Image #N]` 標記，和 Claude Code 一樣；Backspace 一次刪掉整個標記，送出時每個標記會換成圖片的路徑。Claude 還在工作時會先問你，和語音回覆一樣 | 一圈衝擊波；圖片拖到核心上方時，核心會讀取（TRANSCRIBING） |
 | 右鍵 | 選單：重播、複製回覆、靜音這個 session、叫到最前面，以及 **Settings**（語音、自動唸出新回覆、用 Claude 摘要、送出前等點擊、標籤、字體大小、光暈、形狀、離開時間）。設定立刻生效，存在 `~/.dodeca-core/panel-settings.json`，優先於啟動參數；Settings > Use launch options again 會清掉它們。沒有 session 時右鍵只顯示 Settings | — |
 | 拖曳 | 用手轉動多面體；邊移動邊放開會繼續轉，慢慢回到自己的轉速 | — |
 | 滾輪 | 這顆核心的語音音量 | 外殼短暫變粗或變細 |
@@ -180,7 +180,7 @@ sh mac/build.sh
 - 單擊會等系統的雙擊時間過了才動作，所以雙擊不會先觸發一次單擊。
 - 快捷鍵用 `RegisterEventHotKey`，不需要「輔助使用」權限。Esc 只在錄音時才攔，其他時候終端機照常收得到。`--hotkey ctrl+opt+v` 可以改按住說話的按鍵（`cmd`、`opt`、`ctrl`、`shift` 加上一個字母、數字、`space`、`return`、`tab` 或 `f1`–`f12`；`none` 關閉）。macOS 已經用掉 ⌃Space、⌃⌥Space、⌘Space 和 ⌥⌘Space，所以預設是 `⌃⌥V`。
 - 是否離開是看系統提供的「距離上次輸入的秒數」（不需要「輸入監控」權限，也不記錄按鍵）。`--away 秒數` 改掉預設的 120 秒；`--away 0` 關閉。
-- 雙擊和「叫到最前面」需要 `DODECA_RICH`（iTerm2 session id 存在 msg 檔裡），第一次使用時還要允許面板控制 iTerm2（系統設定 > 隱私權與安全性 > 自動化）。
+- 送出回覆和「叫到最前面」需要 `DODECA_RICH`（iTerm2 session id 存在 msg 檔裡），第一次使用時還要允許面板控制 iTerm2（系統設定 > 隱私權與安全性 > 自動化）。
 
 **語音回報。** 回報開頭會說來源：回覆是「notes 完成了：…」，需要你核准時是「notes 需要你：…」加上權限請求的內容。同一時間只有一個 session 在說話，其他的排隊，權限請求會插到隊伍最前面。
 
@@ -206,7 +206,7 @@ sh mac/build.sh
 1. `sh mac/build.sh`，然後用 `--voice` 啟動面板（`open_pane.sh` 開的窗格用 `DODECA_PANE_ARGS="--voice"`）。
 2. `python3 install_hooks.py --rich --apply`，保留回覆和 iTerm2 session id（之後新開的 Claude Code session 才會生效）。
 3. 第一次按住核心時，macOS 會問麥克風和語音辨識權限：兩個都允許，然後再按住一次。
-4. 第一次送出回覆或雙擊核心時，macOS 會問 Vigil 能不能控制 iTerm2：允許（系統設定 > 隱私權與安全性 > 自動化）。
+4. 第一次送出回覆或選「Bring to front」時，macOS 會問 Vigil 能不能控制 iTerm2：允許（系統設定 > 隱私權與安全性 > 自動化）。
 5. 選用：更好的 zh-TW 聲音（系統設定 > 輔助使用 > 朗讀內容 > 系統聲音 > 管理聲音）；iTerm2 > Settings > General > Magic > Enable Python API，當作送出的備援。
 - 每種反應的樣子在 `src/session.c` 設定：`LOOKS`（SPEAKING、LISTENING、TRANSCRIBING、STANDBY 那幾列）、`HOVER` 和 `TOUCH`。
 
