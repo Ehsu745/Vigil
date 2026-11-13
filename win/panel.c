@@ -95,6 +95,14 @@ static double qpc_ms(void) { LARGE_INTEGER q, f; QueryPerformanceCounter(&q); Qu
 static int g_single = 1;            /* --all: every core its own window */
 static int g_others = 1;            /* the other sessions float around small (--no-others: only the one in focus) */
 static char g_mode_hotkey[32] = "ctrl+alt+c";
+static char g_hk_hide[32] = "ctrl+alt+v", g_hk_reply[32] = "ctrl+alt+r", g_hk_set[32] = "none"; /* Settings > Shortcuts: global hotkeys */
+static int g_hk_fail[4];            /* a hotkey another app holds (RegisterHotKey failed) */
+static int g_move_mod = VK_MENU;    /* the key held to move (drag) or carry (click) a core */
+static int g_send_ctrl;             /* the reply line sends with Ctrl+Enter (and Enter makes a new line) */
+static int g_hidden;                /* Show or hide Vigil: every core window hidden */
+static float g_set_w = 1000, g_set_h = 720; /* the Settings window's size (96-dpi units), kept */
+static int g_set_side = 1;          /* its sidebar open (else a rail of icons), kept */
+static void hotkeys_apply(void);
 static char g_focus[72];            /* the session in the middle */
 static int g_focus_pinned;          /* chosen by a click or the menu: auto-follow is off until "Follow automatically" */
 static double g_focus_since;
@@ -133,7 +141,7 @@ static double rush_t[128];
 static POINT rush_p[128];
 static int rush_n;
 
-enum { ID_TIMER = 1, HK_MODE = 1, WM_UNHOOK = WM_APP + 1,
+enum { ID_TIMER = 1, HK_MODE = 1, HK_HIDE = 2, HK_REPLY = 3, HK_SET = 4, WM_UNHOOK = WM_APP + 1,
        ID_QUIT = 100, ID_PIN = 400, ID_MODE = 500, ID_FOLLOW, ID_RESET,
        ID_COPY = 1200, ID_FRONT, ID_REPLY, ID_SENDKEYS = 1400, ID_SENDENTER, ID_SETTINGS = 1500, ID_SMOOTH = 1600 };
 static const char *SHAPES[4] = {"dodeca", "bucky", "geo2", "geo3"};
@@ -326,7 +334,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, chat_size; int smooth; Smooth custom; int others, labels, chat_middle, chat_mono, chat_bg, wheel_spin, text_col; unsigned chat_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int smooth; Smooth custom; int others, labels, chat_middle, chat_mono, chat_bg, wheel_spin, text_col; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -341,6 +349,8 @@ static void remember_launch(void) {
     g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
+    snprintf(g_launch.hk[0], 32, "%s", g_mode_hotkey); snprintf(g_launch.hk[1], 32, "%s", g_hk_hide); snprintf(g_launch.hk[2], 32, "%s", g_hk_reply); snprintf(g_launch.hk[3], 32, "%s", g_hk_set);
+    g_launch.move_mod = g_move_mod; g_launch.send_ctrl = g_send_ctrl;
 }
 
 static void restore_launch(void) {
@@ -351,6 +361,8 @@ static void restore_launch(void) {
     g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
+    snprintf(g_mode_hotkey, 32, "%s", g_launch.hk[0]); snprintf(g_hk_hide, 32, "%s", g_launch.hk[1]); snprintf(g_hk_reply, 32, "%s", g_launch.hk[2]); snprintf(g_hk_set, 32, "%s", g_launch.hk[3]);
+    g_move_mod = g_launch.move_mod; g_send_ctrl = g_launch.send_ctrl;
 }
 
 static int json_num(const char *j, const char *key, float *v) {
@@ -379,7 +391,7 @@ static int json_masks(const char *j, const char *key, uint32_t *out) {
 }
 
 static void settings_load(void) {
-    char path[1100], buf[4096];
+    char path[1100], buf[8192];
     if (!settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "rb");
     if (!f) return;
@@ -411,6 +423,14 @@ static void settings_load(void) {
     Smooth cu;
     if ((c = strstr(buf, "\"smoothCustom\"")) && sscanf(c, "\"smoothCustom\" : [ %f , %f , %f , %f , %f ]", &cu.idle, &cu.think, &cu.busy, &cu.rest, &cu.hand) == 5)
         g_smooth_custom = cu;
+    if (json_num(buf, "setW", &v) && v >= 620 && v <= 6000) g_set_w = v; /* the Settings window itself */
+    if (json_num(buf, "setH", &v) && v >= 480 && v <= 6000) g_set_h = v;
+    if (json_num(buf, "setSide", &v)) g_set_side = v != 0;
+    if (json_num(buf, "moveMod", &v) && (v == VK_MENU || v == VK_CONTROL || v == VK_SHIFT)) g_move_mod = (int)v; /* Settings > Shortcuts */
+    if (json_num(buf, "sendCtrl", &v)) g_send_ctrl = v != 0;
+    static const char *HKK[4] = {"hkMode", "hkHide", "hkReply", "hkSettings"};
+    char *hks[4] = {g_mode_hotkey, g_hk_hide, g_hk_reply, g_hk_set}, pat[48], hv[32];
+    for (int i = 0; i < 4; i++) { snprintf(pat, sizeof pat, "\"%s\" : \"%%31[a-z0-9+]\"", HKK[i]); if ((c = strstr(buf, HKK[i]) ? strstr(buf, HKK[i]) - 1 : NULL) && sscanf(c, pat, hv) == 1) snprintf(hks[i], 32, "%s", hv); }
     uint32_t rt[ST_N], act[ST_N]; /* Settings > Motions */
     MotionMap def[ST_N];
     motion_map_init();
@@ -437,7 +457,9 @@ static void settings_save(void) {
     fprintf(f, "], \"mapActions\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
     const Smooth *cu = &g_smooth_custom;
-    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g]}\n", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand);
+    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand);
+    fprintf(f, "\"setW\": %g, \"setH\": %g, \"setSide\": %d, \"hkMode\": \"%s\", \"hkHide\": \"%s\", \"hkReply\": \"%s\", \"hkSettings\": \"%s\", \"moveMod\": %d, \"sendCtrl\": %d}\n",
+            g_set_w, g_set_h, g_set_side, g_mode_hotkey, g_hk_hide, g_hk_reply, g_hk_set, g_move_mod, g_send_ctrl);
     fclose(f);
 }
 
@@ -1177,9 +1199,17 @@ void dpi_follow(int force) {
     pics_invalidate();
 }
 
+static void chat_hide(void);
 static void draw(double now) {
     Room *room = shown_room();
     int n = room->n > MAX_SESS ? MAX_SESS : room->n;
+    if (g_hidden) { /* Show or hide Vigil: hidden, till the hotkey again */
+        for (int i = 0; i < MAX_SESS; i++) pane_hide(&g_pane[i]);
+        pane_hide(&g_cluster);
+        chat_hide();
+        g_core_n = 0;
+        return;
+    }
     dpi_follow(0);
     g_need_hz = 0;
     for (int i = 0; i < n; i++) { double r = core_rate(&room->s[i], now, 1.5f); if (r > g_need_hz) g_need_hz = r; }
@@ -2245,6 +2275,41 @@ static int token_key(HWND w, int back) {
     return done;
 }
 
+/* the command line's keys in the reply line: Ctrl+C with nothing selected clears it (with a selection it copies, as
+ * usual), Ctrl+W and Ctrl+Backspace delete the word before the cursor (back to the space before it; an image token
+ * whole), Ctrl+U everything before the cursor on its line. 1 if the key was used. */
+static int edit_cli_key(HWND w, int key) {
+    DWORD a = 0, b = 0;
+    SendMessageW(w, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+    if (key == 'C') {
+        if (a != b) return 0; /* a selection: copied as usual */
+        SetWindowTextW(w, L"");
+        g_attach_n = g_attach_next = 0;
+        InvalidateRect(g_input, NULL, FALSE);
+        return 1;
+    }
+    if (a != b) { SendMessageW(w, EM_REPLACESEL, TRUE, (LPARAM)L""); InvalidateRect(g_input, NULL, FALSE); return 1; } /* a selection: it goes */
+    wchar_t *t = edit_text();
+    int st = (int)a;
+    if (key == 'U') while (st > 0 && t[st - 1] != L'\r' && t[st - 1] != L'\n') st--;
+    else {
+        while (st > 0 && (t[st - 1] == L' ' || t[st - 1] == L'\t')) st--;
+        while (st > 0 && t[st - 1] != L' ' && t[st - 1] != L'\t' && t[st - 1] != L'\r' && t[st - 1] != L'\n') st--;
+        if (st == (int)a && st > 0) st--; /* at the start of a line: the line break before it */
+        for (int k = st - 20 < 0 ? 0 : st - 20; k < st; k++) { /* inside an image token ("[Image #3]" has a space): the whole token */
+            int id, used = 0;
+            if (!wcsncmp(t + k, L"[Image #", 8) && swscanf(t + k + 8, L"%d]%n", &id, &used) == 1 && k + 8 + used >= st) { st = k; break; }
+        }
+    }
+    free(t);
+    if (st < (int)a) {
+        SendMessageW(w, EM_SETSEL, st, a);
+        SendMessageW(w, EM_REPLACESEL, TRUE, (LPARAM)L"");
+        InvalidateRect(g_input, NULL, FALSE);
+    }
+    return 1;
+}
+
 static void bring_to_front(const Session *s);
 
 static void send_reply(void) {
@@ -2332,11 +2397,14 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_SETCURSOR && g_hide_pointer) { SetCursor(NULL); return TRUE; }
     if (msg == WM_IME_STARTCOMPOSITION) edit_typing_face(w, 1);
     if (msg == WM_CHAR && wp >= 32) edit_typing_face(w, cjk_char((wchar_t)wp));
-    if (msg == WM_KEYDOWN && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) { send_reply(); return 0; }
+    int ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (msg == WM_KEYDOWN && wp == VK_RETURN && (g_send_ctrl ? ctrl_down : !shift_down)) { send_reply(); return 0; } /* Enter sends (Shift+Enter: a new line), or Ctrl+Enter (Settings > Shortcuts) */
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
     if (msg == WM_PASTE) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
+    if (msg == WM_KEYDOWN && ctrl_down && (wp == 'C' || wp == 'W' || wp == 'U' || wp == VK_BACK) && edit_cli_key(w, (int)wp)) return 0; /* like a command line */
+    if (msg == WM_CHAR && ctrl_down && (wp == 3 || wp == 23 || wp == 21 || wp == 127)) return 0; /* (the characters those keys would type) */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
-    if (msg == WM_CHAR && (wp == L'\r' || wp == 27) && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
+    if (msg == WM_CHAR && (wp == 27 || (wp == L'\r' && !g_send_ctrl && !shift_down) || (wp == L'\n' && g_send_ctrl))) return 0;
     if (msg == WM_MOUSEWHEEL) { chat_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
     return CallWindowProcW(g_edit_proc, w, msg, wp, lp);
 }
@@ -2717,7 +2785,7 @@ static void track_mouse(double now) {
 
 /* Alt held down: with nothing else typed, letting go of Alt would open the menu bar of the window with the
  * keyboard focus. A key press nobody uses (vk 0xE8) in between stops that. */
-static int alt_held(void) { return (GetAsyncKeyState(VK_MENU) & 0x8000) != 0; }
+static int alt_held(void) { return (GetAsyncKeyState(g_move_mod) & 0x8000) != 0; } /* the move key (Settings > Shortcuts; Alt by default) */
 void mask_alt(void) {
     INPUT in[2];
     memset(in, 0, sizeof in);
@@ -3021,48 +3089,72 @@ static double tick_interval(void) {
     return 1.0 / (need > g_hz ? g_hz : need);
 }
 
-/* ---- the Settings window: a dark card (design "A, calm cards"), a live preview across the top (the cluster with
- * its gravity: drag the core; the state it shows; a reply in the chat box's font), three cards below (Look, Motion,
- * Replies) with icon tiles, sliders, a switch and chips. Drawn antialiased into its own bitmap and shown as a
- * layered window, so the corners are smooth too. Every choice applies at once and is kept, as the menu's were. */
-enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL };
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
+/* ---- the Settings window (web/settings-mock.html is its design): a sidebar of pages that folds to icons, a big
+ * live preview across the top (the cluster with its gravity: drag the core; the wheel zooms; the state it shows), and
+ * below it the page: section cards of rows, each a name (and hint) on the left and its control on the right. The
+ * window resizes from its edges and corner; its size and the sidebar's fold are kept. Drawn antialiased into its own
+ * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
+#include "lucide.h"
+enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE };
+enum { PG_LOOK, PG_CLUSTER, PG_REPLIES, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
+static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Replies", L"Motions", L"Shortcuts", L"Performance"};
+static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
+static const char *PG_ICON[PG_N] = {"palette", "orbit", "message", "activity", "keyboard", "gauge"};
 typedef struct { RECT r; int kind, row, val, n; float t0, t1; } SetHit; /* a slider: n stops from t0 to t1 (pixels) */
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
 static const wchar_t *PV_NAMES[6] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep"};
-static const wchar_t *AWAY_TEXT[4] = {L"1 minute", L"2 minutes", L"5 minutes", L"never"};
 
 /* the palette (0xRRGGBB) */
 static const unsigned S_BG = 0x18181B, S_BAND = 0x0F0F12, S_CARD = 0x212126, S_TILE = 0x19191D, S_EDGE = 0x34343B,
                       S_EDGE_HOT = 0x55555E, S_TEXT = 0xECECEF, S_LABEL = 0xA1A1AA, S_MUTED = 0x8B8B94, S_CHIP = 0x27272D,
-                      S_CHIP_HOT = 0x323239, S_CHIP_TXT = 0xB4B4BC, S_OR = 0xFF8A1F, S_ON_OR = 0x1F1206, S_KNOB = 0xFFF1E3, S_CLOSE_HOT = 0x5A2A22;
+                      S_CHIP_HOT = 0x323239, S_CHIP_TXT = 0xB4B4BC, S_OR = 0xFF8A1F, S_ON_OR = 0x1F1206, S_KNOB = 0xFFF1E3, S_CLOSE_HOT = 0x5A2A22,
+                      S_SIDE = 0x131316, S_RULE = 0x2C2C33;
 static Col hexc(unsigned v) { Col c = {(v >> 16 & 255) / 255.0f, (v >> 8 & 255) / 255.0f, (v & 255) / 255.0f}; return c; }
 static COLORREF hexr(unsigned v) { return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
 
 static Pane g_sl, g_so;             /* the window's still layer (redrawn when something changes) and what is shown */
 static int g_sl_dirty = 1;
-static HFONT g_sf_title, g_sf_card, g_sf_text, g_sf_label, g_sf_small, g_sf_aa, g_sf_aam;
-static SetHit g_hits[200];
+static HFONT g_sf_title, g_sf_card, g_sf_text, g_sf_label, g_sf_small, g_sf_aa, g_sf_aam, g_sf_cap;
+static SetHit g_hits[400];
 static int g_hits_n, g_hot = -1, g_slide = -1, g_tracking, g_close_armed; /* armed: pressed on the close button */
-typedef struct { RECT r; wchar_t t[160]; HFONT f; COLORREF c; UINT how; } TextOp;
-static TextOp g_tx[160];
+typedef struct { RECT r; wchar_t t[160]; HFONT f; COLORREF c; UINT how; int clip; } TextOp; /* clip: cut at the page's edge */
+static TextOp g_tx[400];
 static int g_tx_n;
 static RECT g_pv_rc;                /* the preview's cluster, in the window */
+static RECT g_ovr[16];              /* controls drawn over the preview: laid back over its picture each frame */
+static int g_ovr_n;
+static RECT g_clip;                 /* while the page is drawn: text and hits outside it are left out (it scrolls) */
+static int g_clipping;
 static Pane g_pv;                   /* its picture (a DIB, no window of its own) */
 static Room g_pv_room;
 static Pic g_pv_pic[4];
 static Orbit g_pv_ob[4];
 static int g_pv_st = ST_THINK, g_pv_drag; /* the state the preview's main core shows */
-static int g_tab;                   /* 0 General, 1 Motions */
+static int g_tab;                   /* the page open (PG_*) */
 static double g_mot_msg_until;      /* "a state needs a routine" shows until then */
 static float g_pv_zoom = 1;         /* the wheel over the preview: 1 to 3 times, to see the detail */
 static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
+static float g_set_scroll, g_set_content_h, g_set_view_h; /* the page scrolls when it is taller than its room */
+static int g_sizing;                /* dragging an edge or the corner: 1 right, 2 bottom, 3 both */
+static POINT g_size_from;
+static float g_size_w0, g_size_h0;
+static int g_krec = -1;             /* the shortcut being recorded (its row on the Shortcuts page), -1 none */
+static double g_kmsg_until;         /* "add Ctrl, Alt or Shift" shows until then */
+static const wchar_t *g_kmsg;
+static int g_mhov_played;           /* hovering a motion tile: it plays after a moment, once */
+static double g_mhov_at;
 
 static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
-static int SW_W(void) { return (int)lroundf(S(880)); }
-static int SW_H(void) { return (int)lroundf(S(830)); }
+static float SL_W(void) { return g_set_w; }  /* the window's size in 96-dpi units */
+static float SL_H(void) { return g_set_h; }
+static int SW_W(void) { return (int)lroundf(S(SL_W())); }
+static int SW_H(void) { return (int)lroundf(S(SL_H())); }
+static float side_w(void) { return g_set_side ? 188 : 58; }
+#define SET_TOP 52.0f /* the top bar's height; the preview starts under it */
 static int set_open(void) { return g_set && IsWindowVisible(g_set); }
 
 static int set_current(int row) {
@@ -3084,6 +3176,10 @@ static int set_current(int row) {
         case R_CHATBG: return g_chat_bg;
         case R_WHEEL: return g_wheel_spin;
         case R_TEXTCOL: return g_text_col;
+        case R_MODE: return !g_single;
+        case R_SMOOTH: return g_smooth;
+        case R_MOVEMOD: return g_move_mod == VK_CONTROL ? 1 : g_move_mod == VK_SHIFT ? 2 : 0;
+        case R_SEND: return g_send_ctrl;
         }
     }
     return -1;
@@ -3179,9 +3275,13 @@ static void set_choose(int row, int val) {
     case R_LABELS: g_labels = val; break;
     case R_AWAY: g_away_after = AWAYS[val]; break;
     case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
-    case R_CHATBG: g_chat_bg = val; if (g_input) edit_style(); if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_CHATBG: g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
     case R_TEXTCOL: g_text_col = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_MODE: toggle_mode(); break;
+    case R_SMOOTH: g_smooth = val; break;
+    case R_MOVEMOD: g_move_mod = val == 1 ? VK_CONTROL : val == 2 ? VK_SHIFT : VK_MENU; break;
+    case R_SEND: g_send_ctrl = val; break;
     default: return;
     }
     settings_applied(1);
@@ -3195,7 +3295,29 @@ static void set_reset(void) {
     shape_make(&g_shape, g_shape_name);
     chat_refont();
     main_place();
+    hotkeys_apply();
     settings_applied(0);
+}
+
+/* one page back to the launch options (the others stay) */
+static void page_reset(int pg) {
+    switch (pg) {
+    case PG_LOOK:
+        snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name);
+        snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
+        g_glow = g_launch.glow; g_core = g_launch.core; g_scale = g_launch.scale; main_place(); break;
+    case PG_CLUSTER: g_others = g_launch.others; g_labels = g_launch.labels; g_gravity = g_launch.gravity; g_away_after = g_launch.away; g_wheel_spin = g_launch.wheel_spin; break;
+    case PG_REPLIES:
+        g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_bg = g_launch.chat_bg;
+        g_text_col = g_launch.text_col; g_chat_middle = g_launch.chat_middle; chat_refont(); chat_hide(); break;
+    case PG_MOTIONS: motion_map_default(MOTION_MAP); break;
+    case PG_KEYS:
+        snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
+        snprintf(g_hk_reply, sizeof g_hk_reply, "%s", g_launch.hk[2]); snprintf(g_hk_set, sizeof g_hk_set, "%s", g_launch.hk[3]);
+        g_move_mod = g_launch.move_mod; g_send_ctrl = g_launch.send_ctrl; hotkeys_apply(); break;
+    case PG_PERF: g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; break;
+    }
+    settings_applied(1);
 }
 
 /* ---- drawing: shapes antialiased straight into the bitmap, text with GDI after them (logical units, S() scales) */
@@ -3208,54 +3330,108 @@ static void aa_rrect(Pane *pn, float x0, float y0, float x1, float y1, float rad
     if (by0 < 0) by0 = 0;
     if (bx1 > pn->W) bx1 = pn->W;
     if (by1 > pn->H) by1 = pn->H;
-    for (int y = by0; y < by1; y++)
+    /* the solid colour, premultiplied, for pixels wholly inside a fill drawn at full strength */
+    uint32_t solid = (uint32_t)lroundf(fminf(1, c.b) * 255) | (uint32_t)lroundf(fminf(1, c.g) * 255) << 8 | (uint32_t)lroundf(fminf(1, c.r) * 255) << 16 | 0xff000000u;
+    float E = line > 0 ? line + 2 : 2; /* how near an edge a pixel needs its distance worked out */
+    for (int y = by0; y < by1; y++) {
+        float qy = fabsf(y + 0.5f - cy) - (hy - rad);
+        int sx0 = bx1, sx1 = bx1; /* the inside span of this row: filled at once (a fill) or skipped (an outline) */
+        if (-qy > E) { sx0 = (int)ceilf(x0 + E); sx1 = (int)floorf(x1 - E); if (sx0 < bx0) sx0 = bx0; if (sx1 > bx1) sx1 = bx1; if (sx1 < sx0) sx1 = sx0; }
         for (int x = bx0; x < bx1; x++) {
-            float qx = fabsf(x + 0.5f - cx) - (hx - rad), qy = fabsf(y + 0.5f - cy) - (hy - rad);
+            if (x == sx0 && sx1 > sx0) {
+                if (line <= 0) {
+                    if (a >= 1) { uint32_t *d = pn->px + (size_t)y * pn->W; for (int k = sx0; k < sx1; k++) d[k] = solid; }
+                    else for (int k = sx0; k < sx1; k++) px_over(pn, k, y, c, a);
+                }
+                x = sx1 - 1;
+                continue;
+            }
+            float qx = fabsf(x + 0.5f - cx) - (hx - rad);
             float d = hypotf(fmaxf(qx, 0), fmaxf(qy, 0)) + fminf(fmaxf(qx, qy), 0) - rad;
             float cov = line > 0 ? 0.5f - (fabsf(d + line * 0.5f) - line * 0.5f) : 0.5f - d;
             if (cov > 0) px_over(pn, x, y, c, a * fminf(1, cov));
         }
+    }
 }
 static void box(Pane *pn, float x0, float y0, float x1, float y1, float rad, unsigned fill, unsigned edge, float ew) {
     aa_rrect(pn, S(x0), S(y0), S(x1), S(y1), S(rad), hexc(fill), 1, 0);
     if (ew > 0) aa_rrect(pn, S(x0), S(y0), S(x1), S(y1), S(rad), hexc(edge), 1, S(ew));
 }
+static void frame(Pane *pn, float x0, float y0, float x1, float y1, float rad, unsigned edge, float ew) { aa_rrect(pn, S(x0), S(y0), S(x1), S(y1), S(rad), hexc(edge), 1, S(ew)); }
 static void tx(float x0, float y0, float x1, float y1, const wchar_t *t, HFONT f, unsigned c, UINT how) {
-    if (g_tx_n >= 160) return;
+    if (g_tx_n >= 400) return;
+    RECT r = SR(x0, y0, x1, y1);
+    if (g_clipping) { /* on the page: only what shows between its top and bottom */
+        if (r.bottom <= g_clip.top || r.top >= g_clip.bottom) return;
+    }
     TextOp *o = &g_tx[g_tx_n++];
-    o->r = SR(x0, y0, x1, y1);
+    o->r = r;
+    o->clip = g_clipping && (r.top < g_clip.top || r.bottom > g_clip.bottom); /* half out: drawn, cut at the edge */
     wcsncpy(o->t, t, 159); o->t[159] = 0;
     o->f = f; o->c = hexr(c); o->how = how;
 }
-static void hit(float x0, float y0, float x1, float y1, int kind, int row, int val) {
-    if (g_hits_n < 200) g_hits[g_hits_n++] = (SetHit){SR(x0, y0, x1, y1), kind, row, val, 0, 0, 0};
+static void hit_px(RECT r, int kind, int row, int val, int n, float t0, float t1) {
+    if (g_clipping) { RECT c; if (!IntersectRect(&c, &r, &g_clip)) return; r = c; }
+    if (g_hits_n < 400) g_hits[g_hits_n++] = (SetHit){r, kind, row, val, n, t0, t1};
 }
+static void hit(float x0, float y0, float x1, float y1, int kind, int row, int val) { hit_px(SR(x0, y0, x1, y1), kind, row, val, 0, 0, 0); }
 static int is_hot(int kind, int row, int val) { return g_hot >= 0 && g_hits[g_hot].kind == kind && g_hits[g_hot].row == row && g_hits[g_hot].val == val; }
+/* a text's width in logical units */
+static float tw_of(const wchar_t *t, HFONT f) {
+    SIZE z; HDC dc = g_sl.mem;
+    SelectObject(dc, f);
+    GetTextExtentPoint32W(dc, t, (int)wcslen(t), &z);
+    return z.cx / (float)g_sdpi;
+}
+
+/* a Lucide icon (lucide.h) by name, `size` units across, centred on (cx, cy), in its 2-unit round strokes */
+static void lu_icon(Pane *pn, const char *name, float cx, float cy, float size, unsigned col) {
+    for (int i = 0; i < LU_N; i++) {
+        if (strcmp(LU_ICON[i].name, name)) continue;
+        float k = S(size) / 24, x0 = S(cx) - S(size) / 2, y0 = S(cy) - S(size) / 2, w = fmaxf(1.1f, 2 * k);
+        Col c = hexc(col);
+        int p = 0;
+        for (int r = 0; r < LU_ICON[i].run; r++) p += LU_RUNS[r];
+        for (int r = LU_ICON[i].run; r < LU_ICON[i].run + LU_ICON[i].n; r++) {
+            const float *a = LU_PTS + 2 * p;
+            for (int j = 0; j + 1 < LU_RUNS[r]; j++)
+                aa_seg(pn, x0 + a[2 * j] * k, y0 + a[2 * j + 1] * k, x0 + a[2 * j + 2] * k, y0 + a[2 * j + 3] * k, w, c, 1);
+            p += LU_RUNS[r];
+        }
+        return;
+    }
+}
 
 static void set_fonts(void);
 /* the Settings window moved to a monitor with another scale: its fonts are made again at that size */
 static void set_refont(void) {
-    HFONT *f[7] = {&g_sf_title, &g_sf_card, &g_sf_text, &g_sf_label, &g_sf_small, &g_sf_aa, &g_sf_aam};
-    for (int i = 0; i < 7; i++) if (*f[i]) { DeleteObject(*f[i]); *f[i] = NULL; }
+    HFONT *f[8] = {&g_sf_title, &g_sf_card, &g_sf_text, &g_sf_label, &g_sf_small, &g_sf_aa, &g_sf_aam, &g_sf_cap};
+    for (int i = 0; i < 8; i++) if (*f[i]) { DeleteObject(*f[i]); *f[i] = NULL; }
     g_sl_dirty = 1;
 }
 static void set_fonts(void) {
     if (g_sf_title) return;
     const wchar_t *ui = L"Segoe UI";
-    g_sf_title = CreateFontW(-(int)S(18), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
-    g_sf_card = CreateFontW(-(int)S(14.5f), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
+    g_sf_title = CreateFontW(-(int)S(16), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
+    g_sf_card = CreateFontW(-(int)S(15), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
     g_sf_text = CreateFontW(-(int)S(13), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
     g_sf_label = CreateFontW(-(int)S(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
-    g_sf_small = CreateFontW(-(int)S(11), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
-    g_sf_aa = CreateFontW(-(int)S(19), 0, 0, 0, FW_MEDIUM, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
-    g_sf_aam = CreateFontW(-(int)S(19), 0, 0, 0, FW_MEDIUM, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, mono_face());
+    g_sf_small = CreateFontW(-(int)S(11.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
+    g_sf_cap = CreateFontW(-(int)S(11), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
+    g_sf_aa = CreateFontW(-(int)S(16), 0, 0, 0, FW_MEDIUM, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, ui);
+    g_sf_aam = CreateFontW(-(int)S(16), 0, 0, 0, FW_MEDIUM, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, mono_face());
 }
 
-/* a tile, button or chip that can be the chosen one */
+/* a tile, button or chip that can be the chosen one: chosen, the orange frame alone, the fill as it was */
 static void pick_box(Pane *pn, float x0, float y0, float x1, float y1, float rad, int on, int hot, const wchar_t *t, HFONT f) {
-    if (on) box(pn, x0, y0, x1, y1, rad, hot ? S_CHIP_HOT : S_TILE, S_OR, 1.5f); /* chosen: the frame alone */
+    if (on) box(pn, x0, y0, x1, y1, rad, hot ? S_CHIP_HOT : S_TILE, S_OR, 1.5f);
     else box(pn, x0, y0, x1, y1, rad, hot ? S_CHIP_HOT : S_TILE, hot ? S_EDGE_HOT : S_EDGE, 1);
     if (t) tx(x0, y0, x1, y1, t, f, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
+}
+/* a pill: grey, the chosen one framed in orange */
+static void pill(Pane *pn, float x0, float y0, float x1, float y1, int on, int hot, const wchar_t *t) {
+    box(pn, x0, y0, x1, y1, (y1 - y0) / 2, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
+    if (t) tx(x0, y0, x1, y1, t, g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
 }
 
 /* the four shells as small line icons, centred on (cx, cy) */
@@ -3285,23 +3461,8 @@ static void shape_icon(Pane *pn, int i, float cx, float cy, unsigned col) {
     }
 }
 
-/* a slider over n stops between x0 and x1 at height y */
-static void slider(Pane *pn, float x0, float y, float x1, int row, int n) {
-    int cur = set_current(row);
-    float kx = cur >= 0 ? x0 + (x1 - x0) * cur / (n - 1) : x0;
-    box(pn, x0, y - 2, x1, y + 2, 2, S_EDGE, 0, 0);
-    if (cur >= 0) box(pn, x0, y - 2, kx, y + 2, 2, S_OR, 0, 0);
-    for (int i = 0; i < n; i++) { /* the stops */
-        float sx = x0 + (x1 - x0) * i / (n - 1);
-        if (sx > kx + 1) aa_disc(pn, S(sx), S(y), S(1.6f), hexc(S_EDGE_HOT), 1);
-    }
-    int hot = (g_hot >= 0 && g_hits[g_hot].kind == K_SLIDE && g_hits[g_hot].row == row) || (g_slide >= 0 && g_hits[g_slide].row == row);
-    if (hot) aa_disc(pn, S(kx), S(y), S(12), hexc(S_OR), 0.18f);
-    aa_disc(pn, S(kx), S(y), S(8), hexc(S_KNOB), 1);
-    if (g_hits_n < 200) g_hits[g_hits_n++] = (SetHit){SR(x0 - 10, y - 13, x1 + 10, y + 13), K_SLIDE, row, cur, n, S(x0), S(x1)};
-}
 
-/* ---- the preview: four made-up sessions, the main one in the state picked beside it */
+/* ---- the preview: four made-up sessions, the main one in the state picked */
 static void pv_init(double now) {
     if (g_pv_room.n) return;
     static const char *names[4] = {"vigil", "api", "docs", "web"};
@@ -3314,10 +3475,14 @@ static void pv_init(double now) {
     g_pv_last = now;
 }
 
-/* ---- the Motions page: which routines and actions each state may use (MOTION_MAP), and a preview of each */
+/* ---- the motion map: which routines and actions each state may use (MOTION_MAP) */
 static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR};
 static const wchar_t *MOT_STATE_NAMES[ST_N] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep",
                                               L"Speaking", L"Listening", L"Transcribing", L"Away", L"Error"};
+static const char *MOT_RT_ICON[RT_N] = {"rotateCw", "eye", "puzzle", "blend", "rotateCw", "swords", "cog", "orbit", "dna", "keyboard", "hammer", "grid", "arrows", "minimize",
+                                    "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap"};
+static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw"};
+_Static_assert(RT_N == 27 && W_N == 17, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
 static const wchar_t *state_wname(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return L"?"; }
 static void txa(float x0, float y0, float x1, float y1, const char *a, HFONT f, unsigned c, UINT how) {
     wchar_t w[160];
@@ -3348,80 +3513,374 @@ static void mot_toggle(int row, int id) {
     settings_applied(1);
 }
 
-/* a chip that can be switched on, with a play button at its right end */
-static void mot_chip(Pane *pn, float x0, float y0, float x1, float y1, int on, int dis, int row, int id, const char *name) {
-    int hot = is_hot(K_MTOG, row, id), hp = is_hot(K_MPLAY, row, id);
-    box(pn, x0, y0, x1, y1, (y1 - y0) / 2, hot ? S_CHIP_HOT : S_TILE, on ? S_OR : (hot ? S_EDGE_HOT : S_EDGE), on ? 1.5f : 1);
-    txa(x0 + 10, y0, x1 - 19, y1, name, g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
-    float cy = (y0 + y1) / 2, P[6] = {S(x1 - 16), S(cy - 4), S(x1 - 16), S(cy + 4), S(x1 - 9), S(cy)};
-    aa_tri(pn, P, hexc(hp ? S_OR : S_MUTED), 1);
-    if (!dis) hit(x0, y0, x1 - 22, y1, K_MTOG, row, id);
-    hit(x1 - 23, y0, x1, y1, K_MPLAY, row, id);
+/* ---- the shortcuts: four global hotkeys (RegisterHotKey), kept as "ctrl+alt+c" like --mode-hotkey */
+static char *hk_spec(int i) { return i == 0 ? g_mode_hotkey : i == 1 ? g_hk_hide : i == 2 ? g_hk_reply : g_hk_set; }
+static const wchar_t *HK_LABEL[4] = {L"One core / all cores", L"Show or hide Vigil", L"Reply to the main core", L"Open Settings"};
+static const char *HK_ICON[4] = {"layers", "eyeOff", "reply", "sliders"};
+/* a spec as key caps: "ctrl+alt+c" → Ctrl, Alt, C */
+static int hk_caps(const char *spec, wchar_t caps[5][12]) {
+    int n = 0;
+    if (!spec[0] || !strcmp(spec, "none")) return 0;
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *t = strtok(buf, "+"); t && n < 5; t = strtok(NULL, "+")) {
+        const char *w = !strcmp(t, "ctrl") ? "Ctrl" : !strcmp(t, "alt") ? "Alt" : !strcmp(t, "shift") ? "Shift" : !strcmp(t, "win") ? "Win" : !strcmp(t, "space") ? "Space" : NULL;
+        if (w) swprintf(caps[n], 12, L"%hs", w);
+        else { swprintf(caps[n], 12, L"%hs", t); for (wchar_t *c = caps[n]; *c; c++) *c = towupper(*c); }
+        n++;
+    }
+    return n;
 }
 
-static void motions_page(Pane *pn) {
-    const float y0 = 304, l = 40, r = 840;
+/* ---- a page: section cards of rows; two columns when there is room */
+enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS };
+typedef struct { int kind, row, n; const wchar_t *label, *hint; const wchar_t *const *names; const wchar_t *lo, *hi; const char *icon; } SRow;
+typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
+static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAMES[4] = {L"XS", L"S", L"M", L"L"},
+                     *TEXT_SIZES[5] = {L"XS", L"S", L"M", L"L", L"XL"}, *BOX_SIZES[4] = {L"S", L"M", L"L", L"XL"},
+                     *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
+                     *AWAY_NAMES[4] = {L"1 min", L"2 min", L"5 min", L"Never"}, *OPEN_NAMES[2] = {L"Next to core", L"Middle"},
+                     *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
+                     *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
+static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
+                                      L"at least 30 pictures a second; busy states 60", L"every picture at the monitor's refresh rate: the most CPU", L"your own rates (from --smooth-custom)"};
+static int page_sections(int pg, SSec *s) {
+    int n = 0;
+#define ROW(sec, ...) (s[sec].r[s[sec].n++] = (SRow){__VA_ARGS__})
+    memset(s, 0, sizeof(SSec) * 4);
+    switch (pg) {
+    case PG_LOOK:
+        s[0].title = L"SHELL"; s[1].title = L"ON SCREEN"; n = 2;
+        ROW(0, RK_SHAPES, R_SHAPE, 4, L"Shape", NULL, NULL, NULL, NULL, NULL);
+        ROW(0, RK_SLIDER, R_GLOW, 3, L"Glow", NULL, GLOW_NAMES, NULL, NULL, NULL);
+        ROW(0, RK_SLIDER, R_CORE, 4, L"Inner core", NULL, CORE_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_SCALE, 4, L"Size", NULL, NULL, L"S", L"L", NULL);
+        ROW(1, RK_SEG, R_FRAME, 7, L"Focus frame", L"round a carried core, or one you rest on", FRAME_NAMES, NULL, NULL, NULL);
+        break;
+    case PG_CLUSTER:
+        s[0].title = L"LAYOUT"; s[1].title = L"MOTION"; s[2].title = L"AWAY"; n = 3;
+        ROW(0, RK_SEG, R_MODE, 2, L"Layout", NULL, MODE_NAMES, NULL, NULL, NULL);
+        ROW(0, RK_TOGGLE, R_OTHERS, 1, L"Other sessions", L"small cores round the main one", NULL, NULL, NULL, NULL);
+        ROW(0, RK_SEG, R_LABELS, 2, L"Names over cores", L"all-cores mode", LABEL_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_GRAVITY, 4, L"Gravity", L"drag the core above to feel it", NULL, L"Floaty", L"Firm", NULL);
+        ROW(1, RK_SEG, R_WHEEL, 5, L"Scroll on a core", NULL, WHEEL_NAMES, NULL, NULL, NULL);
+        ROW(2, RK_SEG, R_AWAY, 4, L"Rest after", L"no mouse or keys this long: the cores show STANDBY", AWAY_NAMES, NULL, NULL, NULL);
+        break;
+    case PG_REPLIES:
+        s[0].title = L"TEXT"; s[1].title = L"BOX"; n = 2;
+        ROW(0, RK_FONTS, R_CHATFONT, 2, L"Font", NULL, NULL, NULL, NULL, NULL);
+        ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_CHATSIZE, 4, L"Box size", L"how far it grows before it scrolls", BOX_SIZES, NULL, NULL, NULL);
+        ROW(1, RK_SWATCH, R_CHATBG, 6, L"Box colour", NULL, CHAT_BG_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SWATCH, R_TEXTCOL, 6, L"Text colour", NULL, TEXT_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SEG, R_CHATAT, 2, L"Opens", NULL, OPEN_NAMES, NULL, NULL, NULL);
+        break;
+    case PG_KEYS:
+        s[0].title = L"ANYWHERE"; s[1].title = L"ON A CORE"; s[2].title = L"IN THE REPLY LINE"; n = 3;
+        for (int i = 0; i < 4; i++) ROW(0, RK_HOTKEY, i, 0, HK_LABEL[i], NULL, NULL, NULL, NULL, HK_ICON[i]);
+        ROW(1, RK_SEG, R_MOVEMOD, 3, L"Move or carry a core", L"hold it, then drag (move) or click (carry)", MOD_NAMES, NULL, NULL, "move");
+        ROW(1, RK_CAPS, 0, 0, L"Type a reply", NULL, NULL, L"Double-click", NULL, "pointer");
+        ROW(1, RK_CAPS, 0, 0, L"Spin the shell", L"flick it and it coasts back", NULL, L"Drag", NULL, "rotateCw");
+        ROW(2, RK_SEG, R_SEND, 2, L"Send", L"the other one makes a new line", SEND_NAMES, NULL, NULL, "send");
+        ROW(2, RK_CAPS, 0, 0, L"Clear the line", L"with nothing selected; else it copies", NULL, L"Ctrl+C", NULL, "rotateCcw");
+        ROW(2, RK_CAPS, 0, 0, L"Delete a word", L"back to the space before it; Ctrl+U: the whole line before", NULL, L"Ctrl+W", NULL, "newline");
+        ROW(2, RK_CAPS, 0, 0, L"Close", NULL, NULL, L"Esc", NULL, "x");
+        break;
+    case PG_PERF:
+        s[0].title = L"SMOOTHNESS"; n = 1;
+        ROW(0, RK_SEG, R_SMOOTH, g_smooth == SM_CUSTOM ? SM_N : SM_N - 1, L"Preset", SM_NOTE[g_smooth], SM_NAMES, NULL, NULL, NULL);
+        break;
+    }
+#undef ROW
+    return n;
+}
+
+/* a row's chips: their width, and whether they fit beside the name */
+static float seg_w(const SRow *r) {
+    float w = 0;
+    for (int i = 0; i < r->n; i++) w += tw_of(r->names[i], g_sf_label) + 24 + (i ? 4 : 0);
+    return w;
+}
+/* how wide a row's control is (its name and hint keep clear of it) */
+static float ctrl_w(const SRow *r) {
+    switch (r->kind) {
+    case RK_SLIDER: return fminf(230, 400) + (r->lo ? 48 : 0) + 44;
+    case RK_SEG: return seg_w(r);
+    case RK_TOGGLE: return 42;
+    case RK_SHAPES: return 4 * 50 - 6;
+    case RK_FONTS: return 2 * 110 - 6;
+    case RK_SWATCH: return 6 * 32 - 6;
+    case RK_HOTKEY: return 160;
+    case RK_CAPS: return tw_of(r->lo, g_sf_label) + 14;
+    }
+    return 0;
+}
+static float row_h(const SRow *r, float colw) {
+    float h = r->hint ? 56 : 48;
+    if (r->kind == RK_SEG) { /* the chips go under the name when the name and hint would not fit beside them */
+        float text = fmaxf(tw_of(r->label, g_sf_text), r->hint ? fminf(tw_of(r->hint, g_sf_small), 260) : 0);
+        if (seg_w(r) + 16 + text > colw - 32) h += 36;
+    }
+    if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 56;
+    return h;
+}
+static float sec_h(const SSec *s, float colw) {
+    float h = 36 + 6;
+    for (int i = 0; i < s->n; i++) h += row_h(&s->r[i], colw);
+    return h;
+}
+
+/* a slider over n stops between x0 and x1 at height y */
+static void slider(Pane *pn, float x0, float y, float x1, int row, int n) {
+    int cur = set_current(row);
+    float kx = cur >= 0 ? x0 + (x1 - x0) * cur / (n - 1) : x0;
+    box(pn, x0, y - 2, x1, y + 2, 2, S_EDGE, 0, 0);
+    if (cur >= 0) box(pn, x0, y - 2, kx, y + 2, 2, S_OR, 0, 0);
+    for (int i = 0; i < n; i++) { /* the stops */
+        float sx = x0 + (x1 - x0) * i / (n - 1);
+        if (sx > kx + 1) aa_disc(pn, S(sx), S(y), S(1.6f), hexc(S_EDGE_HOT), 1);
+    }
+    int hot = (g_hot >= 0 && g_hits[g_hot].kind == K_SLIDE && g_hits[g_hot].row == row) || (g_slide >= 0 && g_hits[g_slide].row == row);
+    if (hot) aa_disc(pn, S(kx), S(y), S(12), hexc(S_OR), 0.18f);
+    aa_disc(pn, S(kx), S(y), S(8), hexc(S_KNOB), 1);
+    hit_px(SR(x0 - 10, y - 13, x1 + 10, y + 13), K_SLIDE, row, cur, n, S(x0), S(x1));
+}
+
+/* one row: its name (and hint) on the left, its control on the right */
+static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float h) {
+    int warn = r->kind == RK_HOTKEY && g_hk_fail[r->row];
+    float base = r->hint || warn ? 56 : 48, lx = x0 + 16, rx = x1 - 16, cy = y + (h > base + 1 ? base / 2 : h / 2);
+    int wrapped = h > base + 1;
+    if (r->icon) { lu_icon(pn, r->icon, lx + 8, cy, 16, S_LABEL); lx += 28; }
+    const wchar_t *hint = warn ? L"held by another app: pick another" : r->hint;
+    float tr = wrapped ? rx : rx - ctrl_w(r) - 16; /* the text stops short of the control */
+    if (r->kind == RK_SLIDER) tr = rx - fminf(230, (x1 - x0) * 0.5f) - (r->hi ? 34 : 44) - (r->lo ? 48 : 0) - 16;
+    if (hint) {
+        tx(lx, cy - 18, tr, cy, r->label, g_sf_text, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+        tx(lx, cy, tr, cy + 16, hint, g_sf_small, warn ? 0xFFB066 : S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+    } else tx(lx, cy - 10, tr, cy + 10, r->label, g_sf_text, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+    switch (r->kind) {
+    case RK_SLIDER: {
+        int cur = set_current(r->row);
+        const wchar_t *lo = r->lo, *hi = r->hi ? r->hi : (r->names && cur >= 0 ? r->names[cur] : L"");
+        float sw = fminf(230, (x1 - x0) * 0.5f), ex = rx - (r->hi ? 34 : 44), sx = ex - sw;
+        if (lo) tx(sx - 40, cy - 9, sx - 8, cy + 9, lo, g_sf_small, S_MUTED, DT_RIGHT);
+        slider(pn, sx, cy, ex, r->row, r->n);
+        tx(ex + 10, cy - 9, rx + 4, cy + 9, hi, g_sf_small, S_MUTED, DT_LEFT);
+        break;
+    }
+    case RK_SEG: {
+        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 40 : cy - 14;
+        int cur = set_current(r->row);
+        for (int i = 0; i < r->n; i++) {
+            float cw = tw_of(r->names[i], g_sf_label) + 24;
+            pill(pn, a, yy, a + cw, yy + 28, cur == i, is_hot(K_PICK, r->row, i), r->names[i]);
+            hit(a, yy, a + cw, yy + 28, K_PICK, r->row, i);
+            a += cw + 4;
+        }
+        break;
+    }
+    case RK_TOGGLE: {
+        int on = set_current(r->row) == 1, ht = is_hot(K_TOGGLE, r->row, 0);
+        box(pn, rx - 42, cy - 12, rx, cy + 12, 12, on ? S_OR : (ht ? S_EDGE_HOT : S_EDGE), 0, 0);
+        aa_disc(pn, S(on ? rx - 12 : rx - 30), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
+        hit(x0, y, x1, y + h, K_TOGGLE, r->row, 0);
+        break;
+    }
+    case RK_SHAPES:
+        for (int i = 0; i < 4; i++) {
+            float a = rx - (4 - i) * 50 + 6;
+            int sel = set_current(R_SHAPE) == i;
+            pick_box(pn, a, cy - 20, a + 44, cy + 20, 9, sel, is_hot(K_PICK, R_SHAPE, i), NULL, NULL);
+            shape_icon(pn, i, a + 22, cy, sel ? S_OR : S_MUTED);
+            hit(a, cy - 20, a + 44, cy + 20, K_PICK, R_SHAPE, i);
+        }
+        break;
+    case RK_FONTS:
+        for (int i = 0; i < 2; i++) {
+            float a = rx - (2 - i) * 110 + 6;
+            int sel = set_current(R_CHATFONT) == i;
+            pick_box(pn, a, cy - 20, a + 104, cy + 20, 9, sel, is_hot(K_PICK, R_CHATFONT, i), NULL, NULL);
+            tx(a + 10, cy - 20, a + 40, cy + 20, L"Aa", i ? g_sf_aa : g_sf_aam, sel ? S_TEXT : S_CHIP_TXT, DT_CENTER);
+            tx(a + 42, cy - 20, a + 100, cy + 20, i ? L"Clean" : L"Terminal", g_sf_label, sel ? S_TEXT : S_MUTED, DT_LEFT);
+            hit(a, cy - 20, a + 104, cy + 20, K_PICK, R_CHATFONT, i);
+        }
+        break;
+    case RK_SWATCH:
+        for (int i = 0; i < 6; i++) {
+            float a = rx - (6 - i) * 32 + 6;
+            int sel = set_current(r->row) == i, hot = is_hot(K_PICK, r->row, i), text = r->row == R_TEXTCOL;
+            unsigned fill = text ? chat_bgx() : i < 5 ? CHAT_BGS[i] : g_chat_custom;
+            box(pn, a, cy - 13, a + 26, cy + 13, 7, fill, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
+            unsigned tc = text ? (i == 5 ? g_text_custom : i ? TEXT_COLS[i] : inkx(0xE6E8F0)) : 0;
+            if (i == 5) {
+                int light = 0.299f * (fill >> 16 & 255) + 0.587f * (fill >> 8 & 255) + 0.114f * (fill & 255) > 140;
+                palette_icon(pn, S(a + 13), S(cy), S(15), text ? tc : light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
+            } else if (text) tx(a, cy - 13, a + 26, cy + 13, L"Aa", g_sf_small, tc, DT_CENTER);
+            hit(a, cy - 13, a + 26, cy + 13, K_PICK, r->row, i);
+        }
+        break;
+    case RK_HOTKEY: {
+        int i = r->row, rec = g_krec == i;
+        if (rec) { /* waiting for the keys */
+            box(pn, rx - 214, cy - 15, rx, cy + 15, 8, S_CHIP, S_OR, 1.5f);
+            tx(rx - 214, cy - 15, rx, cy + 15, wall() < g_kmsg_until && g_kmsg ? g_kmsg : L"Press keys \x00B7 Esc cancels \x00B7 Del clears", g_sf_label, S_TEXT, DT_CENTER);
+            hit(rx - 214, cy - 15, rx, cy + 15, K_KREC, 0, i);
+            break;
+        }
+        wchar_t caps[5][12];
+        int n = hk_caps(hk_spec(i), caps), hot = is_hot(K_KREC, 0, i);
+        float a = rx;
+        if (!n) { tx(rx - 90, cy - 10, rx - 8, cy + 10, L"Set\x2026", g_sf_label, hot ? S_TEXT : S_MUTED, DT_RIGHT); a = rx - 96; }
+        for (int k = n - 1; k >= 0; k--) {
+            float w = fmaxf(24, tw_of(caps[k], g_sf_label) + 14);
+            a -= w;
+            box(pn, a, cy - 12, a + w, cy + 12, 6, S_CHIP, 0x44444C, 1);
+            tx(a, cy - 12, a + w, cy + 12, caps[k], g_sf_label, S_TEXT, DT_CENTER);
+            a -= 4;
+        }
+        if (hot || g_hk_fail[i]) frame(pn, a - 4, cy - 16, rx + 4, cy + 16, 9, g_hk_fail[i] ? S_OR : S_EDGE_HOT, 1.2f);
+        hit(a - 4, cy - 16, rx + 4, cy + 16, K_KREC, 0, i);
+        break;
+    }
+    case RK_CAPS: {
+        float w = tw_of(r->lo, g_sf_label) + 14;
+        box(pn, rx - w, cy - 12, rx, cy + 12, 6, S_CHIP, 0x44444C, 1);
+        tx(rx - w, cy - 12, rx, cy + 12, r->lo, g_sf_label, S_TEXT, DT_CENTER);
+        break;
+    }
+    }
+}
+
+/* the page's sections, laid out from (x0, y0) to x1; returns the height used */
+static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
+    SSec s[4];
+    int n = page_sections(pg, s);
+    float cw = x1 - x0;
+    int cols = cw >= 820 ? 2 : 1;
+    float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
+    for (int k = 0; k < n; k++) {
+        int c = cols == 2 && colh[1] < colh[0] ? 1 : 0;
+        float x = x0 + c * (colw + 12), y = y0 + colh[c], h = sec_h(&s[k], colw);
+        box(pn, x, y, x + colw, y + h, 12, S_CARD, 0, 0);
+        tx(x + 16, y + 12, x + colw - 16, y + 30, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
+        float ry = y + 36;
+        for (int i = 0; i < s[k].n; i++) {
+            float rh = row_h(&s[k].r[i], colw);
+            if (i) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
+            draw_row(pn, &s[k].r[i], x, ry, x + colw, rh);
+            ry += rh;
+        }
+        colh[c] += h + 12;
+    }
+    return fmaxf(colh[0], colh[1]);
+}
+
+/* ---- the Motions page: every state at a glance on the left, the chosen one's motions on the right */
+static void mot_tile(Pane *pn, float x0, float y0, float x1, float y1, int row, int id, int on, int dis) {
+    int hot = is_hot(K_MTOG, row, id);
+    box(pn, x0, y0, x1, y1, 10, hot && !dis ? S_CHIP_HOT : S_TILE, on ? S_OR : dis ? S_EDGE : hot ? S_EDGE_HOT : S_RULE, on ? 1.5f : 1);
+    unsigned ink = on ? S_OR : dis ? 0x55555E : S_MUTED;
+    lu_icon(pn, row == 0 ? MOT_RT_ICON[id] : MOT_W_ICON[id], (x0 + x1) / 2, y0 + 20, 19, ink);
+    txa(x0 + 4, y0 + 32, x1 - 4, y1 - 4, row == 0 ? ROUTINES[id].name : WHIMS[id].name, g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
+    if (!dis) hit(x0, y0, x1, y1, K_MTOG, row, id);
+}
+/* the tiles of one kind: those in use, a MORE rule, the rest; returns the height used */
+static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     int st = g_pv_st;
-    box(pn, 24, y0, 856, 774, 16, S_CARD, 0, 0);
-    tx(l, y0 + 12, 300, y0 + 34, L"Motions", g_sf_card, S_TEXT, DT_LEFT);
-    tx(300, y0 + 12, r, y0 + 34, L"Each state picks one of its routines every time it starts; actions play now and then.", g_sf_small, S_MUTED, DT_RIGHT);
-    /* the states: Claude Code's, then the panel's own */
-    static const wchar_t *rowname[2] = {L"Claude Code", L"Panel"};
-    for (int rw = 0; rw < 2; rw++) {
-        float y = y0 + 42 + rw * 32;
-        tx(l, y, l + 86, y + 26, rowname[rw], g_sf_small, S_MUTED, DT_LEFT);
-        int n = rw ? 5 : 6, first = rw ? 6 : 0;
-        float cw = (r - (l + 88) - 5 * 6) / 6;
-        for (int i = 0; i < n; i++) {
-            int sti = MOT_STATES[first + i], on = sti == st, hot = is_hot(K_MSTATE, 0, sti);
-            float a = l + 88 + i * (cw + 6);
-            box(pn, a, y, a + cw, y + 26, 13, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
-            aa_disc(pn, S(a + 13), S(y + 13), S(3.5f), LOOKS[sti].halo, 1);
-            tx(a + 22, y, a + cw - 6, y + 26, MOT_STATE_NAMES[first + i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
-            hit(a, y, a + cw, y + 26, K_MSTATE, 0, sti);
+    uint32_t set = row == 0 ? MOTION_MAP[st].rt : MOTION_MAP[st].act;
+    int first = 1, last = row == 0 ? RT_N : W_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (96 + 6)));
+    float tw = (x1 - x0 - 6 * (cols - 1)) / cols, y = y0;
+    wchar_t head[80];
+    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : L"ACTIONS \x00B7 %d", bits(set & ~1u));
+    tx(x0, y, x0 + 120, y + 18, head, g_sf_cap, S_MUTED, DT_LEFT);
+    tx(x0 + 110, y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : L"played now and then while left alone", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+    y += 26;
+    for (int pass = 0; pass < 2; pass++) {
+        int k = 0;
+        for (int id = first; id < last; id++) {
+            int on = (set >> id) & 1;
+            if (on != !pass) continue;
+            float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 64;
+            mot_tile(pn, a, b, a + tw, b + 58, row, id, on, row == 0 && id == RT_HOLE && st != ST_SLEEP);
+            k++;
+        }
+        if (!pass && !k) { tx(x0, y, x1, y + 24, L"None. Pick from below.", g_sf_small, S_MUTED, DT_LEFT); k = cols; }
+        y += ((k + cols - 1) / cols) * 64;
+        if (!pass) { /* the rule between those in use and the rest */
+            tx(x0, y + 4, x0 + 50, y + 20, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
+            box(pn, x0 + 44, y + 12, x1, y + 13, 0, S_RULE, 0, 0);
+            y += 26;
         }
     }
-    /* the routines: this state's own first */
-    const MotionMap *mm = &MOTION_MAP[st];
-    wchar_t lab[120];
-    swprintf(lab, 120, L"Routines for %ls", state_wname(st));
-    tx(l, y0 + 108, r, y0 + 128, lab, g_sf_label, S_LABEL, DT_LEFT);
-    tx(l, y0 + 108, r, y0 + 128, L"click to use it here  \x25B6 to watch it", g_sf_small, S_MUTED, DT_RIGHT);
-    int order[RT_N], n = 0;
-    for (int pass = 0; pass < 2; pass++) for (int i = 1; i < RT_N; i++) if ((ROUTINES[i].home == st) == !pass) order[n++] = i;
-    float cw = (r - l - 6 * 5) / 7;
-    for (int i = 0; i < n; i++) {
-        int id = order[i];
-        float a = l + (i % 7) * (cw + 5), y = y0 + 132 + (i / 7) * 31;
-        mot_chip(pn, a, y, a + cw, y + 26, (mm->rt >> id) & 1, id == RT_HOLE && st != ST_SLEEP, 0, id, ROUTINES[id].name);
+    return y - y0;
+}
+static float motions_page(Pane *pn, float x0, float y0, float x1) {
+    float cw = x1 - x0, lw = cw >= 720 ? 250 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
+    /* the list: each state with the icons of its routines and how many actions it has */
+    float lh = 8 + 2 * 26 + ST_N * 36 + 8, y = y0;
+    box(pn, x0, y, x0 + lw, y + lh, 12, S_CARD, 0, 0);
+    y += 8;
+    for (int i = 0; i < ST_N; i++) {
+        if (i == 0 || i == 6) { tx(x0 + 16, y + 6, x0 + lw - 16, y + 22, i ? L"PANEL" : L"CLAUDE CODE", g_sf_cap, S_MUTED, DT_LEFT); y += 26; }
+        int st = MOT_STATES[i], on = st == g_pv_st, hot = is_hot(K_MSTATE, 0, st);
+        float a = x0 + 8, b = y, c = x0 + lw - 8;
+        box(pn, a, b, c, b + 34, 9, hot ? S_CHIP_HOT : S_CARD, S_OR, on ? 1.5f : 0);
+        aa_disc(pn, S(a + 14), S(b + 17), S(4), LOOKS[st].halo, 1);
+        tx(a + 26, b, c - 100, b + 34, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+        /* its routines' icons (up to four), then +n, then the actions' count */
+        uint32_t rt = MOTION_MAP[st].rt & ~1u;
+        int na = bits(MOTION_MAP[st].act & ~1u), shown = 0, more = 0;
+        float ix = c - 10;
+        wchar_t num[12];
+        if (na) {
+            swprintf(num, 12, L"%d", na);
+            float w = tw_of(num, g_sf_small);
+            tx(ix - w - 2, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT);
+            lu_icon(pn, "sparkles", ix - w - 10, b + 17, 11, S_MUTED);
+            ix -= w + 20;
+        }
+        int ids[4];
+        for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1) { if (shown < 4) ids[shown++] = id; else more++; }
+        if (more) { swprintf(num, 12, L"+%d", more); tx(ix - 24, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT); ix -= 28; }
+        for (int k = shown - 1; k >= 0; k--) lu_icon(pn, MOT_RT_ICON[ids[k]], ix - 8 - (shown - 1 - k) * 18, b + 17, 14, on ? S_OR : S_MUTED);
+        hit(a, b, c, b + 34, K_MSTATE, 0, st);
+        y += 36;
     }
-    /* the actions */
-    float ya = y0 + 132 + ((n + 6) / 7) * 31 + 6;
-    swprintf(lab, 120, L"Actions for %ls", state_wname(st));
-    tx(l, ya, r, ya + 20, lab, g_sf_label, S_LABEL, DT_LEFT);
-    float aw = (r - l - 7 * 5) / 8;
-    for (int w = 1; w < W_N; w++) {
-        float a = l + ((w - 1) % 8) * (aw + 5), y = ya + 24 + ((w - 1) / 8) * 31;
-        mot_chip(pn, a, y, a + aw, y + 26, (mm->act >> w) & 1, 0, 1, w, WHIMS[w].name);
-    }
-    /* what the chip under the pointer does, or a summary */
-    float yd = ya + 24 + ((W_N - 2) / 8 + 1) * 31 + 2;
+    /* the editor */
+    float ey = cw >= 720 ? y0 : y0 + lh + 12;
+    int st = g_pv_st;
+    float iy = ey + 16 + 30 + 10, ty = iy + 44 + 16;
+    float th = mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16); /* (measured off the page) */
+    float eh = (ty - ey) + th + 16;
+    box(pn, ex0, ey, x1, ey + eh, 12, S_CARD, 0, 0);
+    aa_disc(pn, S(ex0 + 22), S(ey + 31), S(5), LOOKS[st].halo, 1);
+    tx(ex0 + 34, ey + 16, x1 - 180, ey + 46, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
+    int htr = is_hot(K_MTRY, 0, 0), hrs = is_hot(K_MRESET, 0, 0);
+    box(pn, x1 - 152, ey + 18, x1 - 80, ey + 44, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
+    float P[6] = {S(x1 - 138), S(ey + 26), S(x1 - 138), S(ey + 36), S(x1 - 130), S(ey + 31)};
+    aa_tri(pn, P, hexc(S_TEXT), 1);
+    tx(x1 - 126, ey + 18, x1 - 84, ey + 44, L"Try it", g_sf_label, S_TEXT, DT_LEFT);
+    hit(x1 - 152, ey + 18, x1 - 80, ey + 44, K_MTRY, 0, 0);
+    tx(x1 - 74, ey + 18, x1 - 16, ey + 44, L"Reset", g_sf_label, hrs ? S_TEXT : S_MUTED, DT_CENTER);
+    hit(x1 - 74, ey + 18, x1 - 16, ey + 44, K_MRESET, 0, 0);
+    /* the info line: what the tile under the pointer does */
+    box(pn, ex0 + 16, iy, x1 - 16, iy + 44, 9, S_TILE, 0, 0);
     char line[400];
-    if (g_hot >= 0 && (g_hits[g_hot].kind == K_MTOG || g_hits[g_hot].kind == K_MPLAY)) {
-        int id = g_hits[g_hot].val;
-        if (g_hits[g_hot].row == 0) {
-            char home[60] = "";
-            if (ROUTINES[id].home != st) { char hn[40]; WideCharToMultiByte(CP_UTF8, 0, state_wname(ROUTINES[id].home), -1, hn, 40, NULL, NULL); snprintf(home, sizeof home, " (made for %s)", hn); }
-            snprintf(line, sizeof line, "%s%s: %s", ROUTINES[id].name, home, ROUTINES[id].about);
-        } else snprintf(line, sizeof line, "%s: %s", WHIMS[id].name, WHIMS[id].about ? WHIMS[id].about : "");
-        txa(l, yd, r, yd + 20, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
-    } else if (wall() < g_mot_msg_until) tx(l, yd, r, yd + 20, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
+    if (g_hot >= 0 && g_hits[g_hot].kind == K_MTOG) {
+        int row = g_hits[g_hot].row, id = g_hits[g_hot].val;
+        lu_icon(pn, row == 0 ? MOT_RT_ICON[id] : MOT_W_ICON[id], ex0 + 36, iy + 22, 18, S_OR);
+        snprintf(line, sizeof line, "%s: %s", row == 0 ? ROUTINES[id].name : WHIMS[id].name, row == 0 ? ROUTINES[id].about : WHIMS[id].about ? WHIMS[id].about : "");
+        txa(ex0 + 54, iy, x1 - 26, iy + 44, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
+    } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
     else {
-        wchar_t sum[200];
-        int nr = bits(mm->rt), na = bits(mm->act);
-        swprintf(sum, 200, L"%ls uses %d routine%ls and %d action%ls. Changes apply the next time a state starts, and are kept.", state_wname(st), nr, nr == 1 ? L"" : L"s", na, na == 1 ? L"" : L"s");
-        tx(l, yd, r, yd + 20, sum, g_sf_small, S_MUTED, DT_LEFT);
+        wchar_t t[200];
+        swprintf(t, 200, L"Rest the pointer on a motion to watch it above; click it to use it in %ls or not.", state_wname(st));
+        tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     }
+    float h0 = mot_tiles(pn, 0, ex0 + 16, ty, x1 - 16);
+    mot_tiles(pn, 1, ex0 + 16, ty + h0 + 16, x1 - 16);
+    return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0);
 }
 
 /* the still layer: everything but the moving cluster */
@@ -3430,178 +3889,106 @@ static void set_build(void) {
     chat_fonts();
     Pane *pn = &g_sl;
     int W = SW_W(), H = SW_H();
+    float WL = SL_W(), HL = SL_H(), SD = side_w(), cx0 = SD + 16, cx1 = WL - 16;
     pane_size(pn, W, H);
     memset(pn->px, 0, (size_t)W * H * 4);
-    g_hits_n = 0; g_tx_n = 0;
-    box(pn, 0, 0, 880, 830, 18, S_BG, 0x2A2A30, 1);
-    /* title and close */
-    tx(28, 14, 400, 50, L"Settings", g_sf_title, S_TEXT, DT_LEFT);
-    static const wchar_t *tabs[2] = {L"General", L"Motions"};
-    for (int i = 0; i < 2; i++) { /* the two pages, as tabs: the open one ringed in orange like a chosen chip, the other plain text */
-        float a = 132 + i * 96;
-        int on = g_tab == i, hot = is_hot(K_TAB, 0, i);
-        if (on) box(pn, a, 19, a + 88, 45, 13, S_CHIP, S_OR, 1.5f);
-        else if (hot) box(pn, a, 19, a + 88, 45, 13, S_CHIP_HOT, 0, 0);
-        tx(a, 19, a + 88, 45, tabs[i], g_sf_label, on ? 0xFFFFFF : hot ? S_TEXT : 0xC4C7CF, DT_CENTER);
-        hit(a, 19, a + 88, 45, K_TAB, 0, i);
-        if (!on && !(i + 1 < 2 && g_tab == i + 1)) box(pn, a + 93, 24, a + 94, 40, 0, S_EDGE, 0, 0); /* a thin divider after it */
-    }
-    int ch = is_hot(K_CLOSE, 0, 0);
-    box(pn, 824, 16, 856, 48, 10, ch ? S_CLOSE_HOT : 0x26262B, 0, 0);
-    aa_seg(pn, S(835), S(27), S(845), S(37), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
-    aa_seg(pn, S(845), S(27), S(835), S(37), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
-    hit(824, 16, 856, 48, K_CLOSE, 0, 0);
-    /* the preview band: the cluster on the left; a reply in the chat box's font, the hint and the states on the right */
-    box(pn, 24, 58, 856, 288, 16, S_BAND, 0, 0);
-    g_pv_rc = SR(40, 62, 564, 284);
-    TEXTMETRICW tm;
+    g_hits_n = 0; g_tx_n = 0; g_ovr_n = 0;
     HDC mdc = pn->mem;
-    SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
-    float th = tm.tmHeight / (float)g_sdpi;
-    SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
-    float bh = tm.tmHeight / (float)g_sdpi, sh = fminf(112, 22 + th + 6 + bh * 2);
-    box(pn, 580, 74, 840, 74 + sh, 10, chat_bgx(), 0, 0);
-    box(pn, 580, 74, 583, 74 + sh, 1.5f, S_OR, 0, 0);
-    tx(594, 84, 832, 84 + th, L"vigil · Done", g_chat_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
-    tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_chat_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
-    wchar_t hint[80];
-    if (g_pv_zoom > 1.01f) swprintf(hint, 80, L"Scroll to zoom: %.1fx   \x00B7   double-click resets", g_pv_zoom);
-    else wcscpy(hint, L"Drag the core   \x00B7   scroll on it to zoom in");
-    tx(580, 190, 840, 210, hint, g_sf_label, S_MUTED, DT_LEFT);
-    for (int i = 0; i < 6; i++) {
-        float x0 = 580 + (i % 3) * (260 + 6) / 3.0f, y0 = 216 + (i / 3) * 34;
-        float x1 = x0 + (260 - 12) / 3.0f;
-        int on = PV_STATES[i] == g_pv_st, hot = is_hot(K_STATE, 0, i);
-        box(pn, x0, y0, x1, y0 + 28, 14, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
-        tx(x0, y0, x1, y0 + 28, PV_NAMES[i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_CENTER);
-        hit(x0, y0, x1, y0 + 28, K_STATE, 0, i);
+    box(pn, 0, 0, WL, HL, 14, S_BG, 0x2A2A30, 1);
+    /* the page first (it scrolls under the preview), then everything round it */
+    float pvh = clampf(HL * 0.4f, 180, 420), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
+    g_set_view_h = cb - ct;
+    g_set_scroll = clampf(g_set_scroll, 0, fmaxf(0, g_set_content_h - g_set_view_h));
+    g_clip = SR(cx0 - 4, ct, cx1 + 4, cb); g_clipping = 1;
+    float top = ct - g_set_scroll;
+    g_set_content_h = g_tab == PG_MOTIONS ? motions_page(pn, cx0, top, cx1) : rows_page(pn, g_tab, cx0, top, cx1);
+    g_clipping = 0;
+    box(pn, SD, 1, WL - 1, ct, 0, S_BG, 0, 0);      /* what scrolled up under the title */
+    box(pn, SD, cb, WL - 1, HL - 1, 0, S_BG, 0, 0); /* and down past the bottom */
+    frame(pn, 0, 0, WL, HL, 14, 0x2A2A30, 1);         /* the window's edge again */
+    /* the preview band */
+    box(pn, cx0, bandT, cx1, bandB, 14, S_BAND, 0, 0);
+    g_pv_rc = SR(cx0 + 4, bandT + 4, cx1 - 4, bandB - 4);
+    if (g_tab == PG_REPLIES) { /* a reply in the chat box's font, top right */
+        TEXTMETRICW tm;
+        SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
+        float th = tm.tmHeight / (float)g_sdpi;
+        SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
+        float bh = tm.tmHeight / (float)g_sdpi, sh = fminf(112, 22 + th + 6 + bh * 2), bx1 = cx1 - 14, bx0 = fmaxf(cx0 + 160, bx1 - 300);
+        float t0 = bandT + 12;
+        box(pn, bx0, t0, bx1, t0 + sh, 8, chat_bgx(), 0, 0);
+        box(pn, bx0, t0, bx0 + 3, t0 + sh, 1.5f, S_OR, 0, 0);
+        tx(bx0 + 14, t0 + 10, bx1 - 8, t0 + 10 + th, L"vigil \x00B7 Done", g_chat_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
+        tx(bx0 + 14, t0 + 10 + th + 6, bx1 - 8, t0 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_chat_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
+        g_ovr[g_ovr_n++] = SR(bx0, t0, bx1, t0 + sh);
     }
-    if (g_tab == 0) {
-        /* the cards */
-        const float y0 = 304, cw = (832 - 32) / 3.0f;
-        float cx[3];
-        for (int k = 0; k < 3; k++) { cx[k] = 24 + k * (cw + 16); box(pn, cx[k], y0, cx[k] + cw, 770, 16, S_CARD, 0, 0); }
-        static const wchar_t *titles[3] = {L"Look", L"Motion", L"Replies"};
-        for (int k = 0; k < 3; k++) tx(cx[k] + 16, y0 + 14, cx[k] + cw - 16, y0 + 36, titles[k], g_sf_card, S_TEXT, DT_LEFT);
-        /* Look: shape, glow, size on screen, inner core */
-        float l = cx[0] + 16, r = cx[0] + cw - 16, tw = (r - l - 18) / 4;
-        tx(l, y0 + 46, r, y0 + 64, L"Shape", g_sf_label, S_LABEL, DT_LEFT);
-        static const wchar_t *shapes[4] = {L"Dodecahedron", L"Buckyball", L"Geodesic", L"Fine geodesic"};
-        for (int i = 0; i < 4; i++) {
-            float a = l + i * (tw + 6);
-            int sel = set_current(R_SHAPE) == i;
-            pick_box(pn, a, y0 + 70, a + tw, y0 + 116, 12, sel, is_hot(K_PICK, R_SHAPE, i), NULL, NULL);
-            shape_icon(pn, i, a + tw / 2, y0 + 93, sel ? S_OR : S_MUTED);
-            hit(a, y0 + 70, a + tw, y0 + 116, K_PICK, R_SHAPE, i);
+    /* the top bar: the page's name and hint, its reset, close (the bar drags the window) */
+    int ch = is_hot(K_CLOSE, 0, 0);
+    box(pn, cx1 - 32, 10, cx1, 42, 8, ch ? S_CLOSE_HOT : S_CHIP, 0, 0);
+    aa_seg(pn, S(cx1 - 21), S(21), S(cx1 - 11), S(31), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
+    aa_seg(pn, S(cx1 - 11), S(21), S(cx1 - 21), S(31), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
+    hit(cx1 - 32, 10, cx1, 42, K_CLOSE, 0, 0);
+    tx(cx0 + 2, 8, cx0 + 260, 44, PG_NAME[g_tab], g_sf_card, S_TEXT, DT_LEFT);
+    tx(cx0 + 4 + tw_of(PG_NAME[g_tab], g_sf_card) + 10, 8, cx1 - 110, 44, PG_HINT[g_tab], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+    int hr = is_hot(K_RESET, 1, 0);
+    if (hr) box(pn, cx1 - 96, 13, cx1 - 42, 39, 13, S_CHIP, 0, 0);
+    tx(cx1 - 96, 13, cx1 - 42, 39, L"Reset", g_sf_label, hr ? S_TEXT : S_MUTED, DT_CENTER);
+    hit(cx1 - 96, 13, cx1 - 42, 39, K_RESET, 1, 0);
+    /* bottom of the band: the state (not on Motions, whose list picks it) and the zoom */
+    float by = bandB - 40;
+    if (g_tab != PG_MOTIONS) {
+        float a = cx0 + 10;
+        for (int i = 0; i < 6; i++) {
+            float w = tw_of(PV_NAMES[i], g_sf_label) + 34;
+            if (a + w > cx1 - 140) break; /* (a narrow window shows fewer) */
+            int on = PV_STATES[i] == g_pv_st, hot = is_hot(K_STATE, 0, i);
+            box(pn, a, by, a + w, by + 28, 14, hot ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.5f : 0);
+            aa_disc(pn, S(a + 13), S(by + 14), S(3.5f), LOOKS[PV_STATES[i]].halo, 1);
+            tx(a + 22, by, a + w - 6, by + 28, PV_NAMES[i], g_sf_label, on ? S_TEXT : S_CHIP_TXT, DT_LEFT);
+            hit(a, by, a + w, by + 28, K_STATE, 0, i);
+            g_ovr[g_ovr_n++] = SR(a, by, a + w, by + 28);
+            a += w + 4;
         }
-        int hs = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_SHAPE;
-        tx(l + 60, y0 + 46, r, y0 + 64, hs ? shapes[g_hits[g_hot].val] : shapes[set_current(R_SHAPE) < 0 ? 2 : set_current(R_SHAPE)], g_sf_small, S_MUTED, DT_RIGHT);
-        tx(l, y0 + 128, r, y0 + 146, L"Glow", g_sf_label, S_LABEL, DT_LEFT);
-        aa_disc(pn, S(l + 4), S(y0 + 164), S(3.5f), hexc(S_OR), 0.45f);
-        slider(pn, l + 20, y0 + 164, r - 22, R_GLOW, 3);
-        aa_disc(pn, S(r - 5), S(y0 + 164), S(10), hexc(S_OR), 0.2f);
-        aa_disc(pn, S(r - 5), S(y0 + 164), S(5.5f), hexc(S_OR), 1);
-        tx(l, y0 + 186, r, y0 + 204, L"Size on screen", g_sf_label, S_LABEL, DT_LEFT);
-        tx(l - 2, y0 + 212, l + 12, y0 + 232, L"S", g_sf_small, S_MUTED, DT_CENTER);
-        slider(pn, l + 20, y0 + 222, r - 22, R_SCALE, 4);
-        tx(r - 14, y0 + 210, r + 2, y0 + 234, L"L", g_sf_text, S_MUTED, DT_CENTER);
-        tx(l, y0 + 244, r, y0 + 262, L"Inner core", g_sf_label, S_LABEL, DT_LEFT);
-        aa_disc(pn, S(l + 4), S(y0 + 280), S(2.5f), hexc(S_KNOB), 0.8f);
-        slider(pn, l + 20, y0 + 280, r - 22, R_CORE, 4);
-        aa_disc(pn, S(r - 5), S(y0 + 280), S(5.5f), hexc(S_KNOB), 0.8f);
-        /* Motion: gravity, other sessions, focus frame, what the wheel does */
-        l = cx[1] + 16; r = cx[1] + cw - 16;
-        tx(l, y0 + 46, r, y0 + 64, L"Gravity", g_sf_label, S_LABEL, DT_LEFT);
-        slider(pn, l + 8, y0 + 82, r - 8, R_GRAVITY, 4);
-        tx(l, y0 + 94, r, y0 + 112, L"Floaty", g_sf_small, S_MUTED, DT_LEFT);
-        tx(l, y0 + 94, r, y0 + 112, L"Firm", g_sf_small, S_MUTED, DT_RIGHT);
-        tx(l, y0 + 124, r - 56, y0 + 142, L"Other sessions", g_sf_text, S_TEXT, DT_LEFT);
-        tx(l, y0 + 142, r - 56, y0 + 160, L"Small cores around the main one", g_sf_small, S_MUTED, DT_LEFT);
-        int on = g_others, ht = is_hot(K_TOGGLE, R_OTHERS, 0);
-        box(pn, r - 42, y0 + 130, r, y0 + 154, 12, on ? S_OR : (ht ? S_EDGE_HOT : S_EDGE), 0, 0);
-        aa_disc(pn, S(on ? r - 12 : r - 30), S(y0 + 142), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
-        hit(l, y0 + 122, r, y0 + 162, K_TOGGLE, R_OTHERS, 0);
-        tx(l, y0 + 176, r, y0 + 194, L"Focus frame", g_sf_label, S_LABEL, DT_LEFT);
-        float fw = (r - l - 12) / 3;
-        for (int i = 0; i < 7; i++) {
-            float a = l + (i % 3) * (fw + 6), b = y0 + 200 + (i / 3) * 34;
-            pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_FRAME) == i, is_hot(K_PICK, R_FRAME, i), FRAME_NAMES[i], g_sf_label);
-            hit(a, b, a + fw, b + 28, K_PICK, R_FRAME, i);
-        }
-        tx(l, y0 + 314, r, y0 + 332, L"Scroll on a core", g_sf_label, S_LABEL, DT_LEFT);
-        for (int i = 0; i < 5; i++) {
-            float a = l + (i % 3) * (fw + 6), b = y0 + 338 + (i / 3) * 34;
-            pick_box(pn, a, b, a + fw, b + 28, 14, set_current(R_WHEEL) == i, is_hot(K_PICK, R_WHEEL, i), WHEEL_NAMES[i], g_sf_label);
-            hit(a, b, a + fw, b + 28, K_PICK, R_WHEEL, i);
-        }
-        /* Replies: font, text size, box size, colours (box and text), where the box opens, labels */
-        l = cx[2] + 16; r = cx[2] + cw - 16;
-        float bw = (r - l - 6) / 2;
-        tx(l, y0 + 46, r, y0 + 64, L"Font", g_sf_label, S_LABEL, DT_LEFT);
-        for (int i = 0; i < 2; i++) {
-            float a = l + i * (bw + 6);
-            int sel = set_current(R_CHATFONT) == i;
-            pick_box(pn, a, y0 + 70, a + bw, y0 + 118, 12, sel, is_hot(K_PICK, R_CHATFONT, i), NULL, NULL);
-            tx(a, y0 + 72, a + bw, y0 + 100, L"Aa", i ? g_sf_aa : g_sf_aam, sel ? S_TEXT : S_CHIP_TXT, DT_CENTER);
-            tx(a, y0 + 98, a + bw, y0 + 114, i ? L"Clean" : L"Terminal", g_sf_small, sel ? S_TEXT : S_MUTED, DT_CENTER);
-            hit(a, y0 + 70, a + bw, y0 + 118, K_PICK, R_CHATFONT, i);
-        }
-        tx(l, y0 + 130, r, y0 + 148, L"Text size", g_sf_label, S_LABEL, DT_LEFT);
-        tx(l - 2, y0 + 156, l + 12, y0 + 176, L"A", g_sf_small, S_MUTED, DT_CENTER);
-        slider(pn, l + 20, y0 + 166, r - 22, R_TEXT, 5);
-        tx(r - 16, y0 + 154, r + 2, y0 + 180, L"A", g_sf_card, S_MUTED, DT_CENTER);
-        tx(l, y0 + 190, r, y0 + 208, L"Box size", g_sf_label, S_LABEL, DT_LEFT);
-        box(pn, l, y0 + 220, l + 10, y0 + 228, 2, S_MUTED, 0, 0);
-        slider(pn, l + 20, y0 + 224, r - 22, R_CHATSIZE, 4);
-        box(pn, r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
-        static const wchar_t *opens[2] = {L"Next to core", L"Middle"}, *labels[2] = {L"On hover", L"Always"};
-        tx(l, y0 + 248, r, y0 + 266, L"Colours", g_sf_label, S_LABEL, DT_LEFT);
-        int hb = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_CHATBG, ht2 = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TEXTCOL;
-        wchar_t names[60];
-        swprintf(names, 60, L"%ls  \x00B7  %ls", CHAT_BG_NAMES[hb ? g_hits[g_hot].val : g_chat_bg], TEXT_NAMES[ht2 ? g_hits[g_hot].val : g_text_col]);
-        tx(l + 60, y0 + 248, r, y0 + 266, names, g_sf_small, S_MUTED, DT_RIGHT);
-        float sl = l + 38, sw = (r - sl - 5 * 6) / 6;
-        for (int row = 0; row < 2; row++) { /* Box: the default swatches, then the palette; Text: "Aa" in each colour on the box's colour, then the palette */
-            float yy = y0 + 272 + row * 34;
-            tx(l, yy, sl - 4, yy + 26, row ? L"Text" : L"Box", g_sf_small, S_MUTED, DT_LEFT);
-            for (int i = 0; i < 6; i++) {
-                float a = sl + i * (sw + 6);
-                int rr = row ? R_TEXTCOL : R_CHATBG, sel = set_current(rr) == i, hot = is_hot(K_PICK, rr, i);
-                unsigned fill = row ? chat_bgx() : i < 5 ? CHAT_BGS[i] : g_chat_custom;
-                box(pn, a, yy, a + sw, yy + 26, 7, fill, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
-                unsigned tc = row ? (i == 5 ? g_text_custom : i ? TEXT_COLS[i] : inkx(0xE6E8F0)) : 0;
-                if (i == 5) { /* Lucide's palette icon: on Box light on a dark colour and dark on a light one, on Text in the picked colour */
-                    unsigned v = fill;
-                    int light = 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140;
-                    palette_icon(pn, S(a + sw / 2), S(yy + 13), S(16), row ? tc : light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
-                } else if (row) tx(a, yy, a + sw, yy + 26, L"Aa", g_sf_small, tc, DT_CENTER);
-                hit(a, yy, a + sw, yy + 26, K_PICK, rr, i);
-            }
-        }
-        tx(l, y0 + 342, r, y0 + 360, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
-        for (int i = 0; i < 2; i++) {
-            float a = l + i * (bw + 6);
-            pick_box(pn, a, y0 + 364, a + bw, y0 + 392, 10, set_current(R_CHATAT) == i, is_hot(K_PICK, R_CHATAT, i), opens[i], g_sf_label);
-            hit(a, y0 + 364, a + bw, y0 + 392, K_PICK, R_CHATAT, i);
-        }
-        tx(l, y0 + 404, r, y0 + 422, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
-        for (int i = 0; i < 2; i++) {
-            float a = l + i * (bw + 6);
-            pick_box(pn, a, y0 + 426, a + bw, y0 + 454, 10, set_current(R_LABELS) == i, is_hot(K_PICK, R_LABELS, i), labels[i], g_sf_label);
-            hit(a, y0 + 426, a + bw, y0 + 454, K_PICK, R_LABELS, i);
-        }
-    } else motions_page(pn);
-    /* the foot: standby time, reset */
-    int aw = set_current(R_AWAY);
-    tx(28, 784, 120, 816, L"Rest after", g_sf_label, S_MUTED, DT_LEFT);
-    int ha = is_hot(K_CYCLE, R_AWAY, 0);
-    box(pn, 92, 787, 184, 813, 13, ha ? S_CHIP_HOT : S_CHIP, 0, 0);
-    tx(92, 787, 184, 813, aw >= 0 ? AWAY_TEXT[aw] : L"custom", g_sf_label, S_TEXT, DT_CENTER);
-    hit(92, 787, 184, 813, K_CYCLE, R_AWAY, 0);
-    tx(192, 784, 420, 816, aw == 3 ? L"(cores never rest)" : L"away: cores show STANDBY", g_sf_label, S_MUTED, DT_LEFT);
-    int can = settings_saved(), hr = is_hot(K_RESET, 0, 0);
-    tx(640, 784, 856, 816, L"Reset to defaults", g_sf_label, can ? (hr ? 0xFFB877 : S_OR) : 0x55555E, DT_RIGHT);
-    if (can) hit(740, 788, 856, 812, K_RESET, 0, 0);
+    }
+    float zx = cx1 - 124;
+    box(pn, zx, by, cx1 - 10, by + 28, 14, S_CHIP, 0, 0);
+    for (int i = 0; i < 3; i++) {
+        float a = zx + (i == 0 ? 2 : i == 1 ? 30 : 86), b = a + (i == 1 ? 56 : 26);
+        if (is_hot(K_ZOOM, 0, i)) box(pn, a, by + 2, b, by + 26, 12, S_CHIP_HOT, 0, 0);
+        hit(a, by, b, by + 28, K_ZOOM, 0, i);
+    }
+    lu_icon(pn, "minus", zx + 15, by + 14, 12, S_TEXT);
+    lu_icon(pn, "plus", zx + 99, by + 14, 12, S_TEXT);
+    wchar_t zl[12];
+    swprintf(zl, 12, L"%d%%", (int)lroundf(g_pv_zoom * 100));
+    tx(zx + 30, by, zx + 86, by + 28, zl, g_sf_label, S_TEXT, DT_CENTER);
+    g_ovr[g_ovr_n++] = SR(zx, by, cx1 - 10, by + 28);
+    /* the sidebar */
+    box(pn, 1, 1, SD, HL - 1, 13, S_SIDE, 0, 0);
+    box(pn, SD - 14, 1, SD, HL - 1, 0, S_SIDE, 0, 0);
+    box(pn, SD, 1, SD + 1, HL - 1, 0, 0x26262C, 0, 0);
+    int hs = is_hot(K_SIDE, 0, 0);
+    if (hs) box(pn, 11, 14, 47, 50, 8, S_CHIP, 0, 0);
+    lu_icon(pn, g_set_side ? "panelLeft" : "panelRight", 29, 32, 18, hs ? S_TEXT : S_LABEL);
+    hit(11, 14, 47, 50, K_SIDE, 0, 0);
+    if (g_set_side) tx(56, 14, SD - 10, 50, L"Settings", g_sf_title, S_TEXT, DT_LEFT);
+    for (int i = 0; i < PG_N; i++) {
+        float a = 10, b = 64 + i * 42, c = SD - 10;
+        int on = g_tab == i, hot = is_hot(K_PAGE, 0, i);
+        box(pn, a, b, c, b + 38, 9, hot && !on ? S_CHIP : S_SIDE, S_OR, on ? 1.5f : 0);
+        lu_icon(pn, PG_ICON[i], a + 19, b + 19, 17, on ? S_TEXT : hot ? S_TEXT : S_CHIP_TXT);
+        if (g_set_side) tx(a + 40, b, c - 6, b + 38, PG_NAME[i], g_sf_text, on || hot ? S_TEXT : S_CHIP_TXT, DT_LEFT);
+        hit(a, b, c, b + 38, K_PAGE, 0, i);
+    }
+    int can = settings_saved(), hra = is_hot(K_RESET, 0, 0);
+    lu_icon(pn, "rotateCcw", 29, HL - 34, 15, can ? (hra ? S_TEXT : S_MUTED) : 0x44444C);
+    if (g_set_side) tx(48, HL - 48, SD - 10, HL - 20, L"Reset everything", g_sf_label, can ? (hra ? S_TEXT : S_MUTED) : 0x55555E, DT_LEFT);
+    if (can) hit(10, HL - 50, SD - 10, HL - 18, K_RESET, 0, 0);
+    /* the size grip, and the edges that resize */
+    for (int k = 0; k < 3; k++) aa_seg(pn, S(WL - 4 - 4 * k), S(HL - 4), S(WL - 4), S(HL - 4 - 4 * k), S(1.1f), hexc(0x55555E), 1);
+    hit(WL - 7, 14, WL, HL - 18, K_SIZE, 0, 1);
+    hit(SD + 4, HL - 7, WL - 18, HL, K_SIZE, 0, 2);
+    hit(WL - 18, HL - 18, WL, HL, K_SIZE, 0, 3);
     /* the text, then everything inside the edge made opaque again (GDI leaves its alpha at 0) */
     GdiFlush();
     SetBkMode(mdc, TRANSPARENT);
@@ -3610,14 +3997,24 @@ static void set_build(void) {
         SelectObject(mdc, o->f);
         SetTextColor(mdc, o->c);
         UINT f = o->how & DT_WORDBREAK ? o->how | DT_NOPREFIX : o->how | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+        int saved = o->clip ? SaveDC(mdc) : 0;
+        if (o->clip) IntersectClipRect(mdc, g_clip.left, g_clip.top, g_clip.right, g_clip.bottom);
         DrawTextW(mdc, o->t, -1, &o->r, f);
+        if (saved) RestoreDC(mdc, saved);
     }
     GdiFlush();
-    int rad = (int)ceilf(S(18)) + 1;
+    int rad = (int)ceilf(S(14)) + 1;
+    float rr = S(14);
     for (int y = 0; y < H; y++) {
         int corner = y < rad || y >= H - rad;
         uint32_t *p = pn->px + (size_t)y * W;
         for (int x = corner ? rad : 0; x < (corner ? W - rad : W); x++) p[x] |= 0xff000000u;
+        if (!corner) continue;
+        for (int x = 0; x < W; x++) { /* in the corner squares: outside the rounded edge, nothing */
+            if (x >= rad && x < W - rad) continue;
+            float qx = x + 0.5f < rr ? rr - (x + 0.5f) : x + 0.5f > W - rr ? x + 0.5f - (W - rr) : 0, qy = y + 0.5f < rr ? rr - (y + 0.5f) : y + 0.5f > H - rr ? y + 0.5f - (H - rr) : 0;
+            if (hypotf(qx, qy) > rr + 0.5f) p[x] = 0;
+        }
     }
     g_sl_dirty = 0;
 }
@@ -3625,6 +4022,11 @@ static void set_build(void) {
 /* each tick while it is open: the preview moves, the window is shown again */
 static void settings_tick(double now) {
     if (!set_open()) return;
+    static double last_frame, last_pics;
+    if (g_sizing && now - last_frame < 1.0 / 24) return; /* being resized: fewer, cheaper frames (it catches up when let go) */
+    last_frame = now;
+    int pics_now = !g_sizing || now - last_pics > 1.0 / 8 || !g_pv_pic[0].img;
+    if (pics_now) last_pics = now;
     float dt = (float)fmin(0.1, now - g_pv_last);
     g_pv_last = now;
     int shown[4] = {g_pv_st, ST_WORK, ST_IDLE, ST_THINK};
@@ -3635,10 +4037,13 @@ static void settings_tick(double now) {
         s->last = now;
         s->aura_a = g_others ? TOUCH.aura : 0;
     }
+    /* resting on a motion tile: it plays after a moment, once */
+    if (g_hot >= 0 && g_hits[g_hot].kind == K_MTOG && !g_mhov_played && now - g_mhov_at > 0.35) { mot_play(g_hits[g_hot].row, g_hits[g_hot].val); g_mhov_played = 1; }
+    if (g_krec >= 0 || (g_kmsg_until > 0 && now > g_kmsg_until)) { if (now > g_kmsg_until) g_kmsg_until = 0; g_sl_dirty = 1; }
     if (g_sl_dirty) set_build();
     /* the cluster in the preview, scaled as Size scales it on the screen */
     int pw = g_pv_rc.right - g_pv_rc.left, ph = g_pv_rc.bottom - g_pv_rc.top;
-    float cx = pw / 2.0f, cy = ph / 2.0f, cw = fminf((float)pw, (float)ph) * 0.97f * (0.55f + 0.45f * (g_scale - 0.75f) / 0.85f) * g_pv_zoom;
+    float cx = pw / 2.0f, cy = ph / 2.0f - (float)S(14), cw = fminf((float)pw, (float)ph) * 0.97f * (0.55f + 0.45f * (g_scale - 0.75f) / 0.85f) * g_pv_zoom;
     /* the same proportions as draw_single, on a cluster cw wide instead of g_cw */
     float big = cw * 0.6f, rx = cw / 2.0f - (float)(8 * g_dpi) * cw / g_cw, ry = rx * 1.15f;
     float small = g_others ? fminf(cw * 0.2f, (float)(2 * M_PI * rx / 3 * 0.75)) : 0;
@@ -3692,11 +4097,13 @@ static void settings_tick(double now) {
     for (int i = 1; i < 4 && g_others; i++) {
         int w4 = ((int)g_pv_ob[i].w / 4) * 4;
         if (w4 < 8) continue;
-        pic_make(&g_pv_pic[i], &g_pv_room.s[i], w4, now, 1);
+        if (pics_now) pic_make(&g_pv_pic[i], &g_pv_room.s[i], w4, now, 1);
+        else if (g_pv_pic[i].img) w4 = g_pv_pic[i].px; else continue; /* (the last picture, at its size) */
         blit_pic_at(&g_pv, g_pv_ob[i].px - w4 / 2.0f, g_pv_ob[i].py - w4 / 2.0f, &g_pv_pic[i]);
     }
     int w4 = ((int)big / 4) * 4;
-    pic_make(&g_pv_pic[0], m, w4, now, 3); /* the one you watch: every frame */
+    if (pics_now) pic_make(&g_pv_pic[0], m, w4, now, 3); /* the one you watch: every frame */
+    else w4 = g_pv_pic[0].px;
     float fx = g_pv_mx - w4 / 2.0f, fy = g_pv_my - w4 / 2.0f;
     blit_pic_at(&g_pv, fx, fy, &g_pv_pic[0]);
     g_blit_add = 0;
@@ -3705,7 +4112,7 @@ static void settings_tick(double now) {
     g_frame_k = frame_k(real) * w4 / fmaxf(1, real); /* its frame, as much smaller as the preview is */
     focus_frame(&g_pv, lr, m, now);
     g_frame_k = 0;
-    /* the window: the still layer with the cluster laid in */
+    /* the window: the still layer with the cluster laid in, its own controls back on top */
     int W = g_sl.W, H = g_sl.H;
     pane_size(&g_so, W, H);
     memcpy(g_so.px, g_sl.px, (size_t)W * H * 4);
@@ -3714,6 +4121,17 @@ static void settings_tick(double now) {
         if (Y < 0 || Y >= H) continue;
         uint32_t *d = g_so.px + (size_t)Y * W + g_pv_rc.left, *s = g_pv.px + (size_t)y * pw;
         for (int x = 0; x < pw && g_pv_rc.left + x < W; x++) d[x] = s[x] | 0xff000000u;
+    }
+    for (int k = 0; k < g_ovr_n; k++) { /* the close button, the state chips, the zoom, the reply sample */
+        RECT o = g_ovr[k];
+        for (int y = o.top; y < o.bottom; y++) {
+            if (y < 0 || y >= H) continue;
+            for (int x = o.left; x < o.right; x++) {
+                if (x < 0 || x >= W) continue;
+                uint32_t sp = g_sl.px[(size_t)y * W + x];
+                if ((sp & 0xffffff) != S_BAND) g_so.px[(size_t)y * W + x] = sp; /* (the band's own colour round them lets the cores show) */
+            }
+        }
     }
     RECT wr; GetWindowRect(g_set, &wr);
     POINT src = {0, 0}, dst = {wr.left, wr.top};
@@ -3731,7 +4149,25 @@ static void set_slide_to(int h, int x) {
     set_choose(sh->row, v);
 }
 
-static void set_close(void) { if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag = 0; g_slide = -1; }
+static void krec_stop(void) { g_krec = -1; hotkeys_apply(); g_sl_dirty = 1; }
+static void set_close(void) { if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag = 0; g_slide = -1; g_sizing = 0; if (g_krec >= 0) krec_stop(); }
+
+/* a key pressed while a shortcut is being recorded: it becomes that shortcut ("ctrl+alt+c") */
+static void krec_key(WPARAM vk) {
+    if (vk == VK_ESCAPE) { krec_stop(); return; }
+    if (vk == VK_BACK || vk == VK_DELETE) { snprintf(hk_spec(g_krec), 32, "none"); settings_save(); krec_stop(); return; }
+    if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT || vk == VK_LWIN || vk == VK_RWIN || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LSHIFT || vk == VK_RSHIFT) return;
+    char key[8];
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) snprintf(key, sizeof key, "%c", (char)tolower((int)vk));
+    else if (vk >= VK_F1 && vk <= VK_F12) snprintf(key, sizeof key, "f%d", (int)(vk - VK_F1 + 1));
+    else if (vk == VK_SPACE) snprintf(key, sizeof key, "space");
+    else { g_kmsg = L"Use a letter, a number, an F-key or Space"; g_kmsg_until = wall() + 2; g_sl_dirty = 1; return; }
+    int ctrl = GetKeyState(VK_CONTROL) & 0x8000, alt = GetKeyState(VK_MENU) & 0x8000, shift = GetKeyState(VK_SHIFT) & 0x8000, win = (GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000;
+    if (!ctrl && !alt && !win && !(shift && vk >= VK_F1 && vk <= VK_F12)) { g_kmsg = L"Hold Ctrl, Alt or Win with it"; g_kmsg_until = wall() + 2; g_sl_dirty = 1; return; }
+    snprintf(hk_spec(g_krec), 32, "%s%s%s%s%s", ctrl ? "ctrl+" : "", alt ? "alt+" : "", shift ? "shift+" : "", win ? "win+" : "", key);
+    settings_save();
+    krec_stop();
+}
 
 static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -3744,23 +4180,39 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         settings_tick(wall());
         return 0;
     }
-    case WM_NCHITTEST: { /* the top strip moves the window */
+    case WM_NCHITTEST: { /* the sidebar's empty space and the page's title row move the window */
         POINT c = p; ScreenToClient(w, &c);
-        if (c.y < (int)S(52) && c.x < (int)S(816) && set_hit_at(c) < 0) return HTCAPTION;
+        if (set_hit_at(c) >= 0 || PtInRect(&g_pv_rc, c)) return HTCLIENT;
+        float x = c.x / (float)g_sdpi, y = c.y / (float)g_sdpi;
+        if (x < side_w() || y < SET_TOP) return HTCAPTION;
         return HTCLIENT;
     }
     case WM_MOUSEMOVE: {
         if (!g_tracking) { TRACKMOUSEEVENT te = {sizeof te, TME_LEAVE, w, 0}; TrackMouseEvent(&te); g_tracking = 1; }
+        if (g_sizing) { /* the edge or corner follows the mouse */
+            POINT s; GetCursorPos(&s);
+            RECT wa = work_at((float)s.x, (float)s.y);
+            if (g_sizing & 1) g_set_w = clampf(g_size_w0 + (s.x - g_size_from.x) / (float)g_sdpi, 620, (wa.right - wa.left) / (float)g_sdpi);
+            if (g_sizing & 2) g_set_h = clampf(g_size_h0 + (s.y - g_size_from.y) / (float)g_sdpi, 480, (wa.bottom - wa.top) / (float)g_sdpi);
+            g_sl_dirty = 1; /* (drawn by the next tick, not on every mouse move) */
+            return 0;
+        }
         if (g_slide >= 0) { set_slide_to(g_slide, p.x); return 0; }
         int h = set_hit_at(p);
-        if (h != g_hot) { g_hot = h; g_sl_dirty = 1; }
+        if (h != g_hot) {
+            g_hot = h; g_sl_dirty = 1;
+            if (h >= 0 && g_hits[h].kind == K_MTOG) { g_mhov_at = wall(); g_mhov_played = 0; }
+        }
         return 0;
     }
     case WM_MOUSELEAVE: g_tracking = 0; if (g_hot >= 0) { g_hot = -1; g_sl_dirty = 1; } return 0;
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT c; GetCursorPos(&c); ScreenToClient(w, &c);
-            SetCursor(LoadCursor(NULL, set_hit_at(c) >= 0 || PtInRect(&g_pv_rc, c) ? IDC_HAND : IDC_ARROW));
+            int h = set_hit_at(c);
+            LPCTSTR cur = h >= 0 && g_hits[h].kind == K_SIZE ? (g_hits[h].val == 1 ? IDC_SIZEWE : g_hits[h].val == 2 ? IDC_SIZENS : IDC_SIZENWSE)
+                        : h >= 0 || PtInRect(&g_pv_rc, c) ? IDC_HAND : IDC_ARROW;
+            SetCursor(LoadCursor(NULL, cur));
             return TRUE;
         }
         break;
@@ -3769,19 +4221,24 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         /* fall through */
     case WM_LBUTTONDOWN: {
         int h = set_hit_at(p);
+        if (g_krec >= 0 && (h < 0 || g_hits[h].kind != K_KREC)) krec_stop(); /* a click elsewhere: recording stops */
         if (h >= 0) {
             SetHit *sh = &g_hits[h];
             switch (sh->kind) {
             case K_PICK: set_choose(sh->row, sh->val); break;
             case K_TOGGLE: set_choose(sh->row, 0); break;
             case K_SLIDE: g_slide = h; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
-            case K_CYCLE: { int c = set_current(sh->row); set_choose(sh->row, (c + 1) % 4); break; }
             case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
-            case K_TAB: g_tab = sh->val; g_sl_dirty = 1; break;
+            case K_PAGE: g_tab = sh->val; g_set_scroll = 0; g_sl_dirty = 1; break;
+            case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
+            case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
             case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
-            case K_MTOG: mot_toggle(sh->row, sh->val); break;
-            case K_MPLAY: mot_play(sh->row, sh->val); break;
-            case K_RESET: set_reset(); break;
+            case K_MTOG: mot_toggle(sh->row, sh->val); g_mhov_played = 1; break;
+            case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
+            case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; settings_applied(1); break; }
+            case K_KREC: if (g_krec == sh->val) krec_stop(); else { g_krec = sh->val; for (int i = 1; i <= 4; i++) UnregisterHotKey(g_cluster.w, i); g_sl_dirty = 1; } break; /* (no hotkey steals the keys meanwhile) */
+            case K_RESET: if (sh->row == 1) page_reset(g_tab); else set_reset(); break;
+            case K_SIZE: g_sizing = sh->val; GetCursorPos(&g_size_from); g_size_w0 = g_set_w; g_size_h0 = g_set_h; SetCapture(w); break;
             case K_CLOSE: g_close_armed = 1; SetCapture(w); break; /* it closes when the button is let go over it */
             }
             return 0;
@@ -3796,23 +4253,31 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONUP: {
         int h = set_hit_at(p), close = g_close_armed && h >= 0 && g_hits[h].kind == K_CLOSE;
-        if (g_pv_drag || g_slide >= 0 || g_close_armed) { g_pv_drag = 0; g_slide = -1; g_close_armed = 0; g_sl_dirty = 1; ReleaseCapture(); }
+        if (g_sizing) { g_sizing = 0; settings_save(); g_sl_dirty = 1; settings_tick(wall()); } /* let go: drawn in full at once */
+        if (g_pv_drag || g_slide >= 0 || g_close_armed) { g_pv_drag = 0; g_slide = -1; g_close_armed = 0; g_sl_dirty = 1; }
+        ReleaseCapture();
         if (close) set_close();
         return 0;
     }
-    case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
+    case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
         chat_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
-    case WM_MOUSEWHEEL: { /* over the preview: zoom in to see the detail */
+    case WM_MOUSEWHEEL: { /* over the preview: zoom; over the page: scroll it */
         POINT c = p; ScreenToClient(w, &c);
-        if (!PtInRect(&g_pv_rc, c)) return 0;
-        g_pv_zoom = clampf(g_pv_zoom * powf(1.2f, GET_WHEEL_DELTA_WPARAM(wp) / 120.0f), 1, 3);
-        if (g_pv_zoom < 1.05f) g_pv_zoom = 1;
-        g_pv_mx = g_pv_my = 0; /* centred again */
+        float notch = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
+        if (PtInRect(&g_pv_rc, c)) {
+            g_pv_zoom = clampf(g_pv_zoom * powf(1.2f, notch), 1, 3);
+            if (g_pv_zoom < 1.05f) g_pv_zoom = 1;
+            g_pv_mx = g_pv_my = 0; /* centred again */
+        } else g_set_scroll = clampf(g_set_scroll - notch * 56, 0, fmaxf(0, g_set_content_h - g_set_view_h));
         g_sl_dirty = 1;
         return 0;
     }
-    case WM_KEYDOWN: if (wp == VK_ESCAPE) { set_close(); return 0; } break;
+    case WM_SYSKEYDOWN: case WM_KEYDOWN:
+        if (g_krec >= 0) { krec_key(wp); return 0; }
+        if (wp == VK_ESCAPE) { set_close(); return 0; }
+        break;
+    case WM_SYSCHAR: if (g_krec >= 0) return 0; break; /* (no beep, no menu, for Alt+key) */
     case WM_CLOSE: set_close(); return 0;
     }
     return DefWindowProc(w, msg, wp, lp);
@@ -3842,6 +4307,8 @@ static void settings_open(void) {
         RECT wa = work_at((float)c.x, (float)c.y);
         double d = dpi_at((float)c.x, (float)c.y);
         if (fabs(d - g_sdpi) > 0.01) { g_sdpi = d; set_refont(); }
+        g_set_w = clampf(g_set_w, 620, (wa.right - wa.left) / (float)g_sdpi); /* the size kept, as much as this monitor has room for */
+        g_set_h = clampf(g_set_h, 480, (wa.bottom - wa.top) / (float)g_sdpi);
         int W = SW_W(), H = SW_H();
         SetWindowPos(g_set, HWND_TOPMOST, (wa.left + wa.right - W) / 2, (wa.top + wa.bottom - H) / 2, W, H, SWP_NOACTIVATE);
         for (int i = 1; i < 4; i++) g_pv_ob[i].init = 0;
@@ -3857,6 +4324,7 @@ static void settings_open(void) {
     SetForegroundWindow(g_set);
     SetFocus(g_set);
 }
+
 
 /* --settings-shot: the window as it is shown, to a 32-bit BMP (to check a change without looking at the screen) */
 static void settings_shot(const char *path) {
@@ -4182,7 +4650,16 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
         return 0;
     }
-    case WM_HOTKEY: if (wp == HK_MODE) toggle_mode(); return 0;
+    case WM_HOTKEY:
+        if (wp == HK_MODE) toggle_mode();
+        else if (wp == HK_HIDE) g_hidden = !g_hidden;
+        else if (wp == HK_REPLY) { /* the reply line under the main core's last answer */
+            Room *rm = shown_room();
+            int fi = index_of(g_focus);
+            if (fi < 0 && rm->n) fi = 0;
+            if (fi >= 0) { g_hidden = 0; input_open_for(&rm->s[fi]); }
+        } else if (wp == HK_SET) settings_open();
+        return 0;
     case WM_UNHOOK: if (g_hook && !g_carrying) { UnhookWindowsHookEx(g_hook); g_hook = NULL; } return 0;
     case WM_LBUTTONDOWN: { /* a press: the patch under it goes in; it may become a drag */
         float lx, ly;
@@ -4194,7 +4671,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         g_move_mouse = p;
         SetCapture(w);
         if (alt_held()) { /* Alt-drag: the cluster (single core) or this core (all cores) goes anywhere */
-            mask_alt();
+            if (g_move_mod == VK_MENU) mask_alt();
             g_moving = 1;
             if (g_single && i == g_top) { g_move_origin.x = (LONG)g_mx; g_move_origin.y = (LONG)g_my; } /* the main core: the whole cluster */
             else if (g_single) { Orbit *ob = orbit_of(s->sid); g_move_origin.x = (LONG)ob->px; g_move_origin.y = (LONG)ob->py; g_moving = 2; } /* a small core, by hand */
@@ -4274,6 +4751,19 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 /* "ctrl+alt+c" → modifiers and a virtual key; 0 if it does not parse ("opt" and "option" mean Alt here) */
+static int parse_hotkey(const char *spec, UINT *mods, UINT *vk);
+/* the four global hotkeys (Settings > Shortcuts) registered again; one another app holds is marked */
+static void hotkeys_apply(void) {
+    for (int i = 0; i < 4; i++) {
+        UnregisterHotKey(g_cluster.w, HK_MODE + i);
+        g_hk_fail[i] = 0;
+        const char *spec = hk_spec(i);
+        UINT mods, vk;
+        if (!spec[0] || !strcmp(spec, "none")) continue;
+        if (!parse_hotkey(spec, &mods, &vk) || !RegisterHotKey(g_cluster.w, HK_MODE + i, mods | MOD_NOREPEAT, vk)) g_hk_fail[i] = 1;
+    }
+    g_sl_dirty = 1;
+}
 static int parse_hotkey(const char *spec, UINT *mods, UINT *vk) {
     char buf[64];
     snprintf(buf, sizeof buf, "%s", spec);
@@ -4348,7 +4838,8 @@ static void usage(void) {
         "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
         "  --on X,Y             --record and the Settings window go on the monitor with that desktop point\n"
         "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
-        "  --settings-tab motions open it on the Motions page\n\n"
+        "  --settings-tab NAME  open it on that page: look, cluster, replies, motions, shortcuts, performance\n"
+        "  --settings-fold      with its sidebar folded to icons\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, chat box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
@@ -4385,7 +4876,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
         else if (!strcmp(a, "--stats")) g_stats = 1;
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
-        else if (!strcmp(a, "--settings-tab") && v) { g_tab = !strcmp(v, "motions"); g_open_settings = 1; i++; }
+        else if (!strcmp(a, "--settings-tab") && v) { /* look, cluster, replies, motions, shortcuts, performance */
+            static const char *TABS[PG_N] = {"look", "cluster", "replies", "motions", "shortcuts", "performance"};
+            for (int k = 0; k < PG_N; k++) if (!strncmp(v, TABS[k], 4)) g_tab = k;
+            g_open_settings = 1; i++;
+        }
+        else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
         else if (!strcmp(a, "--on") && v && sscanf(v, "%ld,%ld", &g_on.x, &g_on.y) == 2) { g_on_set = 1; i++; }
         else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
         else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
@@ -4448,11 +4944,8 @@ int main(int argc, char **argv) {
                            L"VigilChat", L"Vigil", WS_POPUP, 0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
     SetLayeredWindowAttributes(g_chat, 0, 255, LWA_ALPHA); /* opaque: text behind it must not show through */
     main_place();
-    UINT mods, vk;
-    if (strcmp(g_mode_hotkey, "none")) {
-        if (!parse_hotkey(g_mode_hotkey, &mods, &vk)) fprintf(stderr, "vigil-panel: cannot read --mode-hotkey %s\n", g_mode_hotkey);
-        else if (!RegisterHotKey(g_cluster.w, HK_MODE, mods | MOD_NOREPEAT, vk)) fprintf(stderr, "vigil-panel: hotkey %s is taken by another app\n", g_mode_hotkey);
-    }
+    hotkeys_apply();
+    for (int i = 0; i < 4; i++) if (g_hk_fail[i]) fprintf(stderr, "vigil-panel: hotkey %s cannot be used (another app has it, or it does not read)\n", hk_spec(i));
     /* The clock: a high-resolution waitable timer (a SetTimer of 33 ms really fires every 47, Windows' timer
      * steps being 15.6 ms), waited on together with the window messages. */
     HANDLE clock = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
