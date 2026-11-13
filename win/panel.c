@@ -12,7 +12,7 @@
  * start in a column on the right edge, and Alt-drag puts each one anywhere (kept per folder name).
  * Alt stands in for the macOS ⌥ everywhere: Alt-drag moves, Alt-click picks up and the next click puts down.
  *
- * Also: hover replies (the tooltip box with the last reply or permission notice, from the hook's msg files,
+ * Also: hover replies (the chat box with the last reply or permission notice, from the hook's msg files,
  * DODECA_RICH=1), labels, lock-on with the focus frame, the rush defence, press, drag to spin, double-click
  * ring and bring to front, away (STANDBY), right-click menu with Copy reply and Settings. Not yet: voice.
  *
@@ -56,7 +56,7 @@ static Event g_ev[1024];
 static Demo g_demo;
 static int g_demo_n, g_width;
 static float g_glow = 1.0f, g_core = 0.35f, g_font = 14, g_scale = 1; /* g_scale: Settings > Panel size */
-static float g_tip_size = 1;        /* Settings > Box size: how wide and tall the text box may grow */
+static float g_chat_size = 1;        /* Settings > Box size: how wide and tall the chat box may grow */
 static float g_gravity = 2;         /* how hard the main core holds the small ones on their orbit (Settings > Gravity) */
 static char g_shape_name[16] = "geo2";
 static double g_dpi = 1;            /* the scale of the monitor the main core is on (1 = 96 dpi); followed as it moves */
@@ -73,13 +73,13 @@ static char g_frame[16] = "segments"; /* --frame: drawn round a core while it is
 static int g_labels = 1;            /* all cores: name and state above each core (--labels hover: none) */
 static double g_away_after = 120;   /* --away: seconds without keyboard or mouse input until "away" (0 = never) */
 static int g_away;
-static int g_tip_middle;            /* Settings > Text box: in the middle of the screen, else next to the core */
-static int g_tip_bg;                /* Settings > Box colour: the text box's background, one of TIP_BGS, or 5: g_tip_custom */
-static unsigned g_tip_custom = 0x2A2F3A; /* the colour picked in the palette window (0xRRGGBB) */
+static int g_chat_middle;            /* Settings > Chat box: in the middle of the screen, else next to the core */
+static int g_chat_bg;                /* Settings > Box colour: the chat box's background, one of CHAT_BGS, or 5: g_chat_custom */
+static unsigned g_chat_custom = 0x2A2F3A; /* the colour picked in the palette window (0xRRGGBB) */
 static int g_text_col;              /* Settings > Colours > Text: 0 auto (light on a dark box, dark on a light one), 1-4 TEXT_COLS, 5 g_text_custom */
 static unsigned g_text_custom = 0xF2F2F5;
 static int g_wheel_spin;            /* Settings > Scroll on a core: how the wheel spins it, one of WHEEL_NAMES (4: not at all) */
-static int g_tip_mono = 1;          /* Settings > Text box font: the terminal's monospaced face, like Claude Code (else Segoe UI) */
+static int g_chat_mono = 1;          /* Settings > Chat box font: the terminal's monospaced face, like Claude Code (else Segoe UI) */
 static int g_open_settings;         /* --settings: open the Settings window at once */
 static char g_set_shot[1024];       /* --settings-shot FILE: open it, let the preview run 2 s, save the window as a BMP and quit */
 static int g_stats;                 /* --stats: frames, pictures and window updates a second, to panel-stats.txt */
@@ -109,7 +109,7 @@ typedef struct {
 } Pane;
 static Pane g_cluster;              /* also owns the timer, the hotkey and the menus */
 static Pane g_pane[MAX_SESS];       /* all cores: pane i shows session i */
-static HWND g_tip;
+static HWND g_chat;
 static HWND g_set;                  /* the Settings window (kept in front of the cores while open) */
 static int g_menu_open;             /* the right-click menu is up: the pointer is on it, not on a core under it */
 static int g_col_w;                 /* the column's width */
@@ -145,15 +145,15 @@ static const char *FRAMES[7] = {"segments", "lens", "polar", "diamond", "lock", 
 static const wchar_t *FRAME_NAMES[7] = {L"Segments", L"Lens", L"Polar", L"Diamond", L"Lock", L"Orbits", L"None"};
 static const float GRAVITIES[4] = {1, 2, 4, 8};             /* the orbit spring's strength, times the lightest */
 static const double AWAYS[4] = {60, 120, 300, 0};
-static const float TIPSIZES[4] = {0.75f, 1.0f, 1.35f, 1.75f};
-static const unsigned TIP_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A}; /* dark, so the text keeps its contrast */
-static const wchar_t *TIP_BG_NAMES[6] = {L"Ink", L"Graphite", L"Navy", L"Plum", L"Pine", L"Custom"};
+static const float CHATSIZES[4] = {0.75f, 1.0f, 1.35f, 1.75f};
+static const unsigned CHAT_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A}; /* dark, so the text keeps its contrast */
+static const wchar_t *CHAT_BG_NAMES[6] = {L"Ink", L"Graphite", L"Navy", L"Plum", L"Pine", L"Custom"};
 static const wchar_t *WHEEL_NAMES[5] = {L"Roll", L"Roll back", L"Turn", L"Turn back", L"Off"};
-static unsigned tip_bgx(void) { return g_tip_bg == 5 ? g_tip_custom : TIP_BGS[g_tip_bg]; } /* 0xRRGGBB */
-static COLORREF tip_bg(void) { unsigned v = tip_bgx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
-static int box_light(void) { unsigned v = tip_bgx(); return 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140; }
-static COLORREF tip_field(void) { /* the typing field: a step lighter on a dark box, a step darker on a light one */
-    unsigned v = tip_bgx();
+static unsigned chat_bgx(void) { return g_chat_bg == 5 ? g_chat_custom : CHAT_BGS[g_chat_bg]; } /* 0xRRGGBB */
+static COLORREF chat_bg(void) { unsigned v = chat_bgx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
+static int box_light(void) { unsigned v = chat_bgx(); return 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140; }
+static COLORREF chat_field(void) { /* the typing field: a step lighter on a dark box, a step darker on a light one */
+    unsigned v = chat_bgx();
     int r = v >> 16 & 255, g = v >> 8 & 255, b = v & 255, d = box_light() ? -14 : 13;
     return RGB(max(0, min(255, r + d)), max(0, min(255, g + d)), max(0, min(255, b + d + (d > 0 ? 3 : 0))));
 }
@@ -326,7 +326,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, tip_size; int smooth; Smooth custom; int others, labels, tip_middle, tip_mono, tip_bg, wheel_spin, text_col; unsigned tip_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int smooth; Smooth custom; int others, labels, chat_middle, chat_mono, chat_bg, wheel_spin, text_col; unsigned chat_custom, text_custom; double away; char shape[16], frame[16]; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -336,9 +336,9 @@ static int settings_path(char *out, size_t n) {
 
 static void remember_launch(void) {
     g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom;
-    g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.tip_size = g_tip_size; g_launch.others = g_others;
-    g_launch.labels = g_labels; g_launch.away = g_away_after; g_launch.tip_middle = g_tip_middle; g_launch.tip_mono = g_tip_mono;
-    g_launch.tip_bg = g_tip_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.tip_custom = g_tip_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
+    g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.others = g_others;
+    g_launch.labels = g_labels; g_launch.away = g_away_after; g_launch.chat_middle = g_chat_middle; g_launch.chat_mono = g_chat_mono;
+    g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
 }
@@ -346,9 +346,9 @@ static void remember_launch(void) {
 static void restore_launch(void) {
     motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom;
-    g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_tip_size = g_launch.tip_size; g_others = g_launch.others;
-    g_labels = g_launch.labels; g_away_after = g_launch.away; g_tip_middle = g_launch.tip_middle; g_tip_mono = g_launch.tip_mono;
-    g_tip_bg = g_launch.tip_bg; g_wheel_spin = g_launch.wheel_spin; g_tip_custom = g_launch.tip_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
+    g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_others = g_launch.others;
+    g_labels = g_launch.labels; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
+    g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
@@ -392,13 +392,13 @@ static void settings_load(void) {
     if (json_num(buf, "scale", &v) && v >= 0.5f && v <= 2.5f) g_scale = v;
     if (json_num(buf, "glow", &v) && v > 0) g_glow = v;
     if (json_num(buf, "gravity", &v) && v >= 0.5f && v <= 8) g_gravity = v;
-    if (json_num(buf, "tipSize", &v) && v >= 0.5f && v <= 2) g_tip_size = v;
+    if (json_num(buf, "tipSize", &v) && v >= 0.5f && v <= 2) g_chat_size = v;
     if (json_num(buf, "others", &v)) g_others = v != 0;
     if (json_num(buf, "labels", &v)) g_labels = v != 0;
-    if (json_num(buf, "tipMiddle", &v)) g_tip_middle = v != 0;
-    if (json_num(buf, "tipMono", &v)) g_tip_mono = v != 0;
-    if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_tip_bg = (int)v;
-    if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_tip_custom = (unsigned)v;
+    if (json_num(buf, "tipMiddle", &v)) g_chat_middle = v != 0;
+    if (json_num(buf, "tipMono", &v)) g_chat_mono = v != 0;
+    if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_chat_bg = (int)v;
+    if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_chat_custom = (unsigned)v;
     if (json_num(buf, "textColor", &v) && v >= 0 && v < 6) g_text_col = (int)v;
     if (json_num(buf, "textCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_text_custom = (unsigned)v;
     if (json_num(buf, "wheelSpin", &v) && v >= 0 && v < 5) g_wheel_spin = (int)v;
@@ -430,7 +430,7 @@ static void settings_save(void) {
     if (!f) return;
     fprintf(f, "{\"fontSize\": %g, \"core\": %g, \"scale\": %g, \"glow\": %g, \"gravity\": %g, \"tipSize\": %g, \"others\": %d, \"labels\": %d, \"tipMiddle\": %d, \"tipMono\": %d, \"tipColor\": %d, \"tipCustom\": %u, \"textColor\": %d, \"textCustom\": %u, \"wheelSpin\": %d, \"away\": %g, "
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
-            g_font, g_core, g_scale, g_glow, g_gravity, g_tip_size, g_others, g_labels, g_tip_middle, g_tip_mono, g_tip_bg, g_tip_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
+            g_font, g_core, g_scale, g_glow, g_gravity, g_chat_size, g_others, g_labels, g_chat_middle, g_chat_mono, g_chat_bg, g_chat_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
     fprintf(f, ", \"mapRoutines\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
@@ -1056,7 +1056,7 @@ static Orbit *orbit_of(const char *sid) {
     return o;
 }
 
-static RECT g_cluster_rc;           /* the main core and its orbit, on the desktop (the text box goes beside it) */
+static RECT g_cluster_rc;           /* the main core and its orbit, on the desktop (the chat box goes beside it) */
 static double g_last_draw;
 
 static void draw_single(Room *room, int n, double now) {
@@ -1173,7 +1173,7 @@ void dpi_follow(int force) {
         o->vx *= (float)k; o->vy *= (float)k; o->w *= (float)k;
     }
     if (g_label_font) { DeleteObject(g_label_font); g_label_font = NULL; }
-    if (k != 1) { void tip_rescale(void); tip_rescale(); }
+    if (k != 1) { void chat_rescale(void); chat_rescale(); }
     pics_invalidate();
 }
 
@@ -1194,12 +1194,12 @@ static void draw(double now) {
     g_core_n = n;
 }
 
-/* ---- the tooltip: name and state, then the last reply (or the permission notice) --------------------- */
+/* ---- the chat box: name and state, then the last reply (or the permission notice) --------------------- */
 /* The hook keeps them in ~/.dodeca-core/msg/<sid>.json (only with DODECA_RICH=1); read again when the file
  * changes. --demo makes them up, like the macOS panel. */
 static const char *DEMO_REPLY[] = {
     "Refactored the channel model so fading is applied per tap.\n\n- `channel.py`: one Rayleigh draw per tap, not per frame\n- `sim.py`: the seed covers the noise too, so runs repeat\n- `test_ber.py`: all 42 tests pass\n\nThe BER curve now matches the reference within 0.2 dB:\n\n```\nEb/N0   ref      ours\n 4 dB   1.2e-2   1.2e-2\n 8 dB   3.1e-4   3.3e-4\n12 dB   1.8e-6   1.9e-6\n```\n\n**How I checked**\n\n1. Ran the 42 tests three times with fixed seeds\n2. Swept Eb/N0 from 0 to 14 dB in 1 dB steps\n3. Compared each point with `reference.csv`\n\n**Files changed**\n\n- `channel.py` +48 -31\n- `sim.py` +12 -4\n- `test_ber.py` +20\n\nNext I can add **Doppler** if you want.",
-    "The lock now debounces the reed switch for 30 ms.\nI also fixed the race where a second unlock arrived before the motor stopped.",
+    "The lock now debounces the reed switch for 30 ms, and a second unlock waits for the motor:\n\n| Case | Before | After |\n|---|---|---|\n| Bouncy switch | *2-3 unlocks* | **1 unlock** |\n| Unlock while moving | race | `queued` |\n\nAll 18 lock tests pass.",
     "整理好今天的筆記了：三個待辦、兩個已完成。\n要不要我把待辦排進明天的計畫？",
     "Bumped the bootloader to v2.3 and rebuilt the image.\nFlash it with `make flash`; the OTA path is unchanged.",
     "Swept 2.40-2.48 GHz: best match at 2.437 GHz, S11 -18 dB.\nThe matching network values are in tune.csv.",
@@ -1294,7 +1294,7 @@ static void msg_load(const Session *s, double now) {
 
 /* UTF-8 → UTF-16, with a little Markdown taken out (what replies are made of): **, `, ``` lines, # heads,
  * "- " and "* " items as bullets */
-static wchar_t *tip_text(const char *u8) {
+static wchar_t *chat_text(const char *u8) {
     int n = MultiByteToWideChar(CP_UTF8, 0, u8, -1, NULL, 0);
     wchar_t *w = malloc(sizeof(wchar_t) * (size_t)(n + 1)), *out = malloc(sizeof(wchar_t) * (size_t)(n + 1)), *o = out;
     MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, n);
@@ -1318,16 +1318,16 @@ static wchar_t *tip_text(const char *u8) {
     return out;
 }
 
-static wchar_t *g_tip_title, *g_tip_body;
-static COLORREF g_tip_accent;
-static HFONT g_tip_tf, g_tip_bf, g_tip_mf; /* title, body, monospaced */
-static int g_tip_title_h, g_tip_body_h, g_tip_view_h, g_tip_line, g_tip_scroll;
-static RECT g_tip_view;             /* where the reply is drawn in the box (window pixels), for clicks on links */
-static char g_tip_sid[72];          /* whose text the box shows */
+static wchar_t *g_chat_title, *g_chat_body;
+static COLORREF g_chat_accent;
+static HFONT g_chat_tf, g_chat_bf, g_chat_mf; /* title, body, monospaced */
+static int g_chat_title_h, g_chat_body_h, g_chat_view_h, g_chat_line, g_chat_scroll;
+static RECT g_chat_view;             /* where the reply is drawn in the box (window pixels), for clicks on links */
+static char g_chat_sid[72];          /* whose text the box shows */
 
-static int tip_pad(void) { return (int)(11 * g_dpi); }
-static int tip_bar(void) { return (int)(3 * g_dpi); }
-static int tip_gap(void) { return (int)(6 * g_dpi); }
+static int chat_pad(void) { return (int)(11 * g_dpi); }
+static int chat_bar(void) { return (int)(3 * g_dpi); }
+static int chat_gap(void) { return (int)(6 * g_dpi); }
 
 /* the terminal's face: Cascadia Mono (it comes with Windows Terminal), else Consolas */
 static const wchar_t *mono_face(void) {
@@ -1408,16 +1408,16 @@ static int mix_text(HDC dc, HFONT f, const wchar_t *t, int n, int draw, int x, i
     return w;
 }
 
-static void tip_fonts(void) {
-    if (g_tip_tf) return;
+static void chat_fonts(void) {
+    if (g_chat_tf) return;
     int h = -(int)(g_font * g_dpi + 0.5);
-    const wchar_t *mono = mono_face(), *text = g_tip_mono ? mono : L"Segoe UI";
-    DWORD pitch = g_tip_mono ? FIXED_PITCH : 0;
-    g_tip_tf = CreateFontW(h, 0, 0, 0, g_tip_mono ? FW_BOLD : FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
-    g_tip_bf = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
-    g_tip_mf = CreateFontW(g_tip_mono ? h : (int)(h * 0.92f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, mono);
-    void tip_more_fonts(int h, const wchar_t *text, DWORD pitch);
-    tip_more_fonts(h, text, pitch);
+    const wchar_t *mono = mono_face(), *text = g_chat_mono ? mono : L"Segoe UI";
+    DWORD pitch = g_chat_mono ? FIXED_PITCH : 0;
+    g_chat_tf = CreateFontW(h, 0, 0, 0, g_chat_mono ? FW_BOLD : FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+    g_chat_bf = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+    g_chat_mf = CreateFontW(g_chat_mono ? h : (int)(h * 0.92f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, mono);
+    void chat_more_fonts(int h, const wchar_t *text, DWORD pitch);
+    chat_more_fonts(h, text, pitch);
 }
 
 static int input_open(void);
@@ -1433,19 +1433,19 @@ static void input_close(void);
  * # and ## headings larger, ### bold; **bold**, *italic*, ***both***, ~~struck~~, `code`, [links](url) (the
  * text, underlined); > quotes with a bar down the side; --- rules; | tables | as aligned columns (one line a
  * row when too wide); ``` blocks indented and dimmed. Long words and Chinese text wrap anywhere. Worked out
- * once per reply (tip_layout), drawn from the list of runs (tip_proc). */
+ * once per reply (chat_layout), drawn from the list of runs (chat_proc). */
 enum { F_BODY, F_BOLD, F_MONO, F_ITAL, F_BOLDITAL, F_H1, F_H2, F_COUNT };
 enum { DECO_UNDER = 1, DECO_STRIKE = 2 };
-enum { SH_RULE = -1, SH_BAR = -2 };
+enum { SH_RULE = -1, SH_BAR = -2, SH_VLINE = -3 }; /* a rule across, a quote's bar, a thin line down (table borders) */
 typedef struct { int x, y, f, at, n, w, deco, url, url_n; COLORREF c; } Run; /* y: the baseline; a rule: x, y, w; a bar: x, y (top), n tall; url: where a link's address is in the text */
 static Run *g_runs;
 static int g_runs_n, g_runs_cap, g_lay_w;
 static wchar_t *g_lay_text;
 static int g_lay_len, g_lay_cap;
-static HFONT g_tip_xf[F_COUNT];     /* italic, bold italic and the two heading sizes */
+static HFONT g_chat_xf[F_COUNT];     /* italic, bold italic and the two heading sizes */
 static int g_fasc[F_COUNT], g_fhgt[F_COUNT];
 
-static HFONT lay_font(int f) { return f == F_BOLD ? g_tip_tf : f == F_MONO ? g_tip_mf : f == F_BODY ? g_tip_bf : g_tip_xf[f]; }
+static HFONT lay_font(int f) { return f == F_BOLD ? g_chat_tf : f == F_MONO ? g_chat_mf : f == F_BODY ? g_chat_bf : g_chat_xf[f]; }
 
 static const wchar_t *g_lay_url; /* while a link is being laid out: its address */
 static int g_lay_url_n;
@@ -1472,7 +1472,7 @@ static void lay_put(int x, int base, int f, COLORREF c, const wchar_t *t, int n,
     lay_add((Run){.x = x, .y = base, .f = f, .n = n, .w = w, .deco = deco, .url = -1, .c = c}, t);
     if (x + w > g_lay_w) g_lay_w = x + w;
 }
-static void lay_shape(int kind, int x, int y, int len, COLORREF c) { lay_add((Run){.x = x, .y = y, .f = kind, .n = kind == SH_BAR ? len : 0, .w = kind == SH_RULE ? len : 0, .url = -1, .c = c}, NULL); }
+static void lay_shape(int kind, int x, int y, int len, COLORREF c) { lay_add((Run){.x = x, .y = y, .f = kind, .n = kind == SH_RULE ? 0 : len, .w = kind == SH_RULE ? len : 0, .url = -1, .c = c}, NULL); }
 
 static int text_w(HDC dc, int f, const wchar_t *t, int n) { return mix_text(dc, lay_font(f), t, n, 0, 0, 0); }
 
@@ -1580,19 +1580,50 @@ static int cell_plain(const wchar_t *a, const wchar_t *b, wchar_t *out, int cap)
     while (b > a && b[-1] == L' ') b--;
     int n = 0;
     const wchar_t *a0 = a;
-    for (; a < b && n < cap - 1; a++) if (*a != L'`' && !(*a == L'*' && ((a + 1 < b && a[1] == L'*') || (a > a0 && a[-1] == L'*')))) out[n++] = *a; /* drop ` and ** */
+    (void)a0;
+    for (; a < b && n < cap - 1; a++) out[n++] = *a; /* the marks stay: cell_put draws them as bold, italic, code */
     out[n] = 0;
     return n;
 }
 
-void tip_more_fonts(int h, const wchar_t *text, DWORD pitch) {
-    g_tip_xf[F_ITAL] = CreateFontW(h, 0, 0, 0, FW_NORMAL, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
-    g_tip_xf[F_BOLDITAL] = CreateFontW(h, 0, 0, 0, FW_BOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
-    g_tip_xf[F_H1] = CreateFontW((int)(h * 1.32f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
-    g_tip_xf[F_H2] = CreateFontW((int)(h * 1.14f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+/* a table cell at (x, base): **bold**, *italic* or _italic_, `code` as in the rest of the reply, the marks not drawn.
+ * Returns its width; draw 0 only measures. The header row is bold throughout. */
+static int cell_put(HDC dc, int x, int base, const wchar_t *t, int head, int draw) {
+    int bold = 0, ital = 0, code = 0, x0 = x, n = (int)wcslen(t);
+    const wchar_t *run = t;
+    for (int i = 0; i <= n; i++) {
+        int mark = 0;
+        if (i < n) {
+            if (t[i] == L'`') mark = 1;
+            else if (!code && t[i] == L'*' && i + 1 < n && t[i + 1] == L'*') mark = 2;
+            else if (!code && (t[i] == L'*' || (t[i] == L'_' && (i == 0 || !iswalnum(t[i - 1]) || ital)))) mark = 3;
+        }
+        if (i == n || mark) { /* the text so far, in the current style */
+            int len = (int)(t + i - run);
+            if (len > 0) {
+                int f = code ? F_MONO : (bold || head) && ital ? F_BOLDITAL : bold || head ? F_BOLD : ital ? F_ITAL : F_BODY;
+                COLORREF c = code ? MD_CODE : bold || head ? MD_BOLD : MD_BODY;
+                int w = text_w(dc, f, run, len);
+                if (draw) lay_put(x, base, f, c, run, len, w, 0);
+                x += w;
+            }
+            if (mark == 1) code = !code;
+            else if (mark == 2) { bold = !bold; i++; }
+            else if (mark == 3) ital = !ital;
+            run = t + i + 1;
+        }
+    }
+    return x - x0;
 }
 
-static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
+void chat_more_fonts(int h, const wchar_t *text, DWORD pitch) {
+    g_chat_xf[F_ITAL] = CreateFontW(h, 0, 0, 0, FW_NORMAL, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+    g_chat_xf[F_BOLDITAL] = CreateFontW(h, 0, 0, 0, FW_BOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+    g_chat_xf[F_H1] = CreateFontW((int)(h * 1.32f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+    g_chat_xf[F_H2] = CreateFontW((int)(h * 1.14f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
+}
+
+static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     g_runs_n = 0; g_lay_len = 0; g_lay_w = 0;
     for (int f = 0; f < F_COUNT; f++) {
         TEXTMETRICW tm;
@@ -1603,7 +1634,7 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
     int lh = g_fhgt[F_BODY] + (int)(2 * g_dpi), asc = g_fasc[F_BODY], gap = lh / 2, y = 0, in_code = 0, blank = 1;
     int unit = text_w(dc, F_BODY, L"  ", 2) * 2; /* one level of nesting */
     /* Terminal mode looks like Claude Code: the reply opens with its mark, and every line sits two columns in */
-    int lead = g_tip_mono ? text_w(dc, F_BODY, L"  ", 2) : 0, marked = 0;
+    int lead = g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0, marked = 0;
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
@@ -1613,7 +1644,7 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
         if (end - c >= 3 && !wcsncmp(c, L"```", 3)) { in_code = !in_code; ln = nl ? nl + 1 : NULL; continue; }
         if (c == end && !in_code) { if (!blank) y += gap; blank = 1; ln = nl ? nl + 1 : NULL; continue; }
         int x0 = lead + sp / 2 * unit;
-        if (g_tip_mono && !marked) { lay_put(0, y + asc, F_BODY, MD_BOLD, L"\x25CF", 1, text_w(dc, F_BODY, L"\x25CF", 1), 0); marked = 1; } /* ●, then a space, as Claude Code writes it */
+        if (g_chat_mono && !marked) { lay_put(0, y + asc, F_BODY, MD_BOLD, L"\x25CF", 1, text_w(dc, F_BODY, L"\x25CF", 1), 0); marked = 1; } /* ●, then a space, as Claude Code writes it */
         if (in_code) {
             y = lay_code(dc, c, end, lead + unit + sp * text_w(dc, F_MONO, L" ", 1), y, lh, asc, maxw) + lh;
             blank = 0; ln = nl ? nl + 1 : NULL; continue;
@@ -1658,36 +1689,28 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
                 keep[nk++] = r;
                 if (k > ncol) ncol = k;
             }
-            int cw[12] = {0}, gapc = g_tip_mono ? text_w(dc, F_BODY, L" \x2502 ", 3) : unit, total = 0;
-            for (int i = 0; i < nk; i++) { int r = keep[i]; for (int k = 0; k < cells[r]; k++) { int w = text_w(dc, r == head ? F_BOLD : F_BODY, cell[r][k], (int)wcslen(cell[r][k])); if (w > cw[k]) cw[k] = w; } }
+            int cw[12] = {0}, gapc = g_chat_mono ? text_w(dc, F_BODY, L" \x2502 ", 3) : unit, total = 0;
+            for (int i = 0; i < nk; i++) { int r = keep[i]; for (int k = 0; k < cells[r]; k++) { int w = cell_put(dc, 0, 0, cell[r][k], r == head, 0); if (w > cw[k]) cw[k] = w; } }
             for (int k = 0; k < ncol; k++) total += cw[k] + (k ? gapc : 0);
-            int sw = text_w(dc, F_BODY, L" ", 1), edge = g_tip_mono ? text_w(dc, F_BODY, L"\x2502 ", 2) : 0;
-            if (g_tip_mono && total + 2 * edge <= maxw - x0) { /* a terminal table: box-drawing borders, padded to the columns */
+            int sw = text_w(dc, F_BODY, L" ", 1), edge = g_chat_mono ? text_w(dc, F_BODY, L"\x2502 ", 2) : 0;
+            if (g_chat_mono && total + 2 * edge <= maxw - x0) { /* a terminal table: box-drawing borders, padded to the columns */
                 const COLORREF BORDER = RGB(110, 116, 130);
-                int yy = y;
-                #define BOXLINE(L, M, R) do { int bx = x0; wchar_t seg[256]; \
-                    for (int k = 0; k < ncol; k++) { int nch = (cw[k] + sw - 1) / sw + 2, m2 = 0; seg[m2++] = k ? M : L; for (int z = 0; z < nch && m2 < 250; z++) seg[m2++] = 0x2500; \
-                        lay_put(bx, yy + asc, F_BODY, BORDER, seg, m2, text_w(dc, F_BODY, seg, m2), 0); bx += text_w(dc, F_BODY, seg, m2); } \
-                    wchar_t endc = R; lay_put(bx, yy + asc, F_BODY, BORDER, &endc, 1, text_w(dc, F_BODY, &endc, 1), 0); yy += lh; } while (0)
-                BOXLINE(0x250C, 0x252C, 0x2510);
+                /* the borders as thin lines (box-drawing characters left gaps where the rows met), the column
+                 * lines where the characters' bars were, so the columns line up as before; each row padded */
+                int barw = text_w(dc, F_BODY, L"\x2502", 1), th = (int)fmax(1, g_dpi), pad = lh / 4, rowh = lh + 2 * pad;
+                int xb[13], top = y + pad;
+                xb[0] = x0 + barw / 2;
+                for (int k = 0; k < ncol; k++) xb[k + 1] = xb[k] + barw + ((cw[k] + sw - 1) / sw + 2) * sw;
+                int tw = xb[ncol] - xb[0] + th;
+                lay_shape(SH_RULE, xb[0], top, tw, BORDER);
                 for (int i = 0; i < nk; i++) {
-                    int r = keep[i], bx = x0;
-                    for (int k = 0; k < ncol; k++) {
-                        int nch = (cw[k] + sw - 1) / sw + 2;
-                        wchar_t bar = 0x2502;
-                        lay_put(bx, yy + asc, F_BODY, BORDER, &bar, 1, text_w(dc, F_BODY, &bar, 1), 0);
-                        int cx = bx + text_w(dc, F_BODY, &bar, 1) + sw, f = r == head ? F_BOLD : F_BODY;
-                        if (k < cells[r]) { int n = (int)wcslen(cell[r][k]); lay_put(cx, yy + asc, f, r == head ? MD_BOLD : MD_BODY, cell[r][k], n, text_w(dc, f, cell[r][k], n), 0); }
-                        bx += text_w(dc, F_BODY, &bar, 1) + nch * sw;
-                    }
-                    wchar_t bar = 0x2502;
-                    lay_put(bx, yy + asc, F_BODY, BORDER, &bar, 1, text_w(dc, F_BODY, &bar, 1), 0);
-                    yy += lh;
-                    if (r == head) BOXLINE(0x251C, 0x253C, 0x2524);
+                    int r = keep[i], rt = top + i * rowh;
+                    for (int k = 0; k < ncol && k < cells[r]; k++) cell_put(dc, xb[k] + barw / 2 + sw, rt + pad + asc, cell[r][k], r == head, 1);
+                    lay_shape(SH_RULE, xb[0], rt + rowh, tw, BORDER); /* under every row; the last one is the bottom */
                 }
-                BOXLINE(0x2514, 0x2534, 0x2518);
-                #undef BOXLINE
-                y = yy;
+                for (int k = 0; k <= ncol; k++) lay_shape(SH_VLINE, xb[k], top, nk * rowh + th, BORDER);
+                if (xb[ncol] + th > g_lay_w) g_lay_w = xb[ncol] + th;
+                y = top + nk * rowh + pad + th;
                 blank = 0;
                 ln = nl ? nl + 1 : NULL;
                 continue;
@@ -1696,8 +1719,7 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
                 int r = keep[i], x = x0;
                 if (total <= maxw - x0) { /* aligned columns */
                     for (int k = 0; k < cells[r]; k++) {
-                        int f = r == head ? F_BOLD : F_BODY, n = (int)wcslen(cell[r][k]);
-                        lay_put(x, y + asc, f, r == head ? MD_BOLD : MD_BODY, cell[r][k], n, text_w(dc, f, cell[r][k], n), 0);
+                        cell_put(dc, x, y + asc, cell[r][k], r == head, 1);
                         x += cw[k] + gapc;
                     }
                     y += lh;
@@ -1725,7 +1747,7 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
             if (d < end && *d == L' ') {
                 heading = (int)(d - c);
                 c = d; while (c < end && *c == L' ') c++;
-                if (g_tip_mono) heading = 3; /* a terminal has one size: headings are bold */
+                if (g_chat_mono) heading = 3; /* a terminal has one size: headings are bold */
                 int f = heading == 1 ? F_H1 : heading == 2 ? F_H2 : F_BOLD;
                 hlh = g_fhgt[f] + (int)(4 * g_dpi); hasc = g_fasc[f] + (int)(2 * g_dpi);
                 if (y > 0 && !blank) y += gap / 2; /* a little air above a heading */
@@ -1737,8 +1759,8 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
             const wchar_t *d = c;
             while (d < end && iswdigit(*d) && d - c < 4) d++;
             if (end - c >= 2 && (*c == L'-' || *c == L'*' || *c == L'+' || *c == 0x2022) && c[1] == L' ') {
-                mark[0] = g_tip_mono ? *c : 0x2022; mark[1] = 0; c += 2;
-                if (!g_tip_mono && end - c >= 3 && c[0] == L'[' && c[2] == L']' && (c[1] == L' ' || c[1] == L'x' || c[1] == L'X')) { /* - [ ] / - [x] */
+                mark[0] = g_chat_mono ? *c : 0x2022; mark[1] = 0; c += 2;
+                if (!g_chat_mono && end - c >= 3 && c[0] == L'[' && c[2] == L']' && (c[1] == L' ' || c[1] == L'x' || c[1] == L'X')) { /* - [ ] / - [x] */
                     mark[0] = c[1] == L' ' ? 0x2610 : 0x2611; c += 3; while (c < end && *c == L' ') c++;
                 }
             }
@@ -1759,66 +1781,69 @@ static int tip_layout(HDC dc, const wchar_t *src, int maxw) {
     return y > 0 ? y : lh;
 }
 
-static void tip_hide(void) {
+static void chat_hide(void) {
     if (input_open()) return; /* a reply being typed keeps its box */
-    if (g_tip && IsWindowVisible(g_tip)) ShowWindow(g_tip, SW_HIDE);
-    g_tip_sid[0] = 0;
+    if (g_chat && IsWindowVisible(g_chat)) ShowWindow(g_chat, SW_HIDE);
+    g_chat_sid[0] = 0;
+    void chat_forget_side(void);
+    chat_forget_side(); /* shown again: the side is chosen afresh */
 }
 
 /* a new text size: the fonts are made again and the box measures itself again */
-static void tip_refont(void) {
-    if (g_tip_tf) { DeleteObject(g_tip_tf); DeleteObject(g_tip_bf); DeleteObject(g_tip_mf); g_tip_tf = g_tip_bf = g_tip_mf = NULL; }
-    for (int i = 0; i < F_COUNT; i++) if (g_tip_xf[i]) { DeleteObject(g_tip_xf[i]); g_tip_xf[i] = NULL; }
+static void chat_refont(void) {
+    if (g_chat_tf) { DeleteObject(g_chat_tf); DeleteObject(g_chat_bf); DeleteObject(g_chat_mf); g_chat_tf = g_chat_bf = g_chat_mf = NULL; }
+    for (int i = 0; i < F_COUNT; i++) if (g_chat_xf[i]) { DeleteObject(g_chat_xf[i]); g_chat_xf[i] = NULL; }
     if (g_label_font) { DeleteObject(g_label_font); g_label_font = NULL; }
-    free(g_tip_title); g_tip_title = NULL;
+    free(g_chat_title); g_chat_title = NULL;
     input_close();
     void input_refont(void);
     input_refont();
-    tip_hide();
+    chat_hide();
 }
 
 /* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch */
-static void tip_scroll(float notches) {
-    if (!g_tip || !IsWindowVisible(g_tip) || g_tip_body_h <= g_tip_view_h) return;
-    int to = g_tip_scroll - (int)(notches * 3 * g_tip_line);
+static void chat_scroll(float notches) {
+    if (!g_chat || !IsWindowVisible(g_chat) || g_chat_body_h <= g_chat_view_h) return;
+    int to = g_chat_scroll - (int)(notches * 3 * g_chat_line);
     if (to < 0) to = 0;
-    if (to > g_tip_body_h - g_tip_view_h) to = g_tip_body_h - g_tip_view_h;
-    if (to != g_tip_scroll) { g_tip_scroll = to; InvalidateRect(g_tip, NULL, FALSE); }
+    if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
+    if (to != g_chat_scroll) { g_chat_scroll = to; InvalidateRect(g_chat, NULL, FALSE); }
 }
 
-static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT || msg == WM_PRINTCLIENT) { /* drawn off-screen first, so scrolling does not flicker (WM_PRINTCLIENT: --record) */
         PAINTSTRUCT ps;
         HDC wdc = msg == WM_PAINT ? BeginPaint(w, &ps) : (HDC)wp;
         RECT r; GetClientRect(w, &r);
         HDC dc = CreateCompatibleDC(wdc);
         HBITMAP bm = CreateCompatibleBitmap(wdc, r.right, r.bottom), old = SelectObject(dc, bm);
-        HBRUSH bg = CreateSolidBrush(tip_bg()), bar = CreateSolidBrush(g_tip_accent);
+        HBRUSH bg = CreateSolidBrush(chat_bg()), bar = CreateSolidBrush(g_chat_accent);
         FillRect(dc, &r, bg);
-        RECT b = {0, 0, tip_bar(), r.bottom};
+        RECT b = {0, 0, chat_bar(), r.bottom};
         FillRect(dc, &b, bar);
         DeleteObject(bg); DeleteObject(bar);
         SetBkMode(dc, TRANSPARENT);
-        int pad = tip_pad();
-        RECT t = {tip_bar() + pad, pad, r.right - pad, pad + g_tip_title_h};
-        int ar = GetRValue(g_tip_accent), ag = GetGValue(g_tip_accent), ab = GetBValue(g_tip_accent);
+        int pad = chat_pad();
+        RECT t = {chat_bar() + pad, pad, r.right - pad, pad + g_chat_title_h};
+        int ar = GetRValue(g_chat_accent), ag = GetGValue(g_chat_accent), ab = GetBValue(g_chat_accent);
         SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10))); /* lifted toward white */
-        SelectObject(dc, g_tip_tf);
-        if (g_tip_title) DrawTextW(dc, g_tip_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-        int top = t.bottom + tip_gap(), sb = g_tip_body_h > g_tip_view_h ? (int)(8 * g_dpi) : 0;
-        RECT view = {t.left, top, r.right - pad - sb, top + g_tip_view_h};
-        RECT body = {view.left, top - g_tip_scroll, view.right, top - g_tip_scroll + g_tip_body_h};
-        g_tip_view = view;
+        SelectObject(dc, g_chat_tf);
+        if (g_chat_title) DrawTextW(dc, g_chat_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        int top = t.bottom + chat_gap(), sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
+        RECT view = {t.left, top, r.right - pad - sb, top + g_chat_view_h};
+        RECT body = {view.left, top - g_chat_scroll, view.right, top - g_chat_scroll + g_chat_body_h};
+        g_chat_view = view;
         SetTextColor(dc, text_body());
-        SelectObject(dc, g_tip_bf);
+        SelectObject(dc, g_chat_bf);
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
         for (int i = 0; i < g_runs_n; i++) {
             const Run *rn = &g_runs[i];
             int by = body.top + rn->y, x = view.left + rn->x, th = (int)fmax(1, g_dpi);
-            if (by + 3 * g_tip_line < view.top || by - 3 * g_tip_line > view.bottom) continue;
-            if (rn->f == SH_RULE || rn->f == SH_BAR) { /* a rule, or a quote's bar */
-                RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
+            if (by + (rn->f == SH_VLINE ? rn->n : 0) + 3 * g_chat_line < view.top || by - 3 * g_chat_line > view.bottom) continue;
+            if (rn->f == SH_RULE || rn->f == SH_BAR || rn->f == SH_VLINE) { /* a rule, a quote's bar, a table's line down */
+                RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th}
+                        : rn->f == SH_VLINE ? (RECT){x, by, x + th, by + rn->n} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
                 HBRUSH br = CreateSolidBrush(ink(rn->c));
                 FillRect(dc, &sr, br);
                 DeleteObject(br);
@@ -1836,8 +1861,8 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
         if (sb) { /* where in the reply the box is */
-            int th = g_tip_view_h * g_tip_view_h / g_tip_body_h, ty = top + (g_tip_view_h - th) * g_tip_scroll / (g_tip_body_h - g_tip_view_h);
-            RECT track = {r.right - pad - (int)(3 * g_dpi), top, r.right - pad, top + g_tip_view_h}, thumb = {track.left, ty, track.right, ty + th};
+            int th = g_chat_view_h * g_chat_view_h / g_chat_body_h, ty = top + (g_chat_view_h - th) * g_chat_scroll / (g_chat_body_h - g_chat_view_h);
+            RECT track = {r.right - pad - (int)(3 * g_dpi), top, r.right - pad, top + g_chat_view_h}, thumb = {track.left, ty, track.right, ty + th};
             HBRUSH tb = CreateSolidBrush(RGB(48, 50, 58)), hb = CreateSolidBrush(RGB(140, 145, 160));
             FillRect(dc, &track, tb); FillRect(dc, &thumb, hb);
             DeleteObject(tb); DeleteObject(hb);
@@ -1848,18 +1873,18 @@ static LRESULT CALLBACK tip_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_ERASEBKGND) return 1;
-    if (msg == WM_MOUSEWHEEL) { tip_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; }
+    if (msg == WM_MOUSEWHEEL) { chat_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; }
     if (msg == WM_SETCURSOR || msg == WM_LBUTTONUP) { /* a link under the pointer: the hand, and a click opens it */
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(w, &pt);
         int found = -1;
-        if (PtInRect(&g_tip_view, pt))
+        if (PtInRect(&g_chat_view, pt))
             for (int i = 0; i < g_runs_n && found < 0; i++) {
                 const Run *rn = &g_runs[i];
                 if (rn->f < 0 || rn->url < 0) continue;
-                int bx = g_tip_view.left + rn->x, by = g_tip_view.top - g_tip_scroll + rn->y;
-                if (pt.x >= bx && pt.x < bx + rn->w && pt.y >= by - g_fasc[rn->f] && pt.y < by + g_tip_line / 3) found = i;
+                int bx = g_chat_view.left + rn->x, by = g_chat_view.top - g_chat_scroll + rn->y;
+                if (pt.x >= bx && pt.x < bx + rn->w && pt.y >= by - g_fasc[rn->f] && pt.y < by + g_chat_line / 3) found = i;
             }
         if (msg == WM_SETCURSOR) { if (found >= 0) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; } }
         else if (found >= 0) {
@@ -1878,9 +1903,50 @@ static void input_place(void);
 static int input_h(void);
 
 /* The box: next to `beside` (screen pixels: the cluster, or the core), level with the core at height cy,
- * left of it when it fits, else right; or in the middle of the screen (Settings > Text box). It wraps,
+ * left of it when it fits, else right; or in the middle of the screen (Settings > Chat box). It wraps,
  * and a reply longer than the box scrolls (the wheel over the core). */
-static void tip_show(const Session *s, RECT beside, int cy, double now) {
+/* Where the box (and the reply line under it: bh is both) goes beside `beside` (the cluster, or a core): left, right,
+ * below or above it, each kept on the monitor. A side counts only if it covers no core, small ones included (also
+ * one flung away); in the middle third of the screen below and above come first, else the side away from the nearer
+ * edge. The side used last is kept while it stays free, so drifting small cores do not make the box jump; when no
+ * side is free, the one covering the least. */
+static int g_chat_side = -1;          /* 0 left, 1 right, 2 below, 3 above */
+void chat_forget_side(void) { g_chat_side = -1; }
+static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, int *oy) {
+    int gap = (int)(10 * g_dpi), cx = (beside.left + beside.right) / 2;
+    int at[4][2] = {{beside.left - gap - bw, cy - bh / 2}, {beside.right + gap, cy - bh / 2},
+                    {cx - bw / 2, beside.bottom + gap}, {cx - bw / 2, beside.top - gap - bh}};
+    long cover[4];
+    for (int k = 0; k < 4; k++) {
+        int x = at[k][0], y = at[k][1];
+        if (x + bw > wa.right) x = wa.right - bw;
+        if (x < wa.left) x = wa.left;
+        if (y + bh > wa.bottom) y = wa.bottom - bh;
+        if (y < wa.top) y = wa.top;
+        at[k][0] = x; at[k][1] = y;
+        RECT box = {x, y, x + bw, y + bh}, o;
+        cover[k] = 0;
+        for (int i = 0; i < g_core_n && i < MAX_SESS; i++) {
+            RECT c = g_core_rc[i];
+            InflateRect(&c, gap / 2, gap / 2);
+            if (!IsRectEmpty(&g_core_rc[i]) && IntersectRect(&o, &box, &c)) cover[k] += (long)(o.right - o.left) * (o.bottom - o.top);
+        }
+        if (k < 2 && (k == 0 ? beside.left - gap - bw < wa.left : beside.right + gap + bw > wa.right))
+            cover[k] += (long)bw * bh / 4; /* pushed back over the cluster by the screen's edge: a poor side */
+    }
+    int ww = wa.right - wa.left, mid = cx > wa.left + ww / 3 && cx < wa.right - ww / 3;
+    int order[4];
+    if (mid) { order[0] = 2; order[1] = 3; order[2] = cx > wa.left + ww / 2 ? 0 : 1; order[3] = 1 - order[2]; }
+    else { order[0] = cx > wa.left + ww / 2 ? 0 : 1; order[1] = 2; order[2] = 3; order[3] = 1 - order[0]; }
+    int pick = -1;
+    if (g_chat_side >= 0 && cover[g_chat_side] == 0) pick = g_chat_side; /* still free: stays */
+    for (int j = 0; j < 4 && pick < 0; j++) if (cover[order[j]] == 0) pick = order[j];
+    if (pick < 0) { pick = order[0]; for (int j = 1; j < 4; j++) if (cover[order[j]] < cover[pick]) pick = order[j]; }
+    g_chat_side = pick;
+    *ox = at[pick][0]; *oy = at[pick][1];
+}
+
+static void chat_show(const Session *s, RECT beside, int cy, double now) {
     msg_load(s, now);
     int st = session_shown(s, now);
     char title[200];
@@ -1892,75 +1958,78 @@ static void tip_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
-    wchar_t *wt = tip_text(title), *wb;
+    wchar_t *wt = chat_text(title), *wb;
     { int n = MultiByteToWideChar(CP_UTF8, 0, body, -1, NULL, 0); wb = malloc(sizeof(wchar_t) * (size_t)n); MultiByteToWideChar(CP_UTF8, 0, body, -1, wb, n); } /* as written: laid out below */
     Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; /* single core: the session's own colour, else its state colour */
     COLORREF acc = RGB((int)(fminf(1, c.r) * 255), (int)(fminf(1, c.g) * 255), (int)(fminf(1, c.b) * 255));
     static RECT last_beside;
     static int last_middle = -1, last_input = -1;
-    int other = strcmp(g_tip_sid, s->sid) != 0, body_new = !g_tip_body || wcscmp(wb, g_tip_body);
-    int moved = memcmp(&beside, &last_beside, sizeof beside) != 0 || last_middle != g_tip_middle || last_input != input_open();
+    int other = strcmp(g_chat_sid, s->sid) != 0, body_new = !g_chat_body || wcscmp(wb, g_chat_body);
+    int moved = memcmp(&beside, &last_beside, sizeof beside) != 0 || last_middle != g_chat_middle || last_input != input_open();
     last_input = input_open();
-    int changed = !g_tip_title || wcscmp(wt, g_tip_title) || body_new || !IsWindowVisible(g_tip) || moved || other;
-    if (other || body_new) g_tip_scroll = 0; /* another reply starts at its top */
-    snprintf(g_tip_sid, sizeof g_tip_sid, "%s", s->sid);
+    int changed = !g_chat_title || wcscmp(wt, g_chat_title) || body_new || !IsWindowVisible(g_chat) || moved || other;
+    if (other || body_new) g_chat_scroll = 0; /* another reply starts at its top */
+    snprintf(g_chat_sid, sizeof g_chat_sid, "%s", s->sid);
     last_beside = beside;
-    last_middle = g_tip_middle;
-    free(g_tip_title); free(g_tip_body);
-    g_tip_title = wt; g_tip_body = wb;
-    if (acc != g_tip_accent) { g_tip_accent = acc; InvalidateRect(g_tip, NULL, FALSE); }
+    last_middle = g_chat_middle;
+    free(g_chat_title); free(g_chat_body);
+    g_chat_title = wt; g_chat_body = wb;
+    if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
     if (!changed) return;
-    tip_fonts();
+    chat_fonts();
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
+    { int m = (int)(12 * g_dpi); InflateRect(&wa, -m, -m); } /* never against the screen's edge */
     int ww = wa.right - wa.left, wh = wa.bottom - wa.top;
-    int maxw = (int)(fmax(460, g_font * 36) * g_dpi * g_tip_size), pad = tip_pad(); /* Settings > Box size */
-    if (g_tip_middle) maxw = (int)fmin(fmax(maxw, ww * 0.45 * g_tip_size), 1000 * g_dpi * g_tip_size);
+    int maxw = (int)(fmax(460, g_font * 36) * g_dpi * g_chat_size), pad = chat_pad(); /* Settings > Box size */
+    if (g_chat_middle) maxw = (int)fmin(fmax(maxw, ww * 0.45 * g_chat_size), 1000 * g_dpi * g_chat_size);
     if (maxw > ww - 2 * pad) maxw = ww - 2 * pad;
-    HDC dc = GetDC(g_tip);
-    SelectObject(dc, g_tip_tf);
+    HDC dc = GetDC(g_chat);
+    SelectObject(dc, g_chat_tf);
     RECT t = {0, 0, maxw, 0};
     DrawTextW(dc, wt, -1, &t, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-    g_tip_title_h = t.bottom;
-    SelectObject(dc, g_tip_bf);
+    g_chat_title_h = t.bottom;
+    SelectObject(dc, g_chat_bf);
     TEXTMETRICW tm; GetTextMetricsW(dc, &tm);
-    g_tip_line = tm.tmHeight;
+    g_chat_line = tm.tmHeight;
     RECT b = {0, 0, maxw, 0};
-    g_tip_body_h = tip_layout(dc, wb, maxw);
+    g_chat_body_h = chat_layout(dc, wb, maxw);
     b.right = g_lay_w;
-    ReleaseDC(g_tip, dc);
-    int most = g_tip_middle ? (int)(wh * fmin(0.85, 0.6 * g_tip_size)) : (int)fmin(g_tip_line * 18 * g_tip_size, wh * 0.85); /* longer: it scrolls */
+    ReleaseDC(g_chat, dc);
+    int most = g_chat_middle ? (int)(wh * fmin(0.85, 0.6 * g_chat_size)) : (int)fmin(g_chat_line * 18 * g_chat_size, wh * 0.85); /* longer: it scrolls */
     /* a reply being typed sits under the box: both have to fit on the screen together */
-    int below = input_open() ? input_h() + (int)(6 * g_dpi) : 0, chrome = pad + g_tip_title_h + tip_gap() + pad;
+    int below = input_open() ? input_h() + (int)(6 * g_dpi) : 0, chrome = pad + g_chat_title_h + chat_gap() + pad;
     if (most > wh - below - chrome - (int)(16 * g_dpi)) most = wh - below - chrome - (int)(16 * g_dpi);
-    if (most < g_tip_line * 3) most = g_tip_line * 3;
-    g_tip_view_h = g_tip_body_h < most ? g_tip_body_h : most;
-    if (g_tip_scroll > g_tip_body_h - g_tip_view_h) g_tip_scroll = g_tip_body_h > g_tip_view_h ? g_tip_body_h - g_tip_view_h : 0;
-    int sb = g_tip_body_h > g_tip_view_h ? (int)(8 * g_dpi) : 0;
-    int w = (t.right > b.right ? t.right : b.right), h = pad + g_tip_title_h + tip_gap() + g_tip_view_h + pad;
+    if (most < g_chat_line * 3) most = g_chat_line * 3;
+    g_chat_view_h = g_chat_body_h < most ? g_chat_body_h : most;
+    if (g_chat_scroll > g_chat_body_h - g_chat_view_h) g_chat_scroll = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0;
+    int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
+    int w = (t.right > b.right ? t.right : b.right), h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad;
     if (w > maxw) w = maxw;
-    w += tip_bar() + 2 * pad + sb;
-    int x, y, gap = (int)(8 * g_dpi);
-    if (g_tip_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
-    else {
-        x = beside.left - w - gap; y = cy - h / 2;
-        if (x < wa.left) x = beside.right + gap;                /* no room on the left: on the right */
-    }
+    w += chat_bar() + 2 * pad + sb;
+    int x, y;
+    if (g_chat_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
+    else chat_place(beside, cy, w, h + below, wa, &x, &y);
     if (x + w > wa.right) x = wa.right - w;
     if (x < wa.left) x = wa.left;
     if (y + h + below > wa.bottom) y = wa.bottom - h - below;
     if (y < wa.top) y = wa.top;
     static RECT was;
     RECT now_rc = {x, y, x + w, y + h};
-    if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_tip)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
-        SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_chat)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
+        SetWindowPos(g_chat, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         if (w != was.right - was.left || h != was.bottom - was.top) {
             int rad = (int)(12 * g_dpi);
-            SetWindowRgn(g_tip, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
+            SetWindowRgn(g_chat, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
         }
         was = now_rc;
         if (input_open()) input_place();
+        for (int i = 0; i < g_core_n && i < MAX_SESS; i++) { /* a core it covers stays in front of it */
+            RECT o;
+            if (g_pane[i].w && g_pane[i].shown && IntersectRect(&o, &now_rc, &g_core_rc[i]))
+                SetWindowPos(g_pane[i].w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
-    InvalidateRect(g_tip, NULL, FALSE);
+    InvalidateRect(g_chat, NULL, FALSE);
 }
 
 /* ---- typing a reply: a double-click on a core opens a line under its box. Enter sends it to the session
@@ -1996,8 +2065,8 @@ static void input_close(void) {
     GetWindowTextW(g_edit, g_draft, n + 1);
     snprintf(g_draft_sid, sizeof g_draft_sid, "%s", g_input_sid);
     ShowWindow(g_input, SW_HIDE);
-    LONG_PTR ex = GetWindowLongPtr(g_tip, GWL_EXSTYLE); /* the box lets clicks through again */
-    SetWindowLongPtr(g_tip, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT);
+    LONG_PTR ex = GetWindowLongPtr(g_chat, GWL_EXSTYLE); /* the box lets clicks through again */
+    SetWindowLongPtr(g_chat, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT);
     g_input_sid[0] = 0;
 }
 
@@ -2010,12 +2079,12 @@ static int in_hint_h(void) { return (int)(g_font * 0.86f * g_dpi * 1.45f); }
 
 static int input_h(void) { int gap = (int)(6 * g_dpi); return in_pad() + in_title_h() + gap + in_field_h() + gap + in_hint_h() + in_pad(); }
 
-/* under the text box, as wide as it */
+/* under the chat box, as wide as it */
 static void input_place(void) {
     RECT tr;
-    GetWindowRect(g_tip, &tr);
+    GetWindowRect(g_chat, &tr);
     int gap = (int)(6 * g_dpi), h = input_h(), y = tr.bottom + gap; /* the box made room for it */
-    RECT wa = work_at((tr.left + tr.right) / 2.0f, (tr.top + tr.bottom) / 2.0f); /* the text box's monitor */
+    RECT wa = work_at((tr.left + tr.right) / 2.0f, (tr.top + tr.bottom) / 2.0f); /* the chat box's monitor */
     if (y + h > wa.bottom) y = wa.bottom - h;
     RECT ir;
     GetWindowRect(g_input, &ir);
@@ -2268,7 +2337,7 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PASTE) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
     if (msg == WM_CHAR && (wp == L'\r' || wp == 27) && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
-    if (msg == WM_MOUSEWHEEL) { tip_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
+    if (msg == WM_MOUSEWHEEL) { chat_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
     return CallWindowProcW(g_edit_proc, w, msg, wp, lp);
 }
 
@@ -2278,15 +2347,15 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT) g_stat_paint_card++;
     switch (msg) {
     case WM_ERASEBKGND: return 1;
-    case WM_PAINT: { /* like the text box: dark card, the session's colour down the left edge, a rounded field */
+    case WM_PAINT: { /* like the chat box: dark card, the session's colour down the left edge, a rounded field */
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(w, &ps);
         RECT r; GetClientRect(w, &r);
-        HBRUSH bg = CreateSolidBrush(tip_bg()), bar = CreateSolidBrush(g_tip_accent), field = CreateSolidBrush(tip_field());
+        HBRUSH bg = CreateSolidBrush(chat_bg()), bar = CreateSolidBrush(g_chat_accent), field = CreateSolidBrush(chat_field());
         FillRect(dc, &r, bg);
-        RECT b = {0, 0, tip_bar(), r.bottom};
+        RECT b = {0, 0, chat_bar(), r.bottom};
         FillRect(dc, &b, bar);
-        int pad = in_pad(), gap = (int)(6 * g_dpi), x0 = tip_bar() + pad, fy = pad + in_title_h() + gap;
+        int pad = in_pad(), gap = (int)(6 * g_dpi), x0 = chat_bar() + pad, fy = pad + in_title_h() + gap;
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(58, 61, 72));
         HGDIOBJ op = SelectObject(dc, pen), ob = SelectObject(dc, field);
         int rad = (int)(10 * g_dpi);
@@ -2294,7 +2363,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SelectObject(dc, op); SelectObject(dc, ob);
         DeleteObject(pen); DeleteObject(bg); DeleteObject(bar); DeleteObject(field);
         SetBkMode(dc, TRANSPARENT);
-        int ar = GetRValue(g_tip_accent), ag = GetGValue(g_tip_accent), ab = GetBValue(g_tip_accent);
+        int ar = GetRValue(g_chat_accent), ag = GetGValue(g_chat_accent), ab = GetBValue(g_chat_accent);
         SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10)));
         SelectObject(dc, g_input_tf);
         int i = index_of(g_input_sid);
@@ -2325,7 +2394,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SIZE: {
-        int pad = in_pad(), inset = (int)(9 * g_dpi), gap = (int)(6 * g_dpi), x0 = tip_bar() + pad, fy = pad + in_title_h() + gap;
+        int pad = in_pad(), inset = (int)(9 * g_dpi), gap = (int)(6 * g_dpi), x0 = chat_bar() + pad, fy = pad + in_title_h() + gap;
         MoveWindow(g_edit, x0 + inset, fy + (int)(6 * g_dpi), LOWORD(lp) - x0 - pad - 2 * inset, in_field_h() - (int)(12 * g_dpi), TRUE);
         InvalidateRect(w, NULL, FALSE);
         return 0;
@@ -2343,11 +2412,11 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProc(w, msg, wp, lp);
 }
 
-void tip_rescale(void) {
-    if (g_tip_tf) { DeleteObject(g_tip_tf); DeleteObject(g_tip_bf); DeleteObject(g_tip_mf); g_tip_tf = g_tip_bf = g_tip_mf = NULL; }
-    for (int i = 0; i < F_COUNT; i++) if (g_tip_xf[i]) { DeleteObject(g_tip_xf[i]); g_tip_xf[i] = NULL; }
-    free(g_tip_title); g_tip_title = NULL;
-    tip_hide();
+void chat_rescale(void) {
+    if (g_chat_tf) { DeleteObject(g_chat_tf); DeleteObject(g_chat_bf); DeleteObject(g_chat_mf); g_chat_tf = g_chat_bf = g_chat_mf = NULL; }
+    for (int i = 0; i < F_COUNT; i++) if (g_chat_xf[i]) { DeleteObject(g_chat_xf[i]); g_chat_xf[i] = NULL; }
+    free(g_chat_title); g_chat_title = NULL;
+    chat_hide();
 }
 
 void input_refont(void) {
@@ -2432,7 +2501,7 @@ static void input_open_for(const Session *s) {
         g_input = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, L"VigilInput", L"Vigil reply", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 10, 10, NULL, NULL, ic.hInstance, NULL);
         LoadLibraryW(L"Msftedit.dll"); /* a rich edit: a font per run, so Chinese can have its own face, as in the terminal */
         g_edit = CreateWindowEx(0, MSFTEDIT_CLASS, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0, 10, 10, g_input, NULL, ic.hInstance, NULL);
-        SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, tip_field());
+        SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field());
         SendMessageW(g_edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
         g_edit_proc = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)edit_proc);
     }
@@ -2450,8 +2519,8 @@ static void input_open_for(const Session *s) {
         edit_style();
     }
     InvalidateRect(g_input, NULL, FALSE);
-    LONG_PTR ex = GetWindowLongPtr(g_tip, GWL_EXSTYLE); /* the box takes the wheel while a reply is typed */
-    SetWindowLongPtr(g_tip, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT);
+    LONG_PTR ex = GetWindowLongPtr(g_chat, GWL_EXSTYLE); /* the box takes the wheel while a reply is typed */
+    SetWindowLongPtr(g_chat, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT);
     ShowWindow(g_input, SW_SHOW);
     input_place();
     void mask_alt(void);
@@ -2580,6 +2649,32 @@ static void set_transparent(Pane *p, int transparent) {
 }
 
 /* every frame: what the pointer is over */
+/* What the chat box goes beside in single-core mode: the cores actually there (the main one and the small ones in
+ * orbit), not the whole orbit's square, which reached far above and below them. Measured when the box opens for a
+ * session and kept while it stays open (small cores drift: a box that followed them would move on every beat),
+ * measured again when the main core has moved. */
+static RECT cluster_cores(int who) {
+    static RECT kept;
+    static char kept_sid[72];
+    static float kept_mx, kept_my;
+    Room *room = shown_room();
+    const char *sid = who >= 0 && who < room->n ? room->s[who].sid : "";
+    int open = g_chat && IsWindowVisible(g_chat);
+    if (open && !strcmp(sid, kept_sid) && fabsf(g_mx - kept_mx) + fabsf(g_my - kept_my) < 4 * g_dpi) return kept;
+    RECT u;
+    SetRectEmpty(&u);
+    for (int i = 0; i < g_core_n && i < room->n && i < MAX_SESS; i++) {
+        RECT o;
+        if (IsRectEmpty(&g_core_rc[i]) || !IntersectRect(&o, &g_core_rc[i], &g_cluster_rc)) continue; /* (one flung away is not part of it) */
+        UnionRect(&u, &u, &g_core_rc[i]);
+    }
+    if (IsRectEmpty(&u)) u = g_cluster_rc;
+    kept = u;
+    snprintf(kept_sid, sizeof kept_sid, "%s", sid);
+    kept_mx = g_mx; kept_my = g_my;
+    return kept;
+}
+
 static void track_mouse(double now) {
     POINT scr;
     cursor_pos(&scr);
@@ -2607,17 +2702,17 @@ static void track_mouse(double now) {
         if (k < 0) { input_close(); return; }
         RECT r = g_core_rc[k], beside = r;
         if (g_single) { /* beside the whole cluster, level with its middle: a small core drifts, and a box that */
-            beside = g_cluster_rc; /* followed it was moved, and the line typed in repainted, on every beat */
+            beside = cluster_cores(k); /* followed it was moved, and the line typed in repainted, on every beat */
             r = beside;
         }
-        tip_show(&room->s[k], beside, (r.top + r.bottom) / 2, now);
+        chat_show(&room->s[k], beside, (r.top + r.bottom) / 2, now);
         return;
     }
-    if (busy) { g_hover_since = now; tip_hide(); return; }           /* no tooltip while dragging */
-    if (hit < 0 || now - g_hover_since < 0.3) { tip_hide(); return; } /* a short pause before the tooltip */
-    RECT r = g_core_rc[hit], beside = r;
-    if (g_single && hit == g_top) beside = g_cluster_rc;
-    tip_show(&room->s[hit], beside, (r.top + r.bottom) / 2, now);
+    if (busy) { g_hover_since = now; chat_hide(); return; }           /* no chat box while dragging */
+    if (hit < 0 || now - g_hover_since < 0.3) { chat_hide(); return; } /* a short pause before the chat box */
+    RECT r = g_core_rc[hit], beside = r, o;
+    if (g_single && (hit == g_top || IntersectRect(&o, &r, &g_cluster_rc))) { beside = cluster_cores(hit); r = beside; } /* (one flung away: beside itself) */
+    chat_show(&room->s[hit], beside, (r.top + r.bottom) / 2, now);
 }
 
 /* Alt held down: with nothing else typed, letting go of Alt would open the menu bar of the window with the
@@ -2851,7 +2946,7 @@ static void toggle_mode(void) {
     g_focus_pinned = 0;
     g_orbit_n = 0; /* every core back in orbit */
     pics_invalidate();
-    tip_hide();
+    chat_hide();
 }
 
 static double g_polled;
@@ -2927,10 +3022,10 @@ static double tick_interval(void) {
 }
 
 /* ---- the Settings window: a dark card (design "A, calm cards"), a live preview across the top (the cluster with
- * its gravity: drag the core; the state it shows; a reply in the text box's font), three cards below (Look, Motion,
+ * its gravity: drag the core; the state it shows; a reply in the chat box's font), three cards below (Look, Motion,
  * Replies) with icon tiles, sliders, a switch and chips. Drawn antialiased into its own bitmap and shown as a
  * layered window, so the corners are smooth too. Every choice applies at once and is kept, as the menu's were. */
-enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_TIPAT, R_TIPFONT, R_TEXT, R_LABELS, R_AWAY, R_TIPSIZE, R_TIPBG, R_WHEEL, R_TEXTCOL };
+enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL };
 enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
 typedef struct { RECT r; int kind, row, val, n; float t0, t1; } SetHit; /* a slider: n stops from t0 to t1 (pixels) */
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
@@ -2980,13 +3075,13 @@ static int set_current(int row) {
         case R_SCALE: if (i < 4 && g_scale == SCALES[i]) return i; break;
         case R_GRAVITY: if (i < 4 && g_gravity == GRAVITIES[i]) return i; break;
         case R_OTHERS: return g_others;
-        case R_TIPAT: return g_tip_middle;
-        case R_TIPFONT: return !g_tip_mono;
+        case R_CHATAT: return g_chat_middle;
+        case R_CHATFONT: return !g_chat_mono;
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
         case R_LABELS: return g_labels;
         case R_AWAY: if (i < 4 && g_away_after == AWAYS[i]) return i; break;
-        case R_TIPSIZE: if (i < 4 && g_tip_size == TIPSIZES[i]) return i; break;
-        case R_TIPBG: return g_tip_bg;
+        case R_CHATSIZE: if (i < 4 && g_chat_size == CHATSIZES[i]) return i; break;
+        case R_CHATBG: return g_chat_bg;
         case R_WHEEL: return g_wheel_spin;
         case R_TEXTCOL: return g_text_col;
         }
@@ -3067,9 +3162,9 @@ static int pick_colour(unsigned *target) {
     return 1;
 }
 static void set_choose(int row, int val) {
-    int palette = (row == R_TIPBG || row == R_TEXTCOL) && val == 5;
+    int palette = (row == R_CHATBG || row == R_TEXTCOL) && val == 5;
     if (val == set_current(row) && row != R_OTHERS && !palette) return;
-    if (palette && !pick_colour(row == R_TIPBG ? &g_tip_custom : &g_text_custom)) return; /* cancelled: as it was */
+    if (palette && !pick_colour(row == R_CHATBG ? &g_chat_custom : &g_text_custom)) return; /* cancelled: as it was */
     switch (row) {
     case R_SHAPE: snprintf(g_shape_name, sizeof g_shape_name, "%s", SHAPES[val]); shape_make(&g_shape, g_shape_name); break;
     case R_CORE: g_core = CORES[val]; break;
@@ -3078,15 +3173,15 @@ static void set_choose(int row, int val) {
     case R_SCALE: g_scale = SCALES[val]; main_place(); break;
     case R_GRAVITY: g_gravity = GRAVITIES[val]; break;
     case R_OTHERS: g_others = !g_others; break;
-    case R_TIPAT: g_tip_middle = val; break;
-    case R_TIPFONT: g_tip_mono = !val; tip_refont(); break;
-    case R_TEXT: g_font = FONTS[val]; tip_refont(); break;
+    case R_CHATAT: g_chat_middle = val; break;
+    case R_CHATFONT: g_chat_mono = !val; chat_refont(); break;
+    case R_TEXT: g_font = FONTS[val]; chat_refont(); break;
     case R_LABELS: g_labels = val; break;
     case R_AWAY: g_away_after = AWAYS[val]; break;
-    case R_TIPSIZE: g_tip_size = TIPSIZES[val]; tip_hide(); break;
-    case R_TIPBG: g_tip_bg = val; if (g_input) edit_style(); if (g_tip) InvalidateRect(g_tip, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, tip_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
+    case R_CHATBG: g_chat_bg = val; if (g_input) edit_style(); if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
-    case R_TEXTCOL: g_text_col = val; if (g_tip) InvalidateRect(g_tip, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_TEXTCOL: g_text_col = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     default: return;
     }
     settings_applied(1);
@@ -3098,7 +3193,7 @@ static void set_reset(void) {
     if (settings_path(path, sizeof path)) DeleteFileA(path);
     restore_launch();
     shape_make(&g_shape, g_shape_name);
-    tip_refont();
+    chat_refont();
     main_place();
     settings_applied(0);
 }
@@ -3332,7 +3427,7 @@ static void motions_page(Pane *pn) {
 /* the still layer: everything but the moving cluster */
 static void set_build(void) {
     set_fonts();
-    tip_fonts();
+    chat_fonts();
     Pane *pn = &g_sl;
     int W = SW_W(), H = SW_H();
     pane_size(pn, W, H);
@@ -3356,19 +3451,19 @@ static void set_build(void) {
     aa_seg(pn, S(835), S(27), S(845), S(37), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
     aa_seg(pn, S(845), S(27), S(835), S(37), S(1.6f), hexc(ch ? 0xFFFFFF : S_LABEL), 1);
     hit(824, 16, 856, 48, K_CLOSE, 0, 0);
-    /* the preview band: the cluster on the left; a reply in the text box's font, the hint and the states on the right */
+    /* the preview band: the cluster on the left; a reply in the chat box's font, the hint and the states on the right */
     box(pn, 24, 58, 856, 288, 16, S_BAND, 0, 0);
     g_pv_rc = SR(40, 62, 564, 284);
     TEXTMETRICW tm;
     HDC mdc = pn->mem;
-    SelectObject(mdc, g_tip_tf); GetTextMetricsW(mdc, &tm);
+    SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
     float th = tm.tmHeight / (float)g_sdpi;
-    SelectObject(mdc, g_tip_bf); GetTextMetricsW(mdc, &tm);
+    SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
     float bh = tm.tmHeight / (float)g_sdpi, sh = fminf(112, 22 + th + 6 + bh * 2);
-    box(pn, 580, 74, 840, 74 + sh, 10, tip_bgx(), 0, 0);
+    box(pn, 580, 74, 840, 74 + sh, 10, chat_bgx(), 0, 0);
     box(pn, 580, 74, 583, 74 + sh, 1.5f, S_OR, 0, 0);
-    tx(594, 84, 832, 84 + th, L"vigil · Done", g_tip_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
-    tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_tip_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
+    tx(594, 84, 832, 84 + th, L"vigil · Done", g_chat_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
+    tx(594, 84 + th + 6, 832, 74 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_chat_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
     wchar_t hint[80];
     if (g_pv_zoom > 1.01f) swprintf(hint, 80, L"Scroll to zoom: %.1fx   \x00B7   double-click resets", g_pv_zoom);
     else wcscpy(hint, L"Drag the core   \x00B7   scroll on it to zoom in");
@@ -3445,11 +3540,11 @@ static void set_build(void) {
         tx(l, y0 + 46, r, y0 + 64, L"Font", g_sf_label, S_LABEL, DT_LEFT);
         for (int i = 0; i < 2; i++) {
             float a = l + i * (bw + 6);
-            int sel = set_current(R_TIPFONT) == i;
-            pick_box(pn, a, y0 + 70, a + bw, y0 + 118, 12, sel, is_hot(K_PICK, R_TIPFONT, i), NULL, NULL);
+            int sel = set_current(R_CHATFONT) == i;
+            pick_box(pn, a, y0 + 70, a + bw, y0 + 118, 12, sel, is_hot(K_PICK, R_CHATFONT, i), NULL, NULL);
             tx(a, y0 + 72, a + bw, y0 + 100, L"Aa", i ? g_sf_aa : g_sf_aam, sel ? S_TEXT : S_CHIP_TXT, DT_CENTER);
             tx(a, y0 + 98, a + bw, y0 + 114, i ? L"Clean" : L"Terminal", g_sf_small, sel ? S_TEXT : S_MUTED, DT_CENTER);
-            hit(a, y0 + 70, a + bw, y0 + 118, K_PICK, R_TIPFONT, i);
+            hit(a, y0 + 70, a + bw, y0 + 118, K_PICK, R_CHATFONT, i);
         }
         tx(l, y0 + 130, r, y0 + 148, L"Text size", g_sf_label, S_LABEL, DT_LEFT);
         tx(l - 2, y0 + 156, l + 12, y0 + 176, L"A", g_sf_small, S_MUTED, DT_CENTER);
@@ -3457,13 +3552,13 @@ static void set_build(void) {
         tx(r - 16, y0 + 154, r + 2, y0 + 180, L"A", g_sf_card, S_MUTED, DT_CENTER);
         tx(l, y0 + 190, r, y0 + 208, L"Box size", g_sf_label, S_LABEL, DT_LEFT);
         box(pn, l, y0 + 220, l + 10, y0 + 228, 2, S_MUTED, 0, 0);
-        slider(pn, l + 20, y0 + 224, r - 22, R_TIPSIZE, 4);
+        slider(pn, l + 20, y0 + 224, r - 22, R_CHATSIZE, 4);
         box(pn, r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
         static const wchar_t *opens[2] = {L"Next to core", L"Middle"}, *labels[2] = {L"On hover", L"Always"};
         tx(l, y0 + 248, r, y0 + 266, L"Colours", g_sf_label, S_LABEL, DT_LEFT);
-        int hb = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TIPBG, ht2 = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TEXTCOL;
+        int hb = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_CHATBG, ht2 = g_hot >= 0 && g_hits[g_hot].kind == K_PICK && g_hits[g_hot].row == R_TEXTCOL;
         wchar_t names[60];
-        swprintf(names, 60, L"%ls  \x00B7  %ls", TIP_BG_NAMES[hb ? g_hits[g_hot].val : g_tip_bg], TEXT_NAMES[ht2 ? g_hits[g_hot].val : g_text_col]);
+        swprintf(names, 60, L"%ls  \x00B7  %ls", CHAT_BG_NAMES[hb ? g_hits[g_hot].val : g_chat_bg], TEXT_NAMES[ht2 ? g_hits[g_hot].val : g_text_col]);
         tx(l + 60, y0 + 248, r, y0 + 266, names, g_sf_small, S_MUTED, DT_RIGHT);
         float sl = l + 38, sw = (r - sl - 5 * 6) / 6;
         for (int row = 0; row < 2; row++) { /* Box: the default swatches, then the palette; Text: "Aa" in each colour on the box's colour, then the palette */
@@ -3471,8 +3566,8 @@ static void set_build(void) {
             tx(l, yy, sl - 4, yy + 26, row ? L"Text" : L"Box", g_sf_small, S_MUTED, DT_LEFT);
             for (int i = 0; i < 6; i++) {
                 float a = sl + i * (sw + 6);
-                int rr = row ? R_TEXTCOL : R_TIPBG, sel = set_current(rr) == i, hot = is_hot(K_PICK, rr, i);
-                unsigned fill = row ? tip_bgx() : i < 5 ? TIP_BGS[i] : g_tip_custom;
+                int rr = row ? R_TEXTCOL : R_CHATBG, sel = set_current(rr) == i, hot = is_hot(K_PICK, rr, i);
+                unsigned fill = row ? chat_bgx() : i < 5 ? CHAT_BGS[i] : g_chat_custom;
                 box(pn, a, yy, a + sw, yy + 26, 7, fill, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
                 unsigned tc = row ? (i == 5 ? g_text_custom : i ? TEXT_COLS[i] : inkx(0xE6E8F0)) : 0;
                 if (i == 5) { /* Lucide's palette icon: on Box light on a dark colour and dark on a light one, on Text in the picked colour */
@@ -3486,8 +3581,8 @@ static void set_build(void) {
         tx(l, y0 + 342, r, y0 + 360, L"Opens", g_sf_label, S_LABEL, DT_LEFT);
         for (int i = 0; i < 2; i++) {
             float a = l + i * (bw + 6);
-            pick_box(pn, a, y0 + 364, a + bw, y0 + 392, 10, set_current(R_TIPAT) == i, is_hot(K_PICK, R_TIPAT, i), opens[i], g_sf_label);
-            hit(a, y0 + 364, a + bw, y0 + 392, K_PICK, R_TIPAT, i);
+            pick_box(pn, a, y0 + 364, a + bw, y0 + 392, 10, set_current(R_CHATAT) == i, is_hot(K_PICK, R_CHATAT, i), opens[i], g_sf_label);
+            hit(a, y0 + 364, a + bw, y0 + 392, K_PICK, R_CHATAT, i);
         }
         tx(l, y0 + 404, r, y0 + 422, L"Names over cores (all-cores mode)", g_sf_label, S_LABEL, DT_LEFT);
         for (int i = 0; i < 2; i++) {
@@ -3707,7 +3802,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
-        tip_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
+        chat_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
     case WM_MOUSEWHEEL: { /* over the preview: zoom in to see the detail */
         POINT c = p; ScreenToClient(w, &c);
         if (!PtInRect(&g_pv_rc, c)) return 0;
@@ -3777,7 +3872,7 @@ static void settings_shot(const char *path) {
 }
 
 /* ---- --record: two scripted scenes for the README, frames written raw ------------------------------------
- * "reply": the pointer rests on the main core (its text box, then lock-on), then on a small core.
+ * "reply": the pointer rests on the main core (its chat box, then lock-on), then on a small core.
  * "input": the wheel scrolls a long reply, a double-click opens the reply box, text is typed, an image is dragged onto
  * the core (it reads it) and dropped: an [Image #1] token. Nothing is sent.
  * "carry": Alt-click picks the cluster up, a slow move (the small cores trail behind), a dash toward the screen's corner
@@ -3785,7 +3880,7 @@ static void settings_shot(const char *path) {
  * orbit, and put down. Recorded at Gravity: Floaty.
  * Each frame: int32 x, y (the pointer, in the frame), int32 shown (0 while carried: the pointer hides; 2 with an
  * image file under it), then W×H
- * BGR bytes of the cores and the text box over the terminal's background (#212121). Header: int32 W, H, fps. */
+ * BGR bytes of the cores and the chat box over the terminal's background (#212121). Header: int32 W, H, fps. */
 static RECT g_rec_rc;
 static float rec_ease(float a) { a = clampf(a, 0, 1); return a * a * (3 - 2 * a); }
 static void rec_glide(double t, double t0, double t1, float ax, float ay, float bx, float by) {
@@ -3824,9 +3919,9 @@ static void rec_frame(FILE *f) {
         Pane *p = &g_pane[i];
         if (p->shown && p->px) rec_over(fr, W, H, p->px, p->W, p->H, p->x - g_rec_rc.left, p->y - g_rec_rc.top, 0);
     }
-    if (g_tip && IsWindowVisible(g_tip)) { /* the text box paints itself into a bitmap of ours */
+    if (g_chat && IsWindowVisible(g_chat)) { /* the chat box paints itself into a bitmap of ours */
         RECT r;
-        GetWindowRect(g_tip, &r);
+        GetWindowRect(g_chat, &r);
         int tw = r.right - r.left, th = r.bottom - r.top;
         BITMAPINFO bi;
         memset(&bi, 0, sizeof bi);
@@ -3835,7 +3930,7 @@ static void rec_frame(FILE *f) {
         uint32_t *tp = NULL;
         HDC mem = CreateCompatibleDC(NULL);
         HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&tp, NULL, 0), old = SelectObject(mem, bm);
-        SendMessage(g_tip, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
+        SendMessage(g_chat, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
         GdiFlush();
         rec_over(fr, W, H, tp, tw, th, r.left - g_rec_rc.left, r.top - g_rec_rc.top, 1);
         SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
@@ -3925,7 +4020,7 @@ static void rec_run(void) {
                 if (t >= at && t < at + 1 / 30.0) {
                     float notches = k < 4 ? -1.0f : 1.0f;
                     wheel_spin(s, notches);
-                    if (!strcmp(g_tip_sid, s->sid)) tip_scroll(notches);
+                    if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
                 }
             }
             if (s && t >= 4.6 && t < 4.6 + 1 / 30.0) { s->ring_at = wall(); s->unread = 0; input_open_for(s); } /* double-click */
@@ -4039,7 +4134,7 @@ static void menu(HWND w, int core) {
     AppendMenu(m, MF_SEPARATOR, 0, NULL);
     AppendMenu(m, MF_STRING, ID_QUIT, L"Quit Vigil");
     POINT p; GetCursorPos(&p);
-    tip_hide();
+    chat_hide();
     SetForegroundWindow(w); /* so the menu closes when you click elsewhere */
     SetTimer(w, ID_TIMER, 33, NULL); /* the menu runs its own loop: the cores keep moving on this timer meanwhile */
     g_menu_open = 1;
@@ -4084,7 +4179,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
         wheel_spin(s, notches);
-        if (!strcmp(g_tip_sid, s->sid)) tip_scroll(notches);
+        if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
         return 0;
     }
     case WM_HOTKEY: if (wp == HK_MODE) toggle_mode(); return 0;
@@ -4146,7 +4241,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 g_focus_pinned = 1;
                 g_focus_since = wall();
             } else s->unread = 0;
-            g_hover_since = 0; /* the tooltip shows without the usual pause */
+            g_hover_since = 0; /* the chat box shows without the usual pause */
         }
         g_down_sid[0] = 0; g_dragging = 0;
         return 0;
@@ -4242,7 +4337,7 @@ static void usage(void) {
         "  --shape NAME         dodeca | bucky | geo2 (default) | geo3\n"
         "  --width PIXELS       column width, in 96-dpi pixels (default: 17% of the primary screen)\n"
         "  --smooth NAME        how often cores are redrawn: saver, balanced (default), smooth or max\n"
-        "  --font-size N        tooltip text size (default 14)\n"
+        "  --font-size N        chat box text size (default 14)\n"
         "  --glow X  --core X   glow strength, inner core radius (default 1, 0.35)\n"
         "  --frame NAME         focus frame: segments (default) | lens | polar | diamond | lock | orbits | none\n"
         "  --labels always|hover   all cores: name and state above each core (default always)\n"
@@ -4255,7 +4350,7 @@ static void usage(void) {
         "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab motions open it on the Motions page\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
-        "shape, inner core, glow, focus frame, size, gravity, other sessions, text box, text size, labels,\n"
+        "shape, inner core, glow, focus frame, size, gravity, other sessions, chat box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
         "Alt-drag a core: move the cluster (single core) or that core (all cores). Alt-click: pick it up,\n"
         "the next click puts it down.",
@@ -4343,15 +4438,15 @@ int main(int argc, char **argv) {
     RegisterClass(&wc);
     WNDCLASS tc;
     memset(&tc, 0, sizeof tc);
-    tc.lpfnWndProc = tip_proc;
+    tc.lpfnWndProc = chat_proc;
     tc.hInstance = wc.hInstance;
     tc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    tc.lpszClassName = L"VigilTip";
+    tc.lpszClassName = L"VigilChat";
     RegisterClass(&tc);
     pane_create(&g_cluster);
-    g_tip = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                           L"VigilTip", L"Vigil", WS_POPUP, 0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
-    SetLayeredWindowAttributes(g_tip, 0, 255, LWA_ALPHA); /* opaque: text behind it must not show through */
+    g_chat = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                           L"VigilChat", L"Vigil", WS_POPUP, 0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
+    SetLayeredWindowAttributes(g_chat, 0, 255, LWA_ALPHA); /* opaque: text behind it must not show through */
     main_place();
     UINT mods, vk;
     if (strcmp(g_mode_hotkey, "none")) {
