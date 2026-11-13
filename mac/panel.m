@@ -23,6 +23,7 @@
 #import "speech.h"
 #import "listen.h"
 #import "tip.h"
+#import "reply.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -30,6 +31,7 @@ static Tail g_tail;
 static Event g_ev[1024];
 static Demo g_demo;
 static int g_demo_n, g_exit_empty, g_always, g_fit_pane, g_all_spaces;
+static const char *g_reply_shot; // --reply-shot FILE: open a reply box, save it with its tooltip as a PNG, quit
 static float g_glow = 1.0f, g_core = 0.35f;
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
@@ -361,6 +363,8 @@ static NSString *saved_summary(const Session *s, NSString *reply) {
 - (void)corePressBegan:(NSString *)sid; // held down longer than PRESS_AFTER: push-to-talk
 - (void)corePressEnded:(NSString *)sid;
 - (NSMenu *)menuForCore:(NSString *)sid;
+- (void)coreDragOver:(NSString *)sid;                       // image files are being dragged over this core (nil: none)
+- (BOOL)coreDropImages:(NSPasteboard *)pb on:(NSString *)sid;
 @end
 
 static const double PRESS_AFTER = 0.35; // seconds: a press held longer is push-to-talk, not a click
@@ -658,6 +662,30 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self setNeedsDisplay:YES];
 }
 
+// ---- image files dragged onto a core: it reads them (TRANSCRIBING), and its reply box opens with a token each
+- (NSString *)imageCoreFor:(id<NSDraggingInfo>)info {
+    if (![ReplyBox hasImage:info.draggingPasteboard]) return nil;
+    NSString *sid = [self sidAtWindowPoint:info.draggingLocation];
+    return sid && strcmp(sid.UTF8String, "ghost") ? sid : nil;
+}
+- (NSString *)sidAtWindowPoint:(NSPoint)w {
+    int i = [self coreAt:[self convertPoint:w fromView:nil] look:NULL center:NULL];
+    const Room *r = shown_room();
+    return i >= 0 && i < r->n ? sid_of(&r->s[i]) : nil;
+}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info { return [self draggingUpdated:info]; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info {
+    NSString *sid = [self imageCoreFor:info];
+    [self.actions coreDragOver:sid];
+    return sid ? NSDragOperationCopy : NSDragOperationNone;
+}
+- (void)draggingExited:(id<NSDraggingInfo>)info { (void)info; [self.actions coreDragOver:nil]; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info {
+    NSString *sid = [self imageCoreFor:info];
+    [self.actions coreDragOver:nil];
+    return sid && [self.actions coreDropImages:info.draggingPasteboard on:sid];
+}
+
 // cancels a press in progress (Esc during push-to-talk)
 - (void)cancelPress { [_pressTimer invalidate]; _pressTimer = nil; _pressing = NO; _downSid = nil; }
 
@@ -840,7 +868,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 
 // ---- the hover tooltip: name and state, then the first two lines of the last reply ----------------------
 // ---- the application ------------------------------------------------------------------------------------
-@interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions>
+@interface AppDelegate : NSObject <NSApplicationDelegate, CoreActions, ReplyBoxDelegate>
 @property(strong) NSPanel *panel;
 @property(strong) PanelView *view;
 @property(strong) NSTimer *timer;
@@ -864,6 +892,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *hue; // sid -> index into HUES
 @property(strong) TipView *previewView;
 @property unsigned short paneCols, paneRows;
+@property(strong) ReplyBox *reply;                  // double-click a core: type a reply under its tooltip
+@property(copy) NSString *dragSid;                  // the core image files are being dragged over
 @end
 
 @implementation AppDelegate
@@ -939,6 +969,12 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (g_all_spaces) p.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
     self.view = [[PanelView alloc] initWithFrame:NSMakeRect(0, 0, 290, 600)];
     self.view.actions = self;
+    [self.view registerForDraggedTypes:[ReplyBox dragTypes]];
+    self.reply = [[ReplyBox alloc] init];
+    self.reply.delegate = self;
+    self.reply.fontName = g_font_name;
+    self.reply.fontSize = g_font_size;
+    self.reply.behavior = p.collectionBehavior;
     self.overlay = [NSMutableDictionary dictionary];
     self.seen = [NSMutableDictionary dictionary];
     self.summarizing = [NSMutableSet set];
@@ -963,6 +999,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         [self.signals addObject:src];
     }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
+    if (g_reply_shot) [self performSelector:@selector(replyShot) withObject:nil afterDelay:2.0];
     [self onSignal:SIGINT handler:^{ [NSApp terminate:nil]; }];
     [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(appChanged:)
                                                                name:NSWorkspaceDidActivateApplicationNotification object:nil];
@@ -1034,6 +1071,13 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self watchForRush:now];
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
+    if (self.reply.open) { // while a reply is typed, the tooltip of its session stays up above it
+        Session *s = session_by_sid(self.reply.sid);
+        if (!s) { [self.reply close]; return; }
+        NSRect r = [self.view coreRect:(int)(s - room->s)];
+        [self showTipFor:s at:[self.view convertPoint:NSMakePoint(NSMidX(r), NSMidY(r)) toView:nil] now:now];
+        return;
+    }
     if (self.view.moving) { self.hoverSince = now; [self.tip orderOut:nil]; return; } // no tooltip while dragging
 
     NSString *sid = hit >= 0 ? [NSString stringWithUTF8String:room->s[hit].sid] : nil;
@@ -1117,10 +1161,16 @@ static int rush_n;
         if (NSMinX(f) < NSMinX(vis)) f.origin.x = NSMinX(vis);
         if (NSMaxY(f) > NSMaxY(vis)) f.origin.y = NSMaxY(vis) - sz.height;
         if (NSMinY(f) < NSMinY(vis)) f.origin.y = NSMinY(vis);
+        BOOL typing = self.reply.open && [self.reply.sid isEqualToString:sid_of(s)];
+        if (typing && NSMinY(f) < NSMinY(vis) + self.reply.height + 6) f.origin.y = NSMinY(vis) + self.reply.height + 6; // room for the box
         [self.tip setFrame:f display:YES];
     }
     [self.tipView setNeedsDisplay:YES];
     if (!self.tip.visible) [self.tip orderFrontRegardless];
+    if (self.reply.open && [self.reply.sid isEqualToString:sid_of(s)]) {
+        self.reply.accent = self.tipView.accent;
+        [self.reply placeUnder:self.tip.frame visible:(self.panel.screen ?: [NSScreen mainScreen]).visibleFrame];
+    }
 }
 
 // ---- what clicks, presses and keys do ------------------------------------------------------------------
@@ -1209,13 +1259,86 @@ static int rush_n;
     (void)now;
 }
 
-// double click: a shockwave ring, and the iTerm2 pane of that session comes to the front
+// double click: a shockwave ring, and a reply box opens under the session's tooltip
 - (void)coreDoubleClicked:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s) return;
     if ([sid isEqualToString:self.pendingSid]) { [self dropPending]; return; } // counts as a click: cancel
     s->ring_at = wall();
     s->unread = 0;
+    [self openReplyFor:s];
+}
+
+- (void)openReplyFor:(Session *)s {
+    if (!strcmp(s->sid, "ghost")) return;
+    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh;
+    NSString *name = @(s->name[0] ? s->name : "claude") ?: @"claude";
+    [self.reply openFor:sid_of(s) name:name accent:[NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1]];
+    self.hoverSince = 0;
+    [self trackMouse:wall()]; // the tooltip and the box in place at once
+}
+
+- (void)replyBox:(ReplyBox *)box send:(NSString *)text to:(NSString *)sid { (void)box; [self deliver:text to:sid]; }
+- (void)replyBoxClosed:(ReplyBox *)box { (void)box; [self.tip orderOut:nil]; }
+
+- (void)coreDragOver:(NSString *)sid {
+    if ([sid isEqualToString:self.dragSid]) return;
+    if (self.dragSid && ![self.dragSid isEqualToString:self.pttSid]) [self.overlay removeObjectForKey:self.dragSid];
+    self.dragSid = sid;
+    if (sid && !self.pttSid) self.overlay[sid] = @(ST_TRANSCRIBE);
+}
+
+- (BOOL)coreDropImages:(NSPasteboard *)pb on:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (!s) return NO;
+    self.overlay[sid] = @(ST_TRANSCRIBE); // it reads them a moment longer
+    __weak AppDelegate *me = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        AppDelegate *d = me;
+        if (d && ![sid isEqualToString:d.pttSid] && ![sid isEqualToString:d.dragSid]) [d.overlay removeObjectForKey:sid];
+    });
+    [self openReplyFor:s];
+    return [self.reply takeImagesFrom:pb forSid:sid];
+}
+
+// --reply-shot FILE: the reply box of the first session with some text and an image token, under its tooltip,
+// saved as a PNG (the way to check a change to the box without clicking it)
+- (void)replyShot {
+    const Room *room = shown_room();
+    if (!room->n) { [NSApp terminate:nil]; return; }
+    Session *s = (Session *)&room->s[0];
+    [self openReplyFor:s];
+    [self.reply type:@"Looks good, now run the tests "];
+    [self.reply addImages:@[[NSURL fileURLWithPath:@"/tmp/screenshot 1.png"]] forSid:sid_of(s)];
+    [self trackMouse:wall()];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DBG("reply box key: %d, first responder is the field: %d", self.reply.view.window.isKeyWindow,
+            [self.reply.view.window.firstResponder isKindOfClass:[NSTextView class]]);
+        NSRect a = self.tip.frame, b = self.reply.view.window.frame, u = NSUnionRect(a, b);
+        u = NSInsetRect(u, -12, -12);
+        NSImage *img = [[NSImage alloc] initWithSize:u.size];
+        [img lockFocus];
+        [[NSColor colorWithSRGBRed:0.05 green:0.05 blue:0.07 alpha:1] setFill];
+        NSRectFill(NSMakeRect(0, 0, u.size.width, u.size.height));
+        for (NSWindow *w in @[self.tip, self.reply.view.window]) {
+            NSView *v = w.contentView;
+            NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds];
+            [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
+            [rep drawInRect:NSMakeRect(w.frame.origin.x - u.origin.x, w.frame.origin.y - u.origin.y, w.frame.size.width, w.frame.size.height)
+                   fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1 respectFlipped:YES hints:nil];
+        }
+        [img unlockFocus];
+        NSBitmapImageRep *out = [[NSBitmapImageRep alloc] initWithData:img.TIFFRepresentation];
+        [[out representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(g_reply_shot) atomically:YES];
+        [NSApp terminate:nil];
+    });
+}
+
+// "Bring to front": the iTerm2 pane of that session comes to the front
+- (void)bringToFront:(NSString *)sid {
+    Session *s = session_by_sid(sid);
+    if (!s) return;
+    s->ring_at = wall();
     NSString *iterm = msg_text(s, @"iterm");
     NSRange colon = [iterm rangeOfString:@":"];
     if (colon.location != NSNotFound) iterm = [iterm substringFromIndex:colon.location + 1]; // "w0t0p1:UUID" -> UUID
@@ -1357,6 +1480,11 @@ static int rush_n;
     NSString *sid = self.pendingSid, *text = self.pendingText;
     DBG("sending to %s", sid.UTF8String);
     [self dropPending];
+    [self deliver:text to:sid];
+}
+
+// a reply (spoken or typed) for a session: sent at once, or after asking while Claude is working
+- (void)deliver:(NSString *)text to:(NSString *)sid {
     Session *s = session_by_sid(sid);
     if (!s || !text) return;
     if (s->state == ST_WORK || s->state == ST_THINK) {
@@ -1577,7 +1705,7 @@ static int rush_n;
         if ([key isEqualToString:@"labels"]) g_labels_hover = [v boolValue];
         else {
             g_font_size = [v doubleValue];
-            self.tipView.fontSize = self.previewView.fontSize = g_font_size;
+            self.tipView.fontSize = self.previewView.fontSize = self.reply.fontSize = g_font_size;
             self.tipView.title = nil; // makes the tooltip measure itself again
             [self.tip orderOut:nil];
         }
@@ -1593,7 +1721,7 @@ static int rush_n;
     shape_make(&g_shape, g_shape_name);
     g_voice = !voice; [self setVoice:voice];
     g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize && g_claude;
-    self.tipView.fontSize = self.previewView.fontSize = g_font_size;
+    self.tipView.fontSize = self.previewView.fontSize = self.reply.fontSize = g_font_size;
     self.tipView.title = nil;
     [self place];
     [self.view relayout];
@@ -1614,7 +1742,7 @@ static int rush_n;
     [[NSPasteboard generalPasteboard] setString:reply forType:NSPasteboardTypeString];
 }
 - (void)menuMute:(NSMenuItem *)i { Session *s = session_by_sid(i.representedObject); if (s) s->muted = !s->muted; }
-- (void)menuFront:(NSMenuItem *)i { [self coreDoubleClicked:i.representedObject]; }
+- (void)menuFront:(NSMenuItem *)i { [self bringToFront:i.representedObject]; }
 - (void)menuMode:(NSMenuItem *)i { (void)i; [self toggleMode]; }
 - (void)menuFollow:(NSMenuItem *)i { (void)i; g_focus_pinned = NO; self.focusSince = wall(); }
 - (void)menuResetPosition:(NSMenuItem *)i {
@@ -1845,6 +1973,7 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
+         "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
          "  --confirm-send     a recognized reply waits for a second click instead of going out after 1.5 s\n"
          "  --tty PATH --launcher-pid N --claude PATH   (set by the ./vigil-panel launcher)");
@@ -1878,6 +2007,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--listen-locale") && v) { g_listen_locale = @(v); i++; }
             else if (!strcmp(a, "--confirm-send")) g_confirm_send = 1;
             else if (!strcmp(a, "--debug")) g_debug = 1;
+            else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;
             else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }

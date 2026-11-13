@@ -19,7 +19,7 @@ ID=local.vigil.panel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cc -O2 -fobjc-arc -Wall -Wextra -o "$APP/Contents/MacOS/vigil-panel" \
-    mac/panel.m mac/speech.m mac/listen.m mac/tip.m src/events.c src/geom.c src/session.c src/motion.c src/render.c -framework Cocoa -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
+    mac/panel.m mac/speech.m mac/listen.m mac/tip.m mac/reply.m src/events.c src/geom.c src/session.c src/motion.c src/render.c -framework Cocoa -framework UniformTypeIdentifiers -framework Carbon -framework AVFoundation -framework Speech -framework CoreAudio -framework AudioToolbox -lm
 
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,7 +36,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSMicrophoneUsageDescription</key><string>vigil-panel listens while you hold a core down (push-to-talk), to send your spoken reply to that Claude Code session.</string>
-	<key>NSAppleEventsUsageDescription</key><string>vigil-panel brings a session's iTerm2 pane to the front when you double-click its core.</string>
+	<key>NSAppleEventsUsageDescription</key><string>vigil-panel types your replies into a session's iTerm2 pane, and brings that pane to the front when you ask it to.</string>
 	<key>NSSpeechRecognitionUsageDescription</key><string>vigil-panel turns what you say during push-to-talk into text, on this Mac only.</string>
 </dict>
 </plist>
