@@ -2180,13 +2180,11 @@ static void edit_style(void) {
     cf.crTextColor = text_body();
     cf.bCharSet = DEFAULT_CHARSET;
     wcsncpy(cf.szFaceName, mono_face(), LF_FACESIZE - 1);
-    static COLORREF set_col = (COLORREF)-1;
-    static HWND set_for;
-    static wchar_t set_face[LF_FACESIZE];
-    if (set_for != g_edit || set_col != cf.crTextColor || wcscmp(set_face, cf.szFaceName)) { /* (each time repaints all the text: a blink per key) */
-        SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
-        set_for = g_edit; set_col = cf.crTextColor; wcscpy(set_face, cf.szFaceName);
-    }
+    /* all of it, every time: reopening the box sets its font again (WM_SETFONT), which puts every run back to the
+     * default colour, and text put in (a pasted image's token) comes in plain; this runs only on opening, after a paste
+     * or token, and when Settings change, never on a key, so it costs no blink while typing */
+    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
     const wchar_t *cj = cjk_face();
     wchar_t *t = edit_text();
     int n = (int)wcslen(t), any = 0;
@@ -2338,7 +2336,7 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_KEYDOWN && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) { send_reply(); return 0; }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
     int paste = msg == WM_PASTE || (msg == WM_KEYDOWN && (((wp == 'V') && (GetKeyState(VK_CONTROL) & 0x8000)) || (wp == VK_INSERT && (GetKeyState(VK_SHIFT) & 0x8000))));
-    if (paste) { if (!paste_image()) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); } return 0; } /* an image becomes a token; text pastes as text, styled like the rest */
+    if (paste) { if (!paste_image()) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); } g_restyle = 0; edit_style(); return 0; } /* an image becomes a token; text pastes as text; either styled like the rest at once */
     if (msg == WM_CHAR && wp == 22) return 0; /* (the character Ctrl+V would type) */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
     if (msg == WM_CHAR && (wp == L'\r' || wp == 27) && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
