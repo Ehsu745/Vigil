@@ -3137,7 +3137,7 @@ static double g_mot_msg_until;      /* "a state needs a routine" shows until the
 static float g_pv_zoom = 1;         /* the wheel over the preview: 1 to 3 times, to see the detail */
 static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
-static float g_set_scroll, g_set_content_h, g_set_view_h; /* the page scrolls when it is taller than its room */
+static float g_set_scroll, g_set_scroll_to, g_set_content_h, g_set_view_h; /* the page scrolls when it is taller than its room; it glides to _to */
 static int g_sizing;                /* dragging an edge or the corner: 1 right, 2 bottom, 3 both */
 static POINT g_size_from;
 static float g_size_w0, g_size_h0;
@@ -3904,6 +3904,7 @@ static void set_build(void) {
     float pvh = clampf(HL * 0.4f, 180, 420), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
     g_set_view_h = cb - ct;
     g_set_scroll = clampf(g_set_scroll, 0, fmaxf(0, g_set_content_h - g_set_view_h));
+    g_set_scroll_to = clampf(g_set_scroll_to, 0, fmaxf(0, g_set_content_h - g_set_view_h));
     g_clip = SR(cx0 - 4, ct, cx1 + 4, cb); g_clipping = 1;
     float top = ct - g_set_scroll;
     g_set_content_h = g_tab == PG_MOTIONS ? motions_page(pn, cx0, top, cx1) : rows_page(pn, g_tab, cx0, top, cx1);
@@ -4051,6 +4052,11 @@ static void settings_tick(double now) {
     }
     /* resting on a motion tile: it plays after a moment, once */
     if (g_krec >= 0 || (g_kmsg_until > 0 && now > g_kmsg_until)) { if (now > g_kmsg_until) g_kmsg_until = 0; g_sl_dirty = 1; }
+    if (fabsf(g_set_scroll_to - g_set_scroll) > 0.3f) { /* the page glides to where the wheel sent it (quick, no overshoot) */
+        g_set_scroll += (g_set_scroll_to - g_set_scroll) * (1 - expf(-dt * 16));
+        if (fabsf(g_set_scroll_to - g_set_scroll) <= 0.3f) g_set_scroll = g_set_scroll_to;
+        g_sl_dirty = 1;
+    }
     if (g_sl_dirty) set_build();
     /* the cluster in the preview, scaled as Size scales it on the screen */
     int pw = g_pv_rc.right - g_pv_rc.left, ph = g_pv_rc.bottom - g_pv_rc.top;
@@ -4245,7 +4251,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_TOGGLE: set_choose(sh->row, 0); break;
             case K_SLIDE: g_slide = h; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
             case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
-            case K_PAGE: g_tab = sh->val; g_set_scroll = 0; g_sl_dirty = 1; break;
+            case K_PAGE: g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
             case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
@@ -4295,7 +4301,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             g_pv_zoom = clampf(g_pv_zoom * powf(1.2f, notch), 1, 3);
             if (g_pv_zoom < 1.05f) g_pv_zoom = 1;
             g_pv_mx = g_pv_my = 0; /* centred again */
-        } else g_set_scroll = clampf(g_set_scroll - notch * 56, 0, fmaxf(0, g_set_content_h - g_set_view_h));
+        } else g_set_scroll_to = clampf(g_set_scroll_to - notch * 72, 0, fmaxf(0, g_set_content_h - g_set_view_h)); /* (settings_tick glides there) */
         g_sl_dirty = 1;
         return 0;
     }
