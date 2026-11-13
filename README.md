@@ -318,8 +318,13 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 | `src/motion.c` | How each state moves: snap turns, patches, spikes, one routine per motion, the idle whims |
 | `win/panel.c` | The Windows panel: layered windows, orbit physics, Settings window |
 | `src/main.c` | Main loop, terminal setup, the three output modes, demo |
+| `src/wasm.c` | The shared C as WebAssembly, for the pages in `web/` |
+| `web/bestiary.html` | The Core Bestiary: every motion, proposed and as built; **Today** runs the panels' own C |
+| `web/settings-mock.html` | A mock of the redesigned Settings window (resize the browser to try it) |
 
 Colours are the `LOOKS` table in `src/session.c`; how each state moves is a routine in `src/motion.c`.
+
+The pages in `web/` open straight from disk. The Bestiary's **Today** needs the C built for the browser first: `sudo apt install clang lld wasi-libc libclang-rt-dev-wasm32`, then `make wasm` (it writes `web/vigil.wasm` and `web/vigil-wasm.js`, which are not committed). Open `web/bestiary.html#today` to start on it.
 
 </details>
 
