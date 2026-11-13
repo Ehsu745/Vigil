@@ -40,6 +40,8 @@ static const CGFloat PAD = 12, BAR = 3, GAP = 6, MAX_ATTACH = 8;
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *nextId;                      // sid -> last N given out
 - (NSString *)hint;
 - (NSColor *)titleColor;
+- (NSColor *)box;
+- (BOOL)light;
 - (NSFont *)mono;
 - (CGFloat)lineH;
 - (NSRect)fieldRect;
@@ -91,7 +93,7 @@ static NSString *escaped_path(NSString *p) {
     ReplyBox *b = self.box;
     NSRect r = NSInsetRect(self.bounds, 0.5, 0.5);
     NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:r xRadius:10 yRadius:10];
-    [[NSColor colorWithSRGBRed:0.11 green:0.12 blue:0.15 alpha:0.98] setFill];
+    [[[b box] colorWithAlphaComponent:0.98] setFill];
     [box fill];
     [NSGraphicsContext saveGraphicsState];
     [box addClip];
@@ -104,7 +106,7 @@ static NSString *escaped_path(NSString *p) {
     CGFloat x0 = BAR + PAD, w = self.bounds.size.width - x0 - PAD, lh = [b lineH];
     NSRect field = [b fieldRect];
     NSBezierPath *f = [NSBezierPath bezierPathWithRoundedRect:field xRadius:8 yRadius:8];
-    [[NSColor colorWithSRGBRed:0.16 green:0.17 blue:0.21 alpha:1] setFill];
+    [[[b box] blendedColorWithFraction:0.06 ofColor:[b light] ? [NSColor blackColor] : [NSColor whiteColor]] setFill];
     [f fill];
     [[NSColor colorWithSRGBRed:58 / 255.0 green:61 / 255.0 blue:72 / 255.0 alpha:1] setStroke];
     [f stroke];
@@ -150,9 +152,12 @@ static NSString *escaped_path(NSString *p) {
     return NSMakeRect(x0, PAD + [self hintH] + GAP, self.card.bounds.size.width - x0 - PAD, [self fieldH]);
 }
 - (NSFont *)mono { return [NSFont fontWithName:self.fontName size:self.fontSize] ?: [NSFont monospacedSystemFontOfSize:self.fontSize weight:NSFontWeightRegular]; }
+- (NSColor *)box { return [(self.boxColor ?: [NSColor colorWithSRGBRed:0.11 green:0.12 blue:0.15 alpha:1]) colorUsingColorSpace:[NSColorSpace sRGBColorSpace]]; }
+- (BOOL)light { NSColor *b = [self box]; return 0.299 * b.redComponent + 0.587 * b.greenComponent + 0.114 * b.blueComponent > 0.55; }
+- (NSColor *)ink { return self.inkColor ?: ([self light] ? [NSColor colorWithSRGBRed:0.27 green:0.27 blue:0.29 alpha:1] : [NSColor colorWithSRGBRed:0.90 green:0.91 blue:0.94 alpha:1]); }
 - (NSColor *)titleColor {
     NSColor *a = [self.accent colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: [NSColor whiteColor];
-    return [a blendedColorWithFraction:0.3 ofColor:[NSColor whiteColor]] ?: a;
+    return [a blendedColorWithFraction:0.3 ofColor:[self light] ? [NSColor blackColor] : [NSColor whiteColor]] ?: a;
 }
 
 - (void)build {
@@ -214,7 +219,9 @@ static NSString *escaped_path(NSString *p) {
     self.closeButton.frame = NSMakeRect(self.card.bounds.size.width - PAD - 20, self.card.bounds.size.height - PAD - lh, 22, lh);
     NSFont *font = [self mono];
     self.text.font = font;
-    self.text.typingAttributes = @{NSFontAttributeName: font, NSForegroundColorAttributeName: self.text.textColor};
+    self.text.textColor = [self ink];
+    self.text.insertionPointColor = [self light] ? [NSColor blackColor] : [NSColor whiteColor];
+    self.text.typingAttributes = @{NSFontAttributeName: font, NSForegroundColorAttributeName: [self ink]};
 }
 
 - (void)openFor:(NSString *)sid name:(NSString *)name accent:(NSColor *)accent {
