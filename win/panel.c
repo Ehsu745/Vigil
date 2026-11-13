@@ -27,8 +27,10 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#define COBJMACROS /* (WIC's interfaces from C: a pasted image saved as PNG) */
 #include <windows.h>
 #include <windowsx.h>
+#include <wincodec.h>
 #include <shellapi.h>
 #include <ole2.h>
 #include <richedit.h>
@@ -2208,13 +2210,11 @@ static void edit_style(void) {
     cf.crTextColor = text_body();
     cf.bCharSet = DEFAULT_CHARSET;
     wcsncpy(cf.szFaceName, mono_face(), LF_FACESIZE - 1);
-    static COLORREF set_col = (COLORREF)-1;
-    static HWND set_for;
-    static wchar_t set_face[LF_FACESIZE];
-    if (set_for != g_edit || set_col != cf.crTextColor || wcscmp(set_face, cf.szFaceName)) { /* (each time repaints all the text: a blink per key) */
-        SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
-        set_for = g_edit; set_col = cf.crTextColor; wcscpy(set_face, cf.szFaceName);
-    }
+    /* all of it, every time: reopening the box sets its font again (WM_SETFONT), which puts every run back to the
+     * default colour, and text put in (a pasted image's token) comes in plain; this runs only on opening, after a paste
+     * or token, and when Settings change, never on a key, so it costs no blink while typing */
+    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+    SendMessageW(g_edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
     const wchar_t *cj = cjk_face();
     wchar_t *t = edit_text();
     int n = (int)wcslen(t), any = 0;
@@ -2388,6 +2388,7 @@ static void edit_typing_face(HWND w, int cjk) {
     cf.bCharSet = cjk ? CHINESEBIG5_CHARSET : DEFAULT_CHARSET;
     SendMessageW(w, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
+static int paste_image(void);
 static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT) g_stat_paint_edit++;
     if (msg == WM_CHAR || msg == WM_IME_COMPOSITION) {
@@ -2400,7 +2401,9 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     int ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     if (msg == WM_KEYDOWN && wp == VK_RETURN && (g_send_ctrl ? ctrl_down : !shift_down)) { send_reply(); return 0; } /* Enter sends (Shift+Enter: a new line), or Ctrl+Enter (Settings > Shortcuts) */
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
-    if (msg == WM_PASTE) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; } /* text only, styled like the rest */
+    int paste = msg == WM_PASTE || (msg == WM_KEYDOWN && ((wp == 'V' && ctrl_down) || (wp == VK_INSERT && shift_down)));
+    if (paste) { if (!paste_image()) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); } g_restyle = 0; edit_style(); return 0; } /* an image becomes a token; text pastes as text; either styled like the rest at once */
+    if (msg == WM_CHAR && wp == 22) return 0; /* (the character Ctrl+V would type) */
     if (msg == WM_KEYDOWN && ctrl_down && (wp == 'C' || wp == 'W' || wp == 'U' || wp == VK_BACK) && edit_cli_key(w, (int)wp)) return 0; /* like a command line */
     if (msg == WM_CHAR && ctrl_down && (wp == 3 || wp == 23 || wp == 21 || wp == 127)) return 0; /* (the characters those keys would type) */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
@@ -2522,6 +2525,16 @@ static int is_image(const wchar_t *path) {
     return 0;
 }
 
+/* one image (a Windows path) kept for the reply, with the next token number */
+static int add_image(const wchar_t *path, const wchar_t *name) {
+    if (g_attach_n >= MAX_ATTACH || !wsl_path(path, g_attach[g_attach_n], 600)) return 0;
+    wcsncpy(g_attach_name[g_attach_n], name, 119);
+    g_attach_name[g_attach_n][119] = 0;
+    g_attach_id[g_attach_n] = ++g_attach_next;
+    g_attach_n++;
+    return 1;
+}
+
 /* image files dropped on a core or on the reply box: kept for the reply, each with its token number (other
  * files are passed over); finish: the drop came as WM_DROPFILES and is ours to free */
 static void add_drop(HDROP d, int finish) {
@@ -2539,16 +2552,85 @@ static void add_drop(HDROP d, int finish) {
     for (UINT i = 0; i < n && g_attach_n < MAX_ATTACH; i++) {
         wchar_t path[MAX_PATH * 2];
         if (!DragQueryFileW(d, i, path, MAX_PATH * 2) || !is_image(path)) continue;
-        if (!wsl_path(path, g_attach[g_attach_n], 600)) continue;
         const wchar_t *base = wcsrchr(path, L'\\');
-        wcsncpy(g_attach_name[g_attach_n], base ? base + 1 : path, 119);
-        g_attach_name[g_attach_n][119] = 0;
-        g_attach_id[g_attach_n] = ++g_attach_next;
-        g_attach_n++;
+        add_image(path, base ? base + 1 : path);
     }
     if (finish) DragFinish(d);
     if (g_input) InvalidateRect(g_input, NULL, FALSE);
 }
+static int has_image(HDROP d);
+/* a bitmap written as a PNG with Windows' own encoder (WIC) */
+static int save_png(HBITMAP hb, const wchar_t *path) {
+    IWICImagingFactory *f = NULL;
+    IWICBitmap *bm = NULL;
+    IWICStream *st = NULL;
+    IWICBitmapEncoder *enc = NULL;
+    IWICBitmapFrameEncode *fr = NULL;
+    int ok = 0;
+    if (FAILED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void **)&f))) return 0;
+    if (SUCCEEDED(IWICImagingFactory_CreateBitmapFromHBITMAP(f, hb, NULL, WICBitmapIgnoreAlpha, &bm)) &&
+        SUCCEEDED(IWICImagingFactory_CreateStream(f, &st)) && SUCCEEDED(IWICStream_InitializeFromFilename(st, path, GENERIC_WRITE)) &&
+        SUCCEEDED(IWICImagingFactory_CreateEncoder(f, &GUID_ContainerFormatPng, NULL, &enc)) &&
+        SUCCEEDED(IWICBitmapEncoder_Initialize(enc, (IStream *)st, WICBitmapEncoderNoCache)) &&
+        SUCCEEDED(IWICBitmapEncoder_CreateNewFrame(enc, &fr, NULL)) && SUCCEEDED(IWICBitmapFrameEncode_Initialize(fr, NULL)) &&
+        SUCCEEDED(IWICBitmapFrameEncode_WriteSource(fr, (IWICBitmapSource *)bm, NULL)) &&
+        SUCCEEDED(IWICBitmapFrameEncode_Commit(fr)) && SUCCEEDED(IWICBitmapEncoder_Commit(enc))) ok = 1;
+    if (fr) IWICBitmapFrameEncode_Release(fr);
+    if (enc) IWICBitmapEncoder_Release(enc);
+    if (st) IWICStream_Release(st);
+    if (bm) IWICBitmap_Release(bm);
+    IWICImagingFactory_Release(f);
+    return ok;
+}
+/* Ctrl+V in the reply line with an image on the clipboard: image files copied in Explorer are attached as they are;
+ * a copied picture (a screenshot, an image copied in a browser) is saved as a PNG in the Windows temp folder
+ * (vigil-paste, cleared of pastes older than a day) and attached like a dropped one. 0: nothing of the kind there. */
+static int paste_image(void) {
+    if (!OpenClipboard(g_input)) return 0;
+    int first = g_attach_n, done = 0;
+    HDROP drop = IsClipboardFormatAvailable(CF_HDROP) ? (HDROP)GetClipboardData(CF_HDROP) : NULL;
+    if (drop && has_image(drop)) { add_drop(drop, 0); done = 1; }
+    else {
+        UINT png = RegisterClipboardFormatW(L"PNG");
+        HANDLE hp = IsClipboardFormatAvailable(png) ? GetClipboardData(png) : NULL;
+        HBITMAP hb = !hp && IsClipboardFormatAvailable(CF_BITMAP) ? (HBITMAP)GetClipboardData(CF_BITMAP) : NULL;
+        if (hp || hb) {
+            wchar_t dir[MAX_PATH], path[MAX_PATH + 64];
+            GetTempPathW(MAX_PATH, dir);
+            wcscat(dir, L"vigil-paste");
+            CreateDirectoryW(dir, NULL);
+            wchar_t pat[MAX_PATH + 8]; /* yesterday's pastes go */
+            swprintf(pat, MAX_PATH + 8, L"%ls\\*.png", dir);
+            WIN32_FIND_DATAW fd;
+            HANDLE fh = FindFirstFileW(pat, &fd);
+            FILETIME now; GetSystemTimeAsFileTime(&now);
+            ULONGLONG tn = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+            if (fh != INVALID_HANDLE_VALUE) {
+                do {
+                    ULONGLONG tf = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+                    if (tn - tf > 864000000000ULL) { swprintf(path, MAX_PATH + 64, L"%ls\\%ls", dir, fd.cFileName); DeleteFileW(path); }
+                } while (FindNextFileW(fh, &fd));
+                FindClose(fh);
+            }
+            SYSTEMTIME t; GetLocalTime(&t);
+            swprintf(path, MAX_PATH + 64, L"%ls\\paste-%04d%02d%02d-%02d%02d%02d-%03d.png", dir, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+            int saved = 0;
+            if (hp) { /* a PNG copy already there (browsers, Snipping Tool): written as it is */
+                void *b = GlobalLock(hp);
+                SIZE_T n = GlobalSize(hp);
+                HANDLE out = b ? CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+                DWORD wrote = 0;
+                if (out != INVALID_HANDLE_VALUE) { saved = WriteFile(out, b, (DWORD)n, &wrote, NULL) && wrote == n; CloseHandle(out); }
+                if (b) GlobalUnlock(hp);
+            } else saved = save_png(hb, path);
+            if (saved && add_image(path, L"Pasted image")) done = 1;
+        }
+    }
+    CloseClipboard();
+    if (done) { insert_tokens(first); if (g_input) InvalidateRect(g_input, NULL, FALSE); }
+    return done;
+}
+
 static int has_image(HDROP d) {
     UINT n = DragQueryFileW(d, 0xFFFFFFFF, NULL, 0);
     for (UINT i = 0; i < n; i++) { wchar_t path[MAX_PATH * 2]; if (DragQueryFileW(d, i, path, MAX_PATH * 2) && is_image(path)) return 1; }
