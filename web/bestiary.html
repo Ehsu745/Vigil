@@ -181,13 +181,14 @@ td.today { color: var(--muted); }
 .code { font-family: var(--mono); font-size: 13px; color: var(--fg); }
 .build ol { margin: 0; padding-left: 1.3em; display: grid; gap: 10px; color: var(--muted); max-width: 76ch; }
 .build ol b { color: var(--fg); font-weight: 500; }
+.clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 </style>
 
 <div class="wrap">
   <header>
     <span class="eyebrow">vigil · motion and colour study · v7</span>
     <h1>Core Bestiary</h1>
-    <p>Every Claude Code session is a glowing net of 80 small triangles around a light, and each state moves it like a machine: <b>snap turns, patches that slide out and lock back, spikes</b>. Pick a state on the bench, choose which motions it may use, and click any motion in the <a href="#catalogue">catalogue</a> to watch it. <b>Today</b> shows what the panel does now. New in v7: <b>READY</b> (v7.8: pieces drift after a hit; every attack can miss), a finished reply nobody has seen yet, which throws pieces of its own shell at your pointer.</p>
+    <p>Every motion a core can make. Pick a state, click a motion to watch it. <b>Proposed</b> is the design; <b>Today</b> is what the panels run (their own C, after <code>make wasm</code>).</p>
   </header>
 
   <div class="bench">
@@ -226,14 +227,14 @@ td.today { color: var(--muted); }
           <div class="chips" id="chips" role="group" aria-label="State"></div>
         </div>
         <div class="group">
-          <span class="lab">Motions <small>click a name to play it · <span style="color:var(--accent)">&#10003;</span> = this state may use it: routines are picked at random each time the state starts, actions (dashed) play now and then</small></span>
+          <span class="lab">Motions <small>click to play · <span style="color:var(--accent)">&#10003;</span> = this state uses it · dashed = action</small></span>
           <div class="opts" id="mapchips" role="group" aria-label="Motions for this state"></div>
           <p id="map-note"></p>
         </div>
         <div class="group" id="ready-group" hidden>
-          <span class="lab">READY <small>the pointer is the target · a hit means seen</small></span>
+          <span class="lab">READY <small>attacks the pointer · a hit means seen</small></span>
           <div class="opts" id="ready-opts" role="group" aria-label="READY"></div>
-          <p id="ready-note">While it winds up the core turns NEEDS YOU orange and, set to Excited, hops and calls for you. Which attacks it uses: the motion map below. Each attack knocks the pointer its own way. In the panel that moves your real pointer, so there it is off by default, and skipped while a button is held or the mouse just moved.</p>
+          <p id="ready-note">Dodge an attack to start a run: ten hearts, waves that get faster. Esc or a click on the core ends it. Knocking moves your real pointer in the panel, so it is off there by default.</p>
         </div>
         <details class="more"><summary>Patches and focus frame</summary>
         <div class="group">
@@ -242,7 +243,7 @@ td.today { color: var(--muted); }
           <p id="patch-note"></p>
         </div>
         <div class="group">
-          <span class="lab">Focus frame <small>carry and lock-on · a user setting</small></span>
+          <span class="lab">Focus frame</span>
           <div class="opts" id="frames" role="group" aria-label="Focus frame"></div>
           <p id="frame-note"></p>
         </div>
@@ -255,7 +256,7 @@ td.today { color: var(--muted); }
     <div class="shead">
       <span class="eyebrow">catalogue</span>
       <h2>Every motion</h2>
-      <p>Grouped by the state it was made for; any state may use any of them. A routine runs for as long as the state lasts, an action plays once; READY's attacks are actions aimed at the pointer. Click one to play it on the bench. Tags: <b>built</b> is in the panel now, <b>v4</b> to <b>v7</b> the mock it was proposed in.</p>
+      <p>Click one to play it. <b>built</b> = in the panel now; <b>v4</b>–<b>v7</b> = the mock that proposed it. Hover for the full text.</p>
     </div>
     <div class="cat" id="cat"></div>
   </section>
@@ -263,8 +264,8 @@ td.today { color: var(--muted); }
   <section>
     <div class="shead">
       <span class="eyebrow">12 states</span>
-      <h2>Each state runs a different routine</h2>
-      <p>Colour tells the states apart; the routine should too, so a core can be read out of the corner of your eye. Dashed names are the panel's own states; the terminal never shows them. Hover a card to see its answer to the pointer, click it to put it on the bench.</p>
+      <h2>States</h2>
+      <p>Click a card to put it on the bench. Dashed: the panel’s own states.</p>
     </div>
     <div class="grid" id="grid"></div>
   </section>
@@ -272,101 +273,19 @@ td.today { color: var(--muted); }
   <section>
     <div class="shead">
       <span class="eyebrow">reference</span>
-      <h2>How it is built</h2>
-    </div>
-  <details class="ref"><summary><span class="eyebrow">the moves</span> Geometric moves, never the same twice</summary>
-    <div class="shead">
-      <p>Every state is built from the same few moves, so the family feels like one machine. Nothing bends and nothing is laid out in a symmetric pattern: patches are cut at random, spikes land on random nodes.</p>
+      <h2>The moves</h2>
+      <p>Every motion is built from these. Nothing bends; patches and spikes land at random, so no two runs match.</p>
     </div>
     <div class="vocab">
-      <div><b>Snap step</b><span>Turns exactly 72° or 36° about a symmetry axis, eases in and out, stops dead.</span></div>
-      <div class="new"><b>Patches</b><span>The 80 small triangles are cut into irregular patches of 1 to 6 (some stay fixed). Each patch slides out along its own direction by its own amount. A new cut is made every time, so the pattern never repeats.</span></div>
-      <div class="new"><b>Spike</b><span>One node is pulled far out, and the triangles around it become a long, sharp pyramid. Its opposite is a node pulled in toward the centre, which caves the triangles around it into a deep pit. Out and in together make the tension.</span></div>
-      <div class="new"><b>Go crazy</b><span>First tension: a few nodes are drawn in toward the centre and the shell tightens. Then a burst of pairs: each spike out comes with a node a couple of steps away pulled in toward the centre, so out and in pull against each other. Spikes fire from random nodes far apart from each other, the shell jerks about random axes, patches flick and the core glitches. Then it calms down at once. ERROR runs it on a loop, idle cores do it now and then, and IDLE does a calm version when you point at it.</span></div>
-      <div class="new"><b>Layers</b><span>Groups of triangles turn about an axis against the rest: a running belt (WORK), or two lifted layers (THINK) in quick turns and halts, eased turns, or one long counter-spin.</span></div>
-      <div class="new"><b>Black hole</b><span>The shell trembles, cracks and falls in, patch by patch, stretched toward the centre. A few flakes run the other way, struggle against the pull, and are dragged back and swallowed. What is left is a soft-edged void in a tilted disc of violet and magenta dust.</span></div>
-      <div class="new"><b>Hammer</b><span>One patch rises and strikes; the blow rings out through the shell as a ripple of lifted patches, with sparks (WORK: Forge).</span></div>
-      <div class="new"><b>Squeeze</b><span>The whole shell is pressed flat along one axis in clicks and springs back in one stroke (WORK: Compressor).</span></div>
-      <div class="new"><b>Blades</b><span>A few long plates break off and hover round the core on one axis, then swing in one after another, a quick strike each, and dock back where they came from.</span></div>
-      <div><b>Inner shell</b><span>A small icosahedron inside turns against the outer one.</span></div>
-      <div><b>Scan plane</b><span>A plane sweeps through the shell and lights the nodes it crosses.</span></div>
-      <div><b>Node sequence</b><span>Nodes light one ring of neighbours at a time, outward from one point.</span></div>
+      <div><b>Snap step</b><span>An exact 72° or 36° turn about a symmetry axis.</span></div>
+      <div><b>Patches</b><span>Random groups of 1 to 6 triangles slide out and lock back.</span></div>
+      <div><b>Spike / pit</b><span>A node pulled far out, or in toward the centre.</span></div>
+      <div><b>Layers</b><span>Rings of triangles turn against the rest.</span></div>
+      <div><b>Pieces</b><span>Triangles leave the shell, fly, and dock again.</span></div>
+      <div><b>Scan plane</b><span>A plane sweeps through and lights the nodes it crosses.</span></div>
+      <div><b>Inner shell</b><span>A small icosahedron turning against the outer one.</span></div>
+      <div><b>Sparks, rings, trails</b><span>Light thrown off by the moves above.</span></div>
     </div>
-  </details>
-  <details class="ref"><summary><span class="eyebrow">the pointer</span> Hover gets an answer, not just a follow</summary>
-    <div class="shead">
-      <p>Today a hovered core brightens, slows down and turns toward the pointer in every state. The proposal keeps that and adds a precise, state-specific reply. The hands-on gestures that already work stay as they are.</p>
-    </div>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Gesture</th><th>Today</th><th>Proposed</th></tr></thead>
-        <tbody>
-          <tr><td>Hover</td><td class="today">Brightens 35 %, slows 70 %, turns up to 0.32 rad toward the pointer, the core gazes at it.</td><td>The same, plus the patch under the pointer lifts out and its nodes light, like a selection. Each state adds its own reply: IDLE stirs (calm spikes rise slowly on your side), the NEEDS YOU swimmers turn and swim toward the pointer, TRANSCRIBING's scan plane follows the pointer, SLEEP and STANDBY wake up, ERROR jerks away.</td></tr>
-          <tr><td>Stay 2 s</td><td class="today">Nothing more.</td><td>Lock-on: the focus frame closes in around the core and it stops with a vertex toward you. The tooltip appears at the same moment.</td></tr>
-          <tr><td>Rush at it</td><td class="today">Nothing.</td><td>Defence, and hard to set off on purpose: the pointer has to start well away from the core (more than 2.2 shell radii from its centre) and land on it within 0.18 s. Then the patches clamp shut, a spike shoots out toward where you came from with a pit beside it, and the shell jerks a few degrees. Passing by or hovering in at a normal pace never does it; it rests 2 s after each time, and WORK ignores it.</td></tr>
-          <tr><td>Click</td><td class="today">Plays the spoken report <span class="tag">built</span></td><td>Also presses the patch you clicked; the press steps outward through the neighbouring patches. Then the report plays.</td></tr>
-          <tr><td>Double-click</td><td class="today">Shockwave ring, jumps to the iTerm2 session <span class="tag">built</span></td><td>Unchanged.</td></tr>
-          <tr><td>Hold</td><td class="today">Push-to-talk, turns green and listens <span class="tag">built</span></td><td>Unchanged; LISTENING opens its front patches with the microphone level.</td></tr>
-          <tr><td>Drag, flick</td><td class="today">Spins the shell under the hand; flick it and it coasts back to its own speed <span class="tag">built</span></td><td>Unchanged.</td></tr>
-          <tr><td>⌥-click, carry</td><td class="today">Leans and stretches into the motion, the core sloshes, shaking makes it dizzy, bounces when put down <span class="tag">built</span></td><td>Crisper: a focus frame holds the core while it is carried (pick a style above), the core's spring is critically damped, the patches on the trailing side open a little, it sets down without a bounce, and shaking it hard makes it go crazy.</td></tr>
-          <tr><td>Scroll</td><td class="today">Sets the speech volume, the shell thickens to show it <span class="tag">built</span></td><td>Unchanged.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </details>
-  <details class="ref"><summary><span class="eyebrow">idle and asleep</span> What it does when nobody is looking</summary>
-    <div class="shead">
-      <p>Every 3 to 10 s an idle core picks one (7 to 18 s asleep). The proposal keeps the precise ones, replaces the squashy ones with geometric ones, and leaves sleep to the scan plane. STANDBY uses the same actions; the motion map in the sandbox lets any state use any of them.</p>
-    </div>
-    <div class="three">
-      <div class="list">
-        <h3>Keep <span class="tag">built</span></h3>
-        <ul>
-          <li><b>look</b><span>Glances one way, then the other.</span></li>
-          <li><b>peek</b><span>Leans to one side to see past something.</span></li>
-          <li><b>twirl</b><span>Spins round fast and coasts down.</span></li>
-          <li><b>blink</b><span>Dims once or twice.</span></li>
-          <li><b>shiver</b><span>A quick shudder.</span></li>
-        </ul>
-      </div>
-      <div class="list">
-        <h3>Add <span class="tag new">proposed</span></h3>
-        <ul>
-          <li><b>align</b><span>Turns a vertex exactly toward you, holds, carries on.</span></li>
-          <li><b>step</b><span>Two snap steps of 72°, like a combination lock.</span></li>
-          <li><b>unfold</b><span>A fresh cut of patches opens one after another down the sphere, then closes in reverse.</span></li>
-          <li><b>scan</b><span>One plane sweeps top to bottom.</span></li>
-          <li><b>spike</b><span>One or two sharp spikes snap out of random nodes and back.</span></li>
-          <li><b>crazy</b><span>The full ERROR fit, rarely, out of nowhere. Also on the Go crazy button.</span></li>
-          <li><b>ripple</b><span>A wave of lifted patches runs over the sphere from one side to the other.</span></li>
-          <li><b>orbit</b><span>One patch lifts off, flies once round the core and docks again.</span></li>
-          <li><b>petal</b><span>The patches round one node open like a flower, ring by ring, and close.</span></li>
-          <li><b>constellation</b><span>A short chain of neighbouring nodes lights up one by one, then fades.</span></li>
-          <li><b>tumble</b><span>A slow half turn about a random axis that settles exactly.</span></li>
-        </ul>
-      </div>
-      <div class="list">
-        <h3>Retire <span class="tag">too soft</span></h3>
-        <ul>
-          <li><b>hop</b><span>Squash and stretch on landing reads as rubber.</span></li>
-          <li><b>yawn</b><span>Stretches the shell out of shape.</span></li>
-          <li><b>sigh</b><span>A swelling breath; the scan plane replaces it as the sign of life.</span></li>
-        </ul>
-      </div>
-    </div>
-  </details>
-  <details class="ref build"><summary><span class="eyebrow">turning the mock into the core</span> What it would take</summary>
-    
-    <ol>
-      <li><b>Rotation as a matrix.</b> Snap steps about symmetry axes need an orientation matrix per session instead of the two angles <span class="code">ax</span>, <span class="code">ay</span>. Drag and flick keep working on top of it.</li>
-      <li><b>Small triangles.</b> The renderer draws geo2 as its 80 small triangles, each with a displacement (<span class="code">Session.tri[80][3]</span>). A cut is an 80-entry table of patch numbers, made by a random flood fill from the session's own random state whenever a routine asks for a new one. Closed, it draws exactly like today's shell.</li>
-      <li><b>Spikes</b> are an outward push per node (<span class="code">Session.push[42]</span>); the neighbouring triangles stretch to it on their own, so there is nothing extra to draw. Going crazy is a short schedule of random spikes and jerks.</li>
-      <li><b>A routine per state.</b> Next to <span class="code">LOOKS</span>, a <span class="code">MOTION</span> table: which routine (<span class="code">DRIFT</span>, <span class="code">STEP</span>, <span class="code">ENGINE</span>, <span class="code">BEAT</span>, <span class="code">UNLOCK</span>, <span class="code">SCAN</span>, <span class="code">CRAZY</span>), patch size, tempo and the hover reply. Motion stays data, like colour.</li>
-      <li><b>The focus frame</b> is drawn by the panel around the core rect it already knows (<span class="code">coreRect:</span>), not by the renderer, so it stays sharp at any size. Which frame is the user's choice: right-click &gt; Focus frame, or <span class="code">--frame segments|lens|polar|diamond|lock|orbits|none</span>.</li>
-      <li><b>No springs that overshoot.</b> Everything eases with fixed curves (in-out cubic, out-expo) or critically damped springs.</li>
-      <li><b>Done already:</b> NEEDS YOU is now orange and ERROR red, in <span class="code">LOOKS</span> and both READMEs.</li>
-    </ol>
-  </details>
   </section>
 </div>
 
@@ -1165,7 +1084,7 @@ td.today { color: var(--muted); }
   // a missile pulled into the core: a blast at I on the shell's edge (In: out from the core there), and the shell
   // breaks there, the missile and the triangles nearest the blast thrown out as pieces, which float and fly home
   function coreCrash(m, A, p, I, In) {
-    const busy = new Set([...A.ps.map(q => q.ti), ...(A.sh || []).map(q => q.ti)]);
+    const busy = new Set([...(A.ps || [A.p]).map(q => q.ti), ...(A.sh || []).map(q => q.ti)]);
     const near = G.tris.map((tr, ti) => ti).filter(ti => !busy.has(ti) && normOf(m, ti)[2] > -.1)
       .sort((a, b) => dist2(homeOf(m, a).slice(0, 2).concat(0), I) - dist2(homeOf(m, b).slice(0, 2).concat(0), I)).slice(0, 7);
     const tris = [p.ti, ...near], cs = [p.pos.slice(), ...near.map(ti => homeOf(m, ti))], a0 = Math.atan2(In[1], In[0]);
@@ -1187,12 +1106,16 @@ td.today { color: var(--muted); }
     // The core's pull bends every flight, slinging it round the core; one pulled into the core explodes and breaks the shell there.
     missiles: { dur: 8.4, start(m) {
         const T = m.aimView(), dir = nrm([T[0], T[1], 0]), ps = [];
-        const pool = G.tris.map((tr, ti) => ti).filter(ti => normOf(m, ti)[2] > .1).sort(() => Math.random() - .5);
+        const side = ti => { const n = normOf(m, ti), l = Math.hypot(n[0], n[1]) || 1; return (n[0] * dir[0] + n[1] * dir[1]) / l; }; // how far toward the pointer it faces
+        let pool = G.tris.map((tr, ti) => ti).filter(ti => normOf(m, ti)[2] > -.2 && side(ti) > .35);
+        if (pool.length < 6) pool = G.tris.map((tr, ti) => ti).sort((a, b) => side(b) - side(a)).slice(0, 12); // the pointer right over the core
+        pool.sort(() => Math.random() - .5);
         for (const ti of pool) { if (ps.length >= 3) break; if (ps.every(q => q.ti !== ti && !G.tnb[q.ti].includes(ti))) ps.push({ ti, tip: tipToward(m, ti, dir) }); }
-        ps.forEach((p, i) => Object.assign(p, { i, t0: .1 + i * .3, st: 'morph', k: 0, s: 1, spin: (Math.random() < .5 ? 1 : -1) * rnd(2.6, 3.4) }));
+        ps.forEach((p, i) => Object.assign(p, { i, t0: .1 + i * .2, st: 'morph', k: 0, s: 1, spin: (Math.random() < .5 ? 1 : -1) * rnd(2.6, 3.4) }));
         m.atk = { ps };
       }, run(m, t, dt) {
-        const T = m.aimView(), A = m.atk, T0 = [T[0], T[1], 0], MORPH = 1.0, AIM = .16;
+        const T = m.aimView(), A = m.atk, T0 = [T[0], T[1], 0], MORPH = .8, AIM = .12;
+        if (dt > 0) { if (A.lastT) { const k = 1 - Math.exp(-dt * 8), pv = A.pv || [0, 0]; A.pv = [pv[0] + ((T[0] - A.lastT[0]) / dt - pv[0]) * k, pv[1] + ((T[1] - A.lastT[1]) / dt - pv[1]) * k]; } A.lastT = [T[0], T[1]]; } // how the pointer is moving, smoothed
         m.lockOn = Math.max(m.lockOn, A.ps.some(p => p.st === 'morph' || p.st === 'fly') ? clamp((t - .5) / .6, 0, 1) : 0);
         if (A.ps.some(p => p.st === 'morph')) charge(m, .3 + .7 * io3(clamp(t / (A.ps[0].t0 + MORPH), 0, 1)) * (A.ps[0].st === 'morph' ? 1 : .7));
         for (const p of A.ps) {
@@ -1215,13 +1138,25 @@ td.today { color: var(--muted); }
             }
           } else if (p.st === 'fly') {
             const fly = t - p.t0, to = vsub(T, p.pos), d = Math.hypot(to[0], to[1]);
-            const sp = Math.min(10, Math.hypot(p.vel[0], p.vel[1]) + (fly < .15 ? 2.5 : 18) * dt), cur = Math.atan2(p.vel[1], p.vel[0]), want = Math.atan2(to[1], to[0]);
-            const steer = Math.min(8, 3.5 + 14 * fly) * dt, na = cur + clamp(wrapA(want - cur), -steer, steer); // curls off to one side, then dives; it turns no faster than this, so it can be dodged
+            const sp = Math.min(11, Math.hypot(p.vel[0], p.vel[1]) + (fly < .12 ? 3 : 22) * dt), cur = Math.atan2(p.vel[1], p.vel[0]);
+            const lead = Math.min(.45, d / Math.max(sp, 1)) * .5, pv = A.pv || [0, 0], want = Math.atan2(to[1] + pv[1] * lead, to[0] + pv[0] * lead); // it aims where you are going, not quite all the way
+            let wantA = want;
+            { const hx = Math.cos(cur), hy = Math.sin(cur), ahead = -(p.pos[0] * hx + p.pos[1] * hy); // the core's centre, along the heading
+              const miss = Math.abs(p.pos[0] * hy - p.pos[1] * hx); // how close the heading passes it
+              if (!p.dodged && ahead > 0 && ahead < Math.hypot(to[0], to[1]) + .5 && miss < 1.35) { // (once dodged it no longer minds the core: lure it through) // the core is in the way, before the pointer
+                const side = (p.pos[0] * hy - p.pos[1] * hx) > 0 ? -1 : 1; // turn toward the side it is already on, away from the centre
+                wantA = cur + side * Math.min(1.2, (1.35 - miss) * 2.5); } }
+            const steer = Math.min(9, 4 + 17 * fly) * dt, na = cur + clamp(wrapA(wantA - cur), -steer, steer); // curls off to one side, then dives, round the core; it turns no faster than this, so it can be dodged
             p.vel = [Math.cos(na) * sp, Math.sin(na) * sp, 0];
             { const r = Math.max(.9, Math.hypot(p.pos[0], p.pos[1])), g = 40 / (r * r); // the core's pull: it bends the flight and slings it round, faster as it falls in
               p.vel = addv(p.vel, [-p.pos[0] / r, -p.pos[1] / r, 0], g * dt); const v = Math.hypot(p.vel[0], p.vel[1]); if (v > 14) p.vel = scl(p.vel, 14 / v); }
             const prev = p.pos; p.pos = [p.pos[0] + p.vel[0] * dt, p.pos[1] + p.vel[1] * dt, p.pos[2] * Math.exp(-dt * 6)];
-            if (Math.hypot(p.pos[0], p.pos[1]) < 1) { // pulled into the core: it explodes and breaks a hole in the shell
+            if (p.dmin === undefined || d < p.dmin) p.dmin = d; else if (d > p.dmin + .3) p.dodged = true; // it came close, missed and flew on: you dodged it
+            if (Math.hypot(p.pos[0], p.pos[1]) < 1 && !p.dodged) { // not dodged yet: the core is solid, it glances off
+              const r = Math.hypot(p.pos[0], p.pos[1]) || 1, u = [p.pos[0] / r, p.pos[1] / r, 0], vn = dot(p.vel, u);
+              p.pos = [u[0] * 1.02, u[1] * 1.02, p.pos[2]]; if (vn < 0) p.vel = addv(p.vel, u, -1.6 * vn);
+            }
+            if (Math.hypot(p.pos[0], p.pos[1]) < 1) { // dodged, then pulled into the core: it explodes and breaks a hole in the shell
               let lo = 0, hi = 1; for (let i = 0; i < 12; i++) { const u = (lo + hi) / 2; if (Math.hypot(prev[0] + (p.pos[0] - prev[0]) * u, prev[1] + (p.pos[1] - prev[1]) * u) < 1) hi = u; else lo = u; }
               const I = [prev[0] + (p.pos[0] - prev[0]) * lo, prev[1] + (p.pos[1] - prev[1]) * lo, 0], In = nrm([I[0], I[1], 0]);
               coreCrash(m, A, p, I, In); continue;
@@ -1431,14 +1366,19 @@ td.today { color: var(--muted); }
           if ((A.rev > 1.5 * Math.PI && al > .97) || A.rev > 3.5 * Math.PI) { /* about one round, then off as its swing points at you */ feel(m, 'lunge', nrm([toT[0], toT[1], 0]), 1); p.st = 'fly'; p.vel = scl(nrm([p.dir[0], p.dir[1], 0]), 26); A.aim = [T[0], T[1], 0]; A.from = p.pos.slice(); A.tf = t; /* off along its swing, at full speed */ m.ring(.4); m.jerk(nrm([p.vel[1], -p.vel[0], 0]), .06); }
         } else if (p.st === 'fly') {
           const prev = p.pos.slice(); p.k = 1; // it chases you, fast, but turns no faster than this, so it can be dodged
-          { const cur = Math.atan2(p.vel[1], p.vel[0]), want = Math.atan2(T[1] - p.pos[1], T[0] - p.pos[0]), na = cur + clamp(wrapA(want - cur), -8 * dt, 8 * dt); p.vel = [Math.cos(na) * 26, Math.sin(na) * 26, 0]; }
-          { const r = Math.max(1.05, Math.hypot(p.pos[0], p.pos[1])), g = 70 / (r * r); // the core's pull: lead it past the core and it swings round
-            p.vel = addv(p.vel, [-p.pos[0] / r, -p.pos[1] / r, 0], g * dt); p.vel = scl(nrm(p.vel), 26);
-            if (r < 1.2) { const u = [p.pos[0] / r, p.pos[1] / r, 0], vn = dot(p.vel, u); if (vn < 0) p.vel = scl(nrm(addv(p.vel, u, -2 * vn)), 26); } } // never into the shell
+          if (p.dodged) p.spd = Math.max(13, (p.spd || 26) - 9 * dt); const SP = p.spd || 26, TURN = p.dodged ? 3 : 8; // dodged, it loses its lock: slower, turning less, the pull takes over
+          { const cur = Math.atan2(p.vel[1], p.vel[0]), want = Math.atan2(T[1] - p.pos[1], T[0] - p.pos[0]), na = cur + clamp(wrapA(want - cur), -TURN * dt, TURN * dt); p.vel = [Math.cos(na) * SP, Math.sin(na) * SP, 0]; }
+          { const r = Math.max(1.05, Math.hypot(p.pos[0], p.pos[1])), g = (p.dodged ? 90 : 70) / (r * r); // the core's pull: lead it past the core and it swings round; once dodged it pulls harder
+            p.vel = addv(p.vel, [-p.pos[0] / r, -p.pos[1] / r, 0], g * dt); p.vel = scl(nrm(p.vel), SP);
+            const dT = Math.hypot(T[0] - p.pos[0], T[1] - p.pos[1]); if (p.dmin === undefined || dT < p.dmin) p.dmin = dT; else if (dT > p.dmin + .3) p.dodged = true; // it came close, missed and flew on: you dodged it
+            if (r < 1.2 && !p.dodged) { const u = [p.pos[0] / r, p.pos[1] / r, 0], vn = dot(p.vel, u); if (vn < 0) p.vel = scl(nrm(addv(p.vel, u, -2 * vn)), SP); } } // not dodged yet: the core is solid, it glances off
           p.dir = p.vel;
           const next = [p.pos[0] + p.vel[0] * dt, p.pos[1] + p.vel[1] * dt, p.pos[2] * Math.exp(-dt * 8)];
           const past = t - A.tf > 4; // chased for 4 s without a hit: it gives up
-          if (segD(T, prev, next) < hitR(m)) {
+          if (p.dodged && Math.hypot(next[0], next[1]) < 1.1) { // dodged, then into the core: it explodes and breaks a hole in the shell
+            let lo = 0, hi = 1; for (let i = 0; i < 12; i++) { const u = (lo + hi) / 2; if (Math.hypot(prev[0] + (next[0] - prev[0]) * u, prev[1] + (next[1] - prev[1]) * u) < 1.1) hi = u; else lo = u; }
+            const I = [prev[0] + (next[0] - prev[0]) * lo, prev[1] + (next[1] - prev[1]) * lo, 0]; p.pos = I.slice(); coreCrash(m, A, p, I, nrm([I[0], I[1], 0]));
+          } else if (segD(T, prev, next) < hitR(m)) {
             p.pos = [T[0], T[1], 0]; placeTip(m, p.ti, p.tip, p.pos, p.dir, 1, p.s);
             m.atkHit(T, nrm([p.vel[0], p.vel[1], 0]).slice(0, 2), [240, 246, 255], 70, .3, { stop: .09, ring: 1.2, squash: .8 });
             { const g = Math.atan2(p.vel[1], p.vel[0]) + rnd(-.6, .6); knockOn(m, p, m.atkR, [Math.cos(g) * 7.5, Math.sin(g) * 7.5, 0]); }
@@ -1446,7 +1386,9 @@ td.today { color: var(--muted); }
           else { p.pos = next; placeTip(m, p.ti, p.tip, p.pos, p.dir, 1, p.s); }
           if (p.st === 'fly') { A.trail.push(p.pos); if (A.trail.length > 20) A.trail.shift(); }
         } else if (p.st === 'coast' || p.st === 'float') { coastOn(m, p, m.atkR, m.rdt); if (A.trail.length) A.trail.shift(); }
+        else if (p.st === 'broke') { if (A.trail.length) A.trail.shift(); } // its pieces are moved below
         else { tipHomeward(m, p, clamp((m.atkR - p.t0) / .8, 0, 1)); if (A.trail.length) A.trail.shift(); }
+        if (A.sh) { for (const q of A.sh) shardMove(m, q, m.atkR, m.rdt); for (const q of A.sh) shardPlace(m, q, m.atkR); } // the broken shell and the slingshot's own pieces
         if (A.trail.length > 1) m.trail = { pts: A.trail, view: true, col: [190, 214, 255], w: 2.6 };
       } },
     // 5. petals (from Petal): the fan of triangles round the node facing you lifts out as one flower, glowing, and
@@ -1867,9 +1809,11 @@ td.today { color: var(--muted); }
     // a slow half turn about a random axis that settles exactly
     tumble: { dur: 1.6, kind: 'new', start(m) { m.stepBy(nrm([rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)]), Math.PI, 1.3); }, run(m, u, el, o) { o.rate = 0; } },
   };
+  // an attack whose pieces are all done attacking (going home, drifting, broken): only the trip home is left
+  const atkTail = m => { const A = m.atk, ps = A && (A.ps || (A.p ? [A.p] : null)); return !!(ps && ps.length && ps.every(p => p.st === 'back' || p.st === 'coast' || p.st === 'float' || p.st === 'broke')); };
   for (const id of ATK) WH[id] = { dur: ATTACK[id].dur, kind: 'ready', turns: 1, // the attack keeps its own clock, which stands still during a hit-stop
     start(m) { EDGE = m.size && m.R ? Math.max(1.4, .97 * m.size / 2 / m.R) : 1.6; m.sharp = null; m.atkT = 0; m.atkR = 0; m.rdt = 0; m.hitStop = 0; m.atkFx = []; ATTACK[id].start(m); },
-    run(m, u, el, o) { m.o = o; EDGE = m.size && m.R ? Math.max(1.4, .97 * m.size / 2 / m.R) : 1.6; let dt = Math.min(.05, m.dt); m.rdt = dt; m.atkR += dt; if (m.hitStop > 0) { m.hitStop -= dt; dt = 0; } m.atkT += dt; ATTACK[id].run(m, m.atkT, dt); feelings(m); m.o = null; } };
+    run(m, u, el, o) { m.o = o; EDGE = m.size && m.R ? Math.max(1.4, .97 * m.size / 2 / m.R) : 1.6; let dt = Math.min(.05, m.dt) * (m.atkSpeed || 1) * (m.atkSpeed > 1 && atkTail(m) ? 2.5 : 1); /* in a dodge run attacks play faster, and the trip home faster still */ m.rdt = dt; m.atkR += dt; if (m.hitStop > 0) { m.hitStop -= dt; dt = 0; } m.atkT += dt; ATTACK[id].run(m, m.atkT, dt); feelings(m); m.o = null; } };
   const POOL_TODAY = ['look', 'look', 'peek', 'hop', 'twirl', 'shiver', 'blink', 'yawn', 'sigh', 'sigh'];
   const POOL_NEW = ['look', 'look', 'peek', 'twirl', 'blink', 'shiver', 'align', 'align', 'step', 'unfold', 'scan', 'spike', 'crazy', 'ripple', 'orbit', 'petal', 'constellation', 'tumble'];
   const SLEEP_TODAY = ['shiver', 'yawn', 'sigh', 'sigh'];
@@ -1892,7 +1836,7 @@ td.today { color: var(--muted); }
     missiles: ['missiles', 'v7.8', 'From Missiles: three triangles picked at random on your side pop out of the shell and spin like thrown coins; as the spin slows each shapeshifts, drawn out long and slim into a missile, the spin running out with its nose on the pointer; a beat, then it fires, curls off on a smoke trail and dives nose first, exploding on the pointer. It chases you for up to 4 s and can be outrun; if it never catches you it bursts harmlessly. The pull of the core bends its flight: lead it past the core and it slings round; let it fall into the core and it explodes there, breaking a hole in the shell, the pieces blown out, floating, and flying home. Knocked on by the blast, each carries on, tumbling and easing back into a plain triangle, floats apart from the others, and flies home.'],
     blades: ['blades', 'v7.7', 'From Blades, a meteor hammer that never stops: ten darts form one bell-curve lens that follows its head like a snake; once round the core, a smash through the pointer, once round, a second smash, once round more, and the darts peel off tail first and stream home still moving.'],
     forge: ['forge', 'v7.8', 'From Forge, at the pointer: one blow at a time, with weight. A random clump of three to five pieces lifts out toward the pointer, turning its broad side to you, its flat edge leading and glowing hotter while heat is drawn in; it quivers at the top and comes down hard, face first, just past flush: a flash, hot sparks, embers, a ring, the shell recoils and ripples. Three blows. Each floats straight up out of its own place, still at the angle it had on the shell, and stops clear of the core; there it turns, a real turn in 3D, its broad side to you; there it takes aim at where you are now and charges, quivering, and the blow shoots out to that spot, fast: if you have moved by the time it falls, it slams down on nothing, carries on with its swing, floats a moment and goes home.'],
-    slingshot: ['slingshot', 'v7.8', 'From Orbit: one piece lifts off and is flung into orbit already fast, a light trail behind it, going faster and swinging wider, the pull barely holding it; after one round, going too fast to hold, it tears free just as its swing points at you and flies at you, fast, and chases you for up to 4 s, turning no faster than it can, so you can dodge it, and the pull of the core bends it as it passes; if it catches you it strikes hard. Then it carries on with what is left of its speed, tumbling and easing back into a plain triangle, floats a moment, and flies home.'],
+    slingshot: ['slingshot', 'v7.8', 'From Orbit: one piece lifts off and is flung into orbit already fast, a light trail behind it, going faster and swinging wider, the pull barely holding it; after one round, going too fast to hold, it tears free just as its swing points at you and flies at you, fast, and chases you for up to 4 s, turning no faster than it can, so you can dodge it, and the pull of the core bends it as it passes; if it catches you it strikes hard. Then it carries on with what is left of its speed, tumbling and easing back into a plain triangle, floats a moment, and flies home. Dodge it, then lead it into the core, and it breaks a hole in the shell.'],
     petals: ['petals', 'v7.4', 'From Petal: the fan round the node facing you lifts out as one flower and flies to the pointer, parting into a ring round it; it blooms wider, turning like a pinwheel, trembles, and snaps shut, every inner corner meeting on the pointer and the flower whole again.'],
     spikes: ['spike cones', 'v7.8', 'From Spike: spikes grow at random nodes on your side and the triangles round each tear off as a cone, drawn into a needle; it turns its point at the pointer, trembles with a glint, and shoots point first. Three, one after another. On each hit the cone breaks into its little triangles: they scatter on, tumbling and slowing, float a moment, and fly home one after another.'],
     constellation: ['constellation', 'v7.4', 'From Constellation: six triangles become stars scattered round the pointer, twinkling, pointing in; a line of light draws the figure star to star and on into the pointer; then it collapses, star after star darting in along its spoke, the last hardest.'],
@@ -2003,6 +1947,7 @@ td.today { color: var(--muted); }
       this.impacts.push({ at: this.t, dir: d0, col, ring: o.ring || 0, size });
       if ((o.squash || 0) >= this.ptrSq) { this.ptrSq = o.squash || 0; this.ptrSqDir = d0; }
       if (this.atkFx) this.atkFx.push({ kind: 'cheer', at: this.atkT, amt: clamp(size / 70, .35, 1) }); // pleased with itself
+      this.atkHits = (this.atkHits || 0) + 1;
       if (this.onHit) this.onHit();
     }
     // particles (v6), kept in view space so gravity falls down the screen whichever way the shell faces.
@@ -2071,7 +2016,7 @@ td.today { color: var(--muted); }
     jerk(axis, angle) { this.anims.push({ axis, angle, at: this.t, dur: .7, ease: u => u < .08 ? outX(u / .08) : 1 - out3((u - .08) / .92), done: 0 }); }
     alignTo(vi, target, dur) { const a = app(this.Q, G.v[vi]), ax = cross(a, target), s = Math.hypot(...ax); if (s < 1e-4) return; this.stepBy(ax, Math.atan2(s, dot(a, target)), dur); }
     sweep(axis, h, a) { for (let i = 0; i < N; i++) { const d = dot(this.vv[i], axis) - h; this.glow[i] = Math.max(this.glow[i], a * Math.exp(-d * d / .02)); } }
-    playWhim(name) { if (this.usesC) { const k = VC.whim(name); if (k > 0) VC.playWhim(this.cSlot(), k, VC.now()); return; } const w = WH[name], a = Math.random() * 2 - 1, b = Math.random() * 2 - 1; this.whim = { name, at: this.t, a, b }; if (w.start) w.start(this, a, b); }
+    playWhim(name) { this.atkHits = 0; if (this.usesC) { const k = VC.whim(name); if (k > 0) VC.playWhim(this.cSlot(), k, VC.now()); return; } const w = WH[name], a = Math.random() * 2 - 1, b = Math.random() * 2 - 1; this.whim = { name, at: this.t, a, b }; if (w.start) w.start(this, a, b); }
     nearestVertexToViewer() { let best = 0, bz = -9; for (let i = 0; i < 12; i++) { const z = app(this.Q, G.v[i])[2]; if (z > bz) { bz = z; best = i; } } return best; }
     // a spike: one node pulled far out, so the triangles around it make a sharp pyramid
     // up / dn: how long it takes to come out and go back; short is a snap, long is a calm rise
@@ -2165,8 +2110,8 @@ td.today { color: var(--muted); }
         this.playWhim(pool[(Math.random() * pool.length) | 0]);
       }
       if (this.whim) {
-        const w = WH[this.whim.name], el = t - this.whim.at, u = el / w.dur;
-        if (u >= 1) { this.whim = null; this.whimNext = t + (this.shown === 'SLEEP' ? 7 + Math.random() * 11 : this.shown === 'READY' ? 1.2 + Math.random() * 1.4 : 3 + Math.random() * 7); }
+        const w = WH[this.whim.name], el = t - this.whim.at, u = w.kind === 'ready' ? (this.atkR || 0) / w.dur : el / w.dur;
+        if (u >= 1) { const done = this.whim; this.whim = null; this.whimNext = t + (this.shown === 'SLEEP' ? 7 + Math.random() * 11 : this.shown === 'READY' ? 1.2 + Math.random() * 1.4 : 3 + Math.random() * 7); if (w.kind === 'ready' && this.onAttackEnd) this.onAttackEnd(done); }
         else w.run(this, u, el, o, this.whim.a, this.whim.b);
       }
 
@@ -2588,8 +2533,7 @@ td.today { color: var(--muted); }
       <dl class="rows">
         ${P ? `<div class="row"><dt>Routine</dt><dd>${net}</dd></div>
         <div class="row"><dt>Actions</dt><dd>${actsOn(name).length ? actsOn(name).map(motName).join(', ') : 'none'}</dd></div>
-        <div class="row"><dt>Hover</dt><dd>${s.hover}</dd></div>
-        <div class="row"><dt>Today</dt><dd class="today">${s.today}</dd></div>`
+        <div class="row"><dt>Hover</dt><dd>${s.hover}</dd></div>`
         : stage.usesC ? (() => { const r = VC.ROUTINES[VC.running(stage.cSlot())]; return `<div class="row"><dt>Today</dt><dd>The panels' own C code, running here: <b>${r ? r.name : ''}</b>. ${r ? r.about : ''}${name === 'READY' ? ' READY is not in the C yet; the panel shows IDLE.' : ''}</dd></div>`; })()
         : `<div class="row"><dt>Today</dt><dd>${s.today} The shell is rigid and turns evenly; every state answers the pointer the same way. <i>(Build the C engine with <code>make wasm</code> to see the panels' real motion here.)</i></dd></div>
         <div class="row"><dt>Proposed</dt><dd class="today">${s.word}: ${s.net}</dd></div>`}
@@ -2598,6 +2542,7 @@ td.today { color: var(--muted); }
       <div class="nums"><span>spin <b>${s.l[0].toFixed(2)}</b> rad/s</span><span>breath <b>${s.l[2].toFixed(2)}</b> Hz × <b>${s.l[3].toFixed(2)}</b></span><span>sparks <b>${s.l[5].toFixed(2)}</b></span><span>glow <b>${s.l[6].toFixed(1)}</b></span>${s.swapped ? '<span class="changed">colour swapped, in LOOKS now</span>' : ''}</div>`;
   }
   function pick(name) {
+    if (typeof run !== 'undefined' && run && name !== 'READY') endRun('left');
     stage.setState(name);
     { const zr = document.getElementById('zoom-reset'); // READY zooms out for room round the core; leaving it zooms back
       if (name === 'READY') { stage.zoom = .3; stage.readyZoom = true; }
@@ -2702,7 +2647,7 @@ td.today { color: var(--muted); }
       g.innerHTML = `<h3 style="--c:${C[S[st].c[1]]}"><i></i>${st}${st === 'STANDBY' ? ' <small style="font-family:var(--mono);color:var(--faint)">and IDLE\'s actions</small>' : ''}</h3><div class="list2"></div>`;
       for (const [id, n, tag, txt, kind] of items) {
         const b = document.createElement('button'); b.className = 'mot';
-        b.innerHTML = `<b>${n}<small>${kind}</small></b><span class="tg ${tag}">${tag}</span><p>${txt}</p>`;
+        b.innerHTML = `<b>${n}<small>${kind}</small></b><span class="tg ${tag}">${tag}</span><p class="clamp2">${txt}</p>`; b.title = txt.replace(/<[^>]+>/g, '');
         b.onclick = () => { playNow(kind === 'action' && stage.state !== 'STANDBY' ? 'IDLE' : st, id); stageEl.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' }); };
         g.lastChild.appendChild(b);
       }
@@ -2714,7 +2659,7 @@ td.today { color: var(--muted); }
   for (const name of ORDER) {
     const s = S[name], card = document.createElement('button');
     card.className = 'card'; card.setAttribute('aria-label', `${name}: ${s.word}. Put it on the bench.`);
-    card.innerHTML = `<canvas></canvas><div class="meta"><span class="n" style="color:${C[s.c[1]]}">${name}</span><span class="w">${s.word}</span></div><p><b>Hover:</b> ${s.hover}</p>`;
+    card.innerHTML = `<canvas></canvas><div class="meta"><span class="n" style="color:${C[s.c[1]]}">${name}</span><span class="w">${s.word}</span></div><p class="clamp2" title="${s.hover.replace(/"/g, '&quot;')}"><b>Hover:</b> ${s.hover}</p>`;
     grid.appendChild(card);
     cardNote[name] = card.querySelector('p');
     const cvs = card.querySelector('canvas'), core = new Core(cvs);
@@ -2753,7 +2698,7 @@ td.today { color: var(--muted); }
     }
     lastMove = p;
     c.hoverT = c.carry || down || (c.onCore(p.x, p.y) && c.t - c.interf > .5) ? 1 : 0;
-    if (c.proposed && c.shown === 'READY' && c.hoverT && !c.seenSaid) { c.seenSaid = true; say('<b>Seen</b>: in the panel the chat box opens here and READY ends; the bench keeps it READY so you can watch'); }
+    if (c.proposed && c.shown === 'READY' && c.hoverT && !c.seenSaid && !run) { c.seenSaid = true; say('<b>Seen</b>: in the panel the chat box opens here and READY ends; the bench keeps it READY so you can watch'); }
     if (!c.hoverT) c.seenSaid = false;
   });
   // Defence only when the pointer rushes at the core: from well outside (over 2.2 shell radii from the centre,
@@ -2784,6 +2729,7 @@ td.today { color: var(--muted); }
     if (!down) return;
     clearTimeout(down.holdTimer);
     const c = stage, mode = down.mode;
+    if (run && !mode) { endRun('click'); down = null; return; }
     if (mode === 'carry') { c.carry = null; if (!c.proposed) c.jig.vy += 2.6; stageEl.classList.remove('carrying'); say('<b>Put down</b>'); }
     else if (mode === 'spin') { c.held = false; stageEl.classList.remove('dragging'); if (e.timeStamp - (down.last || 0) > 100) { c.spinX = c.spinY = 0; } else say('<b>Flicked</b>: it coasts back to its own speed'); }
     else if (mode === 'hold') { c.overlay = null; c.enter(); say('<b>Released</b>: the reply would be sent'); }
@@ -2806,7 +2752,64 @@ td.today { color: var(--muted); }
   zoomReset.onclick = () => setZoom(1);
   stageEl.addEventListener('wheel', e => { e.preventDefault(); setZoom((stage.zoom || 1) * Math.exp(-e.deltaY * .0015)); }, { passive: false });
   let lastHitSay = -9;
-  stage.onHit = () => { if (stage.t - lastHitSay > 2.5) { lastHitSay = stage.t; say('<b>Hit</b>: the pointer was struck, so the reply counts as seen'); } };
+  // ---- the dodge run, READY only. Before a run a hit means seen, as always. The first attack you dodge starts a run:
+  // ten hearts on the left, waves of attacks, each wave longer, faster and with shorter breaks. While it runs, READY
+  // holds and a hit costs a heart (then 0.9 s untouchable). It ends with the last heart, Esc, or a click on the core;
+  // then the reply counts as seen.
+  const HEARTS = 10;
+  let run = null, lastRun = null, best = 0;
+  const inReady = () => stage.proposed && stage.shown === 'READY';
+  function nextWave() {
+    run.wave++; run.attacks = 0; run.need = 2 + run.wave;
+    stage.atkSpeed = Math.min(2.6, 1.5 + .15 * (run.wave - 1));
+    run.gap = Math.max(.1, .5 - .06 * run.wave);
+    run.banner = stage.t; stage.whimNext = stage.t + (run.wave === 1 ? .8 : 1.5); // a breather, the wave's name up
+  }
+  function startRun() {
+    run = { wave: 0, hearts: HEARTS, lost: [], dodges: 1, iframe: -9, start: stage.t };
+    nextWave();
+  }
+  function endRun(why) {
+    if (!run) return;
+    best = Math.max(best, run.wave);
+    run.end = stage.t; lastRun = run; run = null; stage.atkSpeed = 1; stage.whimNext = stage.t + 3;
+  }
+  stage.onAttackEnd = () => {
+    if (!inReady()) { if (run) endRun('left'); return; }
+    const dodged = !stage.atkHits && !!stage.cursor;
+    if (!run) { if (dodged) startRun(); return; }
+    run.attacks++; if (dodged) run.dodges++;
+    if (run.attacks >= run.need) nextWave(); else stage.whimNext = stage.t + run.gap;
+  };
+  stage.onHit = () => {
+    if (run) {
+      if (!stage.cursor || stage.t < run.iframe) return; // untouchable for a moment after a hit
+      run.hearts--; run.lost.push({ i: run.hearts, at: stage.t }); run.iframe = stage.t + .9;
+      if (run.hearts <= 0) endRun('out');
+      return;
+    }
+    if (stage.t - lastHitSay > 2.5) { lastHitSay = stage.t; say('<b>Hit</b>: the pointer was struck, so the reply counts as seen'); }
+  };
+  addEventListener('keydown', e => { if (e.key === 'Escape' && run) endRun('esc'); });
+  // a heart: one low-poly outline, the shell's line colour
+  const HV = [[0, .95], [-.55, .45], [-.95, 0], [-1, -.45], [-.75, -.85], [-.35, -.9], [0, -.5], [.35, -.9], [.75, -.85], [1, -.45], [.95, 0], [.55, .45]], HC = [0, -.12];
+  const col = (c, a) => `rgba(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0},${Math.max(0, Math.min(1, a)).toFixed(3)})`;
+  function drawRun() {
+    const r = run || lastRun; if (!r) return;
+    const ctx = stage.ctx, W = stage.cv.width, H = stage.cv.height, k = Math.min(W, H) / 520, t = stage.t;
+    const fade = run ? 1 : 1 - (t - r.end) / 1.2; if (fade <= 0) { lastRun = null; return; }
+    const line = stage.cur.line, glow = stage.cur.eh || stage.cur.halo, blink = run && t < r.iframe && Math.floor(t * 14) % 2;
+    const s = 12 * k, gap = 34 * k, x = 32 * k, y0 = H / 2 - gap * (HEARTS - 1) / 2;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineJoin = 'round';
+    for (let i = 0; i < HEARTS; i++) { // one thin outline each; a lost one shrinks and fades
+      const y = y0 + i * gap, lost = r.lost.find(l => l.i === i), alive = i < r.hearts;
+      const u = lost ? Math.min(1, (t - lost.at) / .45) : 1; if (!alive && u >= 1) continue;
+      const a = fade * (alive ? (blink ? .3 : .9) : 1 - u), sc = s * (alive ? 1 : 1 - .5 * u);
+      ctx.beginPath(); HV.forEach(([px, py], n) => { const X = x + px * sc, Y = y + py * sc; if (n) ctx.lineTo(X, Y); else ctx.moveTo(X, Y); }); ctx.closePath();
+      ctx.shadowColor = col(glow, .8 * a); ctx.shadowBlur = 5 * k; ctx.strokeStyle = col(line, a); ctx.lineWidth = 1.2 * k; ctx.stroke();
+    }
+    ctx.restore();
+  }
   const visible = new Set([stage]);
   const iob = new IntersectionObserver(es => { for (const e of es) { const c = all.find(x => x.cv === e.target); if (!c) continue; if (e.isIntersecting) visible.add(c); else visible.delete(c); } });
   for (const c of all) iob.observe(c.cv);
@@ -2819,7 +2822,9 @@ td.today { color: var(--muted); }
   function frame(now) {
     const dt = Math.min(.05, (now - last) / 1000) * (reduce ? .3 : 1); last = now;
     if (window.VC && !stage.proposed) { VC.tick(VC.now(), dt); const rt = VC.running(stage.cSlot()); if (rt !== stage.cRt) { stage.cRt = rt; renderSheet(); } }
+    if (run && !stage.cursor && !stage.whim) stage.whimNext = Math.max(stage.whimNext, stage.t + .5); // no pointer on the stage: the run waits
     for (const c of visible) { c.step(dt); c.draw(); }
+    if (visible.has(stage)) drawRun();
     stageEl.classList.toggle('aiming', stage.proposed && stage.shown === 'READY' && !!stage.cursor && !down);
     requestAnimationFrame(frame);
   }
@@ -2827,6 +2832,8 @@ td.today { color: var(--muted); }
   for (const c of all) { c.step(.016); c.draw(); }
   renderSheet(); renderMap(); renderCat();
   if (location.hash === '#today') setMode(false); // (opens straight on the C engine)
+  if (location.hash === '#run') window.__bench = { stage, drawRun, get run() { return run; }, frame(dt) { if (run && !stage.cursor && !stage.whim) stage.whimNext = Math.max(stage.whimNext, stage.t + .5); stage.step(dt); stage.draw(); drawRun(); } };
+  if (location.hash === '#run') { pick('READY'); stage.cursor = { x: stageEl.width * .78, y: stageEl.height * .3 }; startRun(); } // (a run going, for screenshots)
   requestAnimationFrame(frame);
 })();
 </script>

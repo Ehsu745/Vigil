@@ -2,725 +2,573 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vigil Settings mock</title>
-<!-- A mock of the redesigned Settings window. Opens from disk; web/dc-lite.js runs it. Resize the browser to see the columns give way. -->
+<!-- A mock of the redesigned Settings window. Opens from disk; web/dc-lite.js runs it. Resize the browser: it is the window. -->
+<script src="vigil-wasm.js"></script>
+<script src="vigil-core.js"></script>
 </head>
 <body>
 <x-dc>
 <helmet>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap" rel="stylesheet">
 <style>
 body{margin:0;background:#0B0B0D}
-a{color:#FF8A1F}a:hover{color:#FFB066}
-button{font-family:inherit}
+button{font-family:inherit;cursor:pointer}
 button:focus-visible,input:focus-visible{outline:2px solid #FF8A1F;outline-offset:2px}
 input::placeholder{color:#8B8B94}
-/* the window resizes: the columns give way as it narrows */
+/* the sliders, as the panel draws them: orange up to the knob, a cream knob */
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:4px;margin:0;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#FFF1E3;border:0}
+input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#FFF1E3;border:0}
+/* the window resizes: two columns of settings when there is room */
 .vw{container-type:size}
-.vw-side{width:220px}
-.vw-pv{width:300px}
-@container (max-width: 1000px){.vw-pv{width:248px}}
-@container (max-width: 860px){.vw-side{width:176px}}
-@container (max-width: 780px){.vw-pv{display:none !important}.vw-pvbtn{display:flex !important}}
+.rows{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+@container (min-width: 900px){.rows.two{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container (max-height: 620px){.pvbox{height:200px !important}}
+.mgrid{display:grid;grid-template-columns:minmax(230px,290px) minmax(0,1fr);gap:12px;align-items:start}
+@container (max-width: 820px){.mgrid{grid-template-columns:minmax(0,1fr)}}
 </style>
 </helmet>
-<div class="vw" style="width: 100%; height: 100vh; min-width: 620px; min-height: 480px; position: relative; box-sizing: border-box; display: flex; background: #18181B; color: #ECECEF; font-family: Inter, 'Segoe UI', system-ui, sans-serif; border-radius: 14px; overflow: hidden; border: 1px solid #2C2C33;">
+<div class="vw" style="width: 100%; height: 100vh; min-width: 560px; min-height: 520px; box-sizing: border-box; display: flex; background: #18181B; color: #ECECEF; font-family: 'Segoe UI', Inter, system-ui, sans-serif; overflow: hidden; position: relative;">
 
-  <!-- ===== Sidebar: search + pages ===== -->
-  <nav class="vw-side" aria-label="Settings pages" style="flex-shrink: 0; background: #131316; border-right: 1px solid #26262C; display: flex; flex-direction: column; padding: 20px 12px 16px;">
-    <div style="font-size: 20px; font-weight: 600; padding: 0 8px 14px;">Settings</div>
-    <label style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; background: #1D1D21; border: 1px solid #34343B; border-radius: 9px; margin-bottom: 14px;">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B8B94" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
-      <input type="text" aria-label="Search settings" placeholder="Search settings" value="{{q}}" onChange="{{onSearch}}" style="flex: 1; min-width: 0; border: 0; background: transparent; color: #ECECEF; font: inherit; font-size: 13px; outline: none;">
-    </label>
-
-    <div style="display: flex; flex-direction: column; gap: 2px;">
-      <sc-for list="{{tabs}}" as="t" hint-placeholder-count="6">
-        <sc-if value="{{t.on}}" hint-placeholder-val="{{false}}">
-          <button type="button" onClick="{{t.pick}}" aria-current="page" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border: 0; border-radius: 9px; background: #2A1C10; color: #FFE6CC; font-size: 14px; font-weight: 500; text-align: left; cursor: pointer; box-shadow: inset 3px 0 0 #FF8A1F;">
-            <span style="width: 8px; height: 8px; border-radius: 4px; background: #FF8A1F; flex-shrink: 0;"></span>{{t.label}}
-          </button>
-        </sc-if>
-        <sc-if value="{{t.off}}" hint-placeholder-val="{{true}}">
-          <button type="button" onClick="{{t.pick}}" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: #B4B4BC; font-size: 14px; text-align: left; cursor: pointer;">
-            <span style="width: 8px; height: 8px; border-radius: 4px; border: 1.5px solid #5A5A63; box-sizing: border-box; flex-shrink: 0;"></span>{{t.label}}
-          </button>
-        </sc-if>
-      </sc-for>
+  <!-- sidebar: folds to a rail of icons -->
+  <nav aria-label="Settings pages" style="width: {{sideW}}; flex-shrink: 0; background: #131316; border-right: 1px solid #26262C; display: flex; flex-direction: column; gap: 4px; padding: 14px 10px; box-sizing: border-box; transition: width 160ms ease-out;">
+    <div style="display: flex; align-items: center; gap: 8px; height: 36px; margin-bottom: 6px;">
+      <button type="button" onClick="{{toggleSide}}" aria-label="{{sideLabel}}" title="{{sideLabel}}" style="width: 36px; height: 36px; flex-shrink: 0; border: 0; border-radius: 8px; background: transparent; color: #B4B4BC; display: flex; align-items: center; justify-content: center; padding: 0;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18"></path><path d="{{sideArrow}}"></path></svg>
+      </button>
+      <sc-if value="{{sideOpen}}" hint-placeholder-val="{{true}}"><span style="font-size: 16px; font-weight: 600;">Settings</span></sc-if>
     </div>
-
-    <div style="margin-top: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 10px;">
-      <div style="font-size: 12px; color: #8B8B94; line-height: 1.5;">Changes apply at once and are kept between runs.</div>
-      <button type="button" style="height: 32px; border: 1px solid #34343B; border-radius: 8px; background: transparent; color: #B4B4BC; font-size: 13px; cursor: pointer;">Reset everything</button>
-    </div>
+    <sc-for list="{{pages}}" as="p" hint-placeholder-count="6">
+      <button type="button" onClick="{{p.pick}}" aria-label="{{p.label}}" title="{{p.label}}" aria-current="{{p.current}}" style="display: flex; align-items: center; gap: 12px; height: 38px; padding: 0 9px; border-radius: 8px; box-sizing: border-box; border: 1.5px solid {{p.edge}}; background: transparent; color: {{p.col}}; font-size: 13.5px; text-align: left; white-space: nowrap; overflow: hidden;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink: 0;"><path d="{{p.icon}}"></path></svg>
+        <sc-if value="{{sideOpen}}" hint-placeholder-val="{{true}}"><span>{{p.label}}</span></sc-if>
+      </button>
+    </sc-for>
+    <div style="flex: 1;"></div>
+    <button type="button" onClick="{{resetAll}}" aria-label="Reset everything" title="Reset everything" style="display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: #8B8B94; font-size: 12.5px; white-space: nowrap; overflow: hidden;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink: 0;"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5"></path></svg>
+      <sc-if value="{{sideOpen}}" hint-placeholder-val="{{true}}"><span>Reset everything</span></sc-if>
+    </button>
   </nav>
 
-  <!-- ===== Page ===== -->
-  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
-    <header style="padding: 22px 28px 14px; display: flex; align-items: flex-start; gap: 16px; border-bottom: 1px solid #26262C;">
-      <div style="flex: 1; min-width: 0;">
-        <h1 style="margin: 0; font-size: 18px; font-weight: 600;">{{pageTitle}}</h1>
-        <p style="margin: 4px 0 0; font-size: 13px; color: #A1A1AA; line-height: 1.45;">{{pageDesc}}</p>
-      </div>
-      <button type="button" class="vw-pvbtn" style="display: none; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid #34343B; border-radius: 8px; background: #27272D; color: #ECECEF; font-size: 12px; cursor: pointer; white-space: nowrap;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></svg>Preview</button>
-      <sc-if value="{{showPageReset}}" hint-placeholder-val="{{true}}">
-        <button type="button" style="height: 30px; padding: 0 12px; border: 1px solid #34343B; border-radius: 8px; background: transparent; color: #A1A1AA; font-size: 12px; cursor: pointer; white-space: nowrap;">Reset this page</button>
-      </sc-if>
-    </header>
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 14px 16px 0; box-sizing: border-box; gap: 14px;">
 
-    <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 18px 28px 24px;">
-
-      <!-- Search results -->
-      <sc-if value="{{searching}}" hint-placeholder-val="{{false}}">
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <sc-for list="{{results}}" as="r" hint-placeholder-count="3">
-            <button type="button" onClick="{{r.pick}}" style="display: flex; align-items: center; gap: 14px; padding: 12px 16px; background: #212126; border: 1px solid #2C2C33; border-radius: 10px; color: #ECECEF; text-align: left; cursor: pointer;">
-              <span style="flex: 1; min-width: 0;"><span style="display: block; font-size: 14px; font-weight: 500;">{{r.t}}</span><span style="display: block; font-size: 12px; color: #8B8B94; margin-top: 3px;">{{r.d}}</span></span>
-              <span style="font-size: 12px; color: #FFB066; white-space: nowrap;">{{r.tabName}} ›</span>
-            </button>
-          </sc-for>
-          <sc-if value="{{noResults}}" hint-placeholder-val="{{false}}">
-            <div style="font-size: 13px; color: #A1A1AA; padding: 12px 4px;">No setting matches “{{q}}”.</div>
-          </sc-if>
-        </div>
-      </sc-if>
-
-      <!-- ============ LOOK ============ -->
-      <sc-if value="{{isLook}}" hint-placeholder-val="{{true}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">SHELL</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-          <div style="padding: 14px 0;">
-            <div style="font-size: 14px; font-weight: 500;">Shape</div>
-            <div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">The polyhedron every core is drawn as.</div>
-            <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px;">
-              <sc-for list="{{shapes}}" as="o" hint-placeholder-count="4">
-                <sc-if value="{{o.on}}" hint-placeholder-val="{{false}}">
-                  <button type="button" onClick="{{o.pick}}" style="height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid #FF8A1F; border-radius: 10px; background: #2A1C10; color: #FFE6CC; font-size: 12px; cursor: pointer;">
-                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="#FF8A1F" stroke-width="1.6" aria-hidden="true"><path d="{{o.icon}}"></path></svg>{{o.label}}
-                  </button>
-                </sc-if>
-                <sc-if value="{{o.off}}" hint-placeholder-val="{{true}}">
-                  <button type="button" onClick="{{o.pick}}" style="height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid #34343B; border-radius: 10px; background: #19191D; color: #B4B4BC; font-size: 12px; cursor: pointer;">
-                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="#B4B4BC" stroke-width="1.6" aria-hidden="true"><path d="{{o.icon}}"></path></svg>{{o.label}}
-                  </button>
-                </sc-if>
-              </sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Glow</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">How much light spills round the shell.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{glow}}" as="o" hint-placeholder-count="3"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Inner core</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">The bright heart inside the shell.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{core}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">ON SCREEN</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Size</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">How big the main core is. Follows each monitor's scaling.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{size}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="font-size: 14px; font-weight: 500;">Focus frame</div>
-            <div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Drawn round a core you carry, or rest the pointer on for 2 s.</div>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;">
-              <sc-for list="{{frame}}" as="o" hint-placeholder-count="7"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid #34343B; background: #27272D; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-      </sc-if>
-
-      <!-- ============ ORBIT ============ -->
-      <sc-if value="{{isOrbit}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">LAYOUT</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Mode</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">One big core with the others round it, or every core on its own. Ctrl+Alt+C switches too.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{mode}}" as="o" hint-placeholder-count="2"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Other sessions</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Show the small cores round the main one.</div></div>
-            <sc-if value="{{othersOn}}" hint-placeholder-val="{{true}}"><button type="button" role="switch" aria-checked="true" aria-label="Other sessions" onClick="{{toggleOthers}}" style="width: 46px; height: 26px; border-radius: 13px; border: 0; background: #FF8A1F; position: relative; cursor: pointer;"><span style="position: absolute; top: 3px; left: 23px; width: 20px; height: 20px; border-radius: 10px; background: #1F1206;"></span></button></sc-if>
-            <sc-if value="{{othersOff}}" hint-placeholder-val="{{false}}"><button type="button" role="switch" aria-checked="false" aria-label="Other sessions" onClick="{{toggleOthers}}" style="width: 46px; height: 26px; border-radius: 13px; border: 1px solid #55555E; background: #27272D; position: relative; cursor: pointer;"><span style="position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 9px; background: #A1A1AA;"></span></button></sc-if>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Names over cores</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">All-cores mode: the folder name and state above each core.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{names}}" as="o" hint-placeholder-count="2"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">PHYSICS</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Gravity</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">How hard the main core holds the small ones. Drag the core in the preview to feel it.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{gravity}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">PLACE</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Saved positions</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Alt-drag puts a core anywhere; places are kept per monitor layout.</div></div>
-            <button type="button" style="height: 32px; padding: 0 14px; border: 1px solid #34343B; border-radius: 8px; background: #27272D; color: #ECECEF; font-size: 13px; cursor: pointer; white-space: nowrap;">Reset positions</button>
-          </div>
-        </div>
-      </sc-if>
-
-      <!-- ============ TEXT BOX ============ -->
-      <sc-if value="{{isBox}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">TEXT</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Font</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Terminal lines a reply up as Claude Code does; Clean reads like a document.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{font}}" as="o" hint-placeholder-count="2"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Text size</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{tsize}}" as="o" hint-placeholder-count="5"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">BOX</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Box size</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">The widest and tallest it grows before it scrolls.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{bsize}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Box colour</div></div>
-            <div style="display: flex; gap: 6px; align-items: center;">
-              <sc-for list="{{boxc}}" as="o" hint-placeholder-count="5"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" aria-label="{{o.label}}" onClick="{{o.pick}}" style="width: 30px; height: 30px; border-radius: 8px; border: 2px solid #FF8A1F; background: {{o.hex}}; cursor: pointer;"></button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" aria-label="{{o.label}}" onClick="{{o.pick}}" style="width: 30px; height: 30px; border-radius: 8px; border: 1px solid #44444C; background: {{o.hex}}; cursor: pointer;"></button></sc-if></sc-for>
-              <button type="button" aria-label="Any colour" style="height: 30px; padding: 0 10px; border-radius: 8px; border: 1px dashed #55555E; background: transparent; color: #B4B4BC; font-size: 12px; cursor: pointer;">Custom…</button>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Text colour</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Auto turns dark on a light box.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{textc}}" as="o" hint-placeholder-count="5"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Opens</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Where the box appears.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{opens}}" as="o" hint-placeholder-count="2"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-      </sc-if>
-
-      <!-- ============ MOUSE ============ -->
-      <sc-if value="{{isMouse}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">POINTER</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-          <div style="padding: 14px 0;">
-            <div style="font-size: 14px; font-weight: 500;">Scroll on a core</div>
-            <div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">What the mouse wheel does to the core under the pointer.</div>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;">
-              <sc-for list="{{scroll}}" as="o" hint-placeholder-count="5"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid #34343B; background: #27272D; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0; border-top: 1px solid #2C2C33;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Shortcuts</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Alt-drag, Alt-click, Ctrl+Alt+C and the rest, each one yours to change.</div></div>
-            <button type="button" onClick="{{goKeys}}" style="height: 32px; padding: 0 14px; border: 1px solid #34343B; border-radius: 8px; background: #27272D; color: #ECECEF; font-size: 13px; cursor: pointer; white-space: nowrap;">Open Shortcuts ›</button>
-          </div>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">WHEN YOU ARE AWAY</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Rest after</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">No mouse or keyboard for this long: the cores show STANDBY.</div></div>
-            <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-              <sc-for list="{{rest}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 13px; height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-      </sc-if>
-
-      <!-- ============ SHORTCUTS ============ -->
-      <sc-if value="{{isKeys}}" hint-placeholder-val="{{false}}">
-        <sc-for list="{{kgroups}}" as="g" hint-placeholder-count="3">
-          <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">{{g.title}}</div>
-          <div style="background: #212126; border-radius: 12px; padding: 4px 18px; margin-bottom: 20px;">
-            <sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
-              <div style="display: flex; align-items: center; gap: 16px; padding: 12px 0; border-top: {{r.rule}};">
-                <span style="width: 32px; height: 32px; border-radius: 8px; background: #19191D; border: 1px solid #2C2C33; color: #B4B4BC; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{r.icon}}"></path></svg>
-                </span>
-                <div style="flex: 1; min-width: 0;">
-                  <div style="font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px;">{{r.name}}<sc-if value="{{r.tag}}" hint-placeholder-val="{{false}}"><span style="font-size: 10px; font-weight: 600; letter-spacing: .06em; color: #FFB066; border: 1px solid #4A3420; border-radius: 5px; padding: 1px 6px;">{{r.tag}}</span></sc-if></div>
-                  <div style="font-size: 12px; color: {{r.subCol}}; margin-top: 3px;">{{r.sub}}</div>
-                </div>
-                <sc-if value="{{r.isMouse}}" hint-placeholder-val="{{false}}">
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <div role="group" aria-label="{{r.modLabel}}" style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-                      <sc-for list="{{r.mods}}" as="o" hint-placeholder-count="4"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; font-family: 'JetBrains Mono', monospace;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; font-family: 'JetBrains Mono', monospace;">{{o.label}}</button></sc-if></sc-for>
-                    </div>
-                    <span style="font-size: 12px; color: #A1A1AA; width: 48px;">+ {{r.gesture}}</span>
-                  </div>
-                </sc-if>
-                <sc-if value="{{r.recording}}" hint-placeholder-val="{{false}}">
-                  <button type="button" autoFocus="{{true}}" onKeyDown="{{r.capture}}" onBlur="{{r.cancel}}" aria-label="Press the new shortcut for {{r.name}}, Esc cancels" style="height: 32px; min-width: 210px; padding: 0 12px; border-radius: 8px; border: 1px dashed #FF8A1F; background: #2A1C10; color: #FFE6CC; font-size: 12px; cursor: pointer;">Press the keys… Esc cancels</button>
-                </sc-if>
-                <sc-if value="{{r.showKeys}}" hint-placeholder-val="{{true}}">
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="display: flex; align-items: center; gap: 4px; min-width: 120px; justify-content: flex-end;">
-                      <sc-for list="{{r.keys}}" as="k" hint-placeholder-count="3"><kbd style="min-width: 28px; height: 28px; box-sizing: border-box; padding: 0 8px; border-radius: 7px; border: 1px solid #44444C; border-bottom-width: 2px; background: #27272D; color: #FFE6CC; font-family: 'JetBrains Mono', monospace; font-size: 12px; display: inline-flex; align-items: center; justify-content: center;">{{k}}</kbd></sc-for>
-                      <sc-if value="{{r.unset}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: #8B8B94;">Not set</span></sc-if>
-                    </div>
-                    <sc-if value="{{r.canChange}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{r.record}}" aria-label="{{r.changeLabel}}" style="height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid {{r.btnEdge}}; background: {{r.btnBg}}; color: {{r.btnCol}}; font-size: 12px; cursor: pointer; white-space: nowrap;">{{r.btnText}}</button></sc-if>
-                    <sc-if value="{{r.fixed}}" hint-placeholder-val="{{false}}"><span style="height: 30px; display: inline-flex; align-items: center; padding: 0 12px; font-size: 12px; color: #8B8B94;">Fixed</span></sc-if>
-                    <button type="button" onClick="{{r.reset}}" aria-label="Back to the default for {{r.name}}" title="Back to the default" style="width: 30px; height: 30px; border-radius: 8px; border: 1px solid #34343B; background: transparent; color: {{r.resetCol}}; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5"></path></svg>
-                    </button>
-                  </div>
-                </sc-if>
-              </div>
-            </sc-for>
-          </div>
-        </sc-for>
-        <p style="margin: -6px 0 0 2px; font-size: 12px; color: #8B8B94; line-height: 1.5;">Anywhere shortcuts work in every app. Windows refuses a combination another app already holds; the row then says so.</p>
-      </sc-if>
-
-      <!-- ============ PERFORMANCE ============ -->
-      <sc-if value="{{isPerf}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">SMOOTHNESS</div>
-        <div style="background: #212126; border-radius: 12px; padding: 16px 18px; margin-bottom: 20px;">
-          <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px;">
-            <sc-for list="{{smooth}}" as="o" hint-placeholder-count="5">
-              <sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="height: 58px; border-radius: 10px; border: 1px solid #FF8A1F; background: #2A1C10; color: #FFE6CC; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;"><span style="font-size: 13px; font-weight: 600;">{{o.label}}</span><span style="font-size: 11px; color: #FFB066;">{{o.sub}}</span></button></sc-if>
-              <sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="height: 58px; border-radius: 10px; border: 1px solid #34343B; background: #19191D; color: #ECECEF; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;"><span style="font-size: 13px; font-weight: 500;">{{o.label}}</span><span style="font-size: 11px; color: #8B8B94;">{{o.sub}}</span></button></sc-if>
-            </sc-for>
-          </div>
-          <p style="margin: 12px 0 0; font-size: 12px; color: #A1A1AA; line-height: 1.5;">{{smoothNote}}</p>
-
-          <div style="margin-top: 14px; border-top: 1px solid #2C2C33;">
-            <sc-for list="{{rates}}" as="r" hint-placeholder-count="5">
-              <div style="display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid #26262B;">
-                <span style="width: 9px; height: 9px; border-radius: 5px; background: {{r.dot}}; flex-shrink: 0;"></span>
-                <span style="flex: 1; min-width: 0;"><span style="display: block; font-size: 13px;">{{r.k}}</span><span style="display: block; font-size: 11px; color: #8B8B94; margin-top: 2px;">{{r.d}}</span></span>
-                <sc-if value="{{r.fixed}}" hint-placeholder-val="{{true}}"><span style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #ECECEF; min-width: 92px; text-align: right;">{{r.v}}</span></sc-if>
-                <sc-if value="{{r.edit}}" hint-placeholder-val="{{false}}">
-                  <span style="display: flex; align-items: center; gap: 4px;">
-                    <button type="button" aria-label="Slower" onClick="{{r.down}}" style="width: 28px; height: 28px; border-radius: 7px; border: 1px solid #34343B; background: #27272D; color: #ECECEF; font-size: 15px; cursor: pointer;">−</button>
-                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 13px; min-width: 64px; text-align: center; color: #FFE6CC;">{{r.v}}</span>
-                    <button type="button" aria-label="Faster" onClick="{{r.up}}" style="width: 28px; height: 28px; border-radius: 7px; border: 1px solid #34343B; background: #27272D; color: #ECECEF; font-size: 15px; cursor: pointer;">+</button>
-                  </span>
-                </sc-if>
-              </div>
-            </sc-for>
-          </div>
-          <p style="margin: 10px 0 0; font-size: 12px; color: #8B8B94; line-height: 1.5;">A rate above a monitor's refresh rate is capped to it, per monitor. Pictures per second only; the cores' movement on screen always runs at the display's rate while anything moves.</p>
-        </div>
-
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">CHECK THE COST</div>
-        <div style="background: #212126; border-radius: 12px; padding: 4px 18px;">
-          <div style="display: flex; align-items: center; gap: 20px; padding: 14px 0;">
-            <div style="flex: 1; min-width: 0;"><div style="font-size: 14px; font-weight: 500;">Live numbers</div><div style="font-size: 12px; color: #8B8B94; margin-top: 3px;">Show what the panel draws and how long it takes, updated every second.</div></div>
-            <sc-if value="{{liveOn}}" hint-placeholder-val="{{false}}"><button type="button" role="switch" aria-checked="true" aria-label="Live numbers" onClick="{{toggleLive}}" style="width: 46px; height: 26px; border-radius: 13px; border: 0; background: #FF8A1F; position: relative; cursor: pointer;"><span style="position: absolute; top: 3px; left: 23px; width: 20px; height: 20px; border-radius: 10px; background: #1F1206;"></span></button></sc-if>
-            <sc-if value="{{liveOff}}" hint-placeholder-val="{{true}}"><button type="button" role="switch" aria-checked="false" aria-label="Live numbers" onClick="{{toggleLive}}" style="width: 46px; height: 26px; border-radius: 13px; border: 1px solid #55555E; background: #27272D; position: relative; cursor: pointer;"><span style="position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 9px; background: #A1A1AA;"></span></button></sc-if>
-          </div>
-          <sc-if value="{{liveOn}}" hint-placeholder-val="{{false}}">
-            <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 0 16px;">
-              <div style="background: #19191D; border-radius: 9px; padding: 10px 12px;"><div style="font-size: 11px; color: #8B8B94;">Ticks / s</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; margin-top: 4px;">—</div></div>
-              <div style="background: #19191D; border-radius: 9px; padding: 10px 12px;"><div style="font-size: 11px; color: #8B8B94;">Pictures / s</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; margin-top: 4px;">—</div></div>
-              <div style="background: #19191D; border-radius: 9px; padding: 10px 12px;"><div style="font-size: 11px; color: #8B8B94;">CPU ms / s</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; margin-top: 4px;">—</div></div>
-            </div>
-          </sc-if>
-        </div>
-      </sc-if>
-
-      <!-- ============ MOTIONS ============ -->
-      <sc-if value="{{isMotions}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin: 0 0 8px 2px;">1 · PICK A STATE</div>
-        <div style="background: #212126; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px;">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="width: 86px; font-size: 12px; color: #A1A1AA; flex-shrink: 0;">Claude Code</span>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-              <sc-for list="{{mstatesCC}}" as="o" hint-placeholder-count="6"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="display: flex; align-items: center; gap: 6px; font-size: 12px; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{o.dot}};"></span>{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="display: flex; align-items: center; gap: 6px; font-size: 12px; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid #34343B; background: #27272D; color: #B4B4BC; cursor: pointer;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{o.dot}};"></span>{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="width: 86px; font-size: 12px; color: #A1A1AA; flex-shrink: 0;">Panel</span>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-              <sc-for list="{{mstatesP}}" as="o" hint-placeholder-count="5"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="display: flex; align-items: center; gap: 6px; font-size: 12px; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{o.dot}};"></span>{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="display: flex; align-items: center; gap: 6px; font-size: 12px; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid #34343B; background: #27272D; color: #B4B4BC; cursor: pointer;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{o.dot}};"></span>{{o.label}}</button></sc-if></sc-for>
-            </div>
-          </div>
-        </div>
-
-        <div style="display: flex; align-items: center; gap: 12px; margin: 0 0 8px 2px;">
-          <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; flex: 1;">2 · WHAT {{mstateUpper}} MAY PLAY</div>
-          <div style="display: flex; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-            <sc-for list="{{mpart}}" as="o" hint-placeholder-count="2"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B4B4BC; cursor: pointer; white-space: nowrap;">{{o.label}}</button></sc-if></sc-for>
-          </div>
-        </div>
-        <div style="background: #212126; border-radius: 12px; padding: 14px 16px;">
-          <p style="margin: 0 0 12px; font-size: 12px; color: #A1A1AA; line-height: 1.5;">{{mpartNote}}</p>
-          <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px;">
-            <sc-for list="{{mchips}}" as="c" hint-placeholder-count="10">
-              <div style="position: relative;">
-                <sc-if value="{{c.on}}" hint-placeholder-val="{{false}}"><button type="button" aria-pressed="true" onClick="{{c.pick}}" title="{{c.about}}" style="width: 100%; height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 1px solid #FF8A1F; border-radius: 10px; background: #2A1C10; color: #FFE6CC; font-size: 12px; cursor: pointer; padding: 0 6px; white-space: nowrap; overflow: hidden;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FF8A1F" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{c.icon}}"></path></svg>{{c.label}}</button></sc-if>
-                <sc-if value="{{c.off}}" hint-placeholder-val="{{true}}"><button type="button" aria-pressed="false" onClick="{{c.pick}}" title="{{c.about}}" style="width: 100%; height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 1px solid #34343B; border-radius: 10px; background: #19191D; color: #B4B4BC; font-size: 12px; cursor: pointer; padding: 0 6px; white-space: nowrap; overflow: hidden;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#B4B4BC" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{c.icon}}"></path></svg>{{c.label}}</button></sc-if>
-                <sc-if value="{{c.dis}}" hint-placeholder-val="{{false}}"><button type="button" disabled="disabled" title="{{c.about}}" style="width: 100%; height: 78px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px dashed #34343B; border-radius: 10px; background: transparent; color: #8B8B94; font-size: 12px; padding: 0 6px; white-space: nowrap;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#5A5A63" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{c.icon}}"></path></svg>{{c.label}}<span style="font-size: 10px;">asleep only</span></button></sc-if>
-                <button type="button" aria-label="{{c.playLabel}}" onClick="{{c.play}}" style="position: absolute; top: 5px; right: 5px; width: 24px; height: 24px; border-radius: 6px; border: 1px solid #34343B; background: #27272D; color: #ECECEF; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3l14 9-14 9z"></path></svg></button>
-              </div>
-            </sc-for>
-          </div>
-          <sc-if value="{{mfocus}}" hint-placeholder-val="{{false}}">
-            <div style="display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 12px; background: #19191D; border: 1px solid #2C2C33; border-radius: 10px;">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF8A1F" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{mfocusIcon}}"></path></svg>
-              <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 500;">{{mfocus}}</div><div style="font-size: 12px; color: #A1A1AA; margin-top: 2px; line-height: 1.45;">{{mfocusAbout}}</div></div>
-            </div>
-          </sc-if>
-          <p style="margin: 12px 0 0; font-size: 12px; color: #8B8B94;">{{mcount}}</p>
-        </div>
-      </sc-if>
-    </div>
-  </main>
-
-  <!-- ===== Preview column (always there) ===== -->
-  <aside class="vw-pv" aria-label="Preview" style="flex-shrink: 0; box-sizing: border-box; background: #0F0F12; border-left: 1px solid #26262C; display: flex; flex-direction: column; padding: 16px 18px 18px;">
-    <div style="display: flex; align-items: center; gap: 8px;">
-      <span style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; flex: 1;">PREVIEW</span>
-      <button type="button" aria-label="Close settings" style="width: 30px; height: 30px; border-radius: 8px; border: 1px solid #34343B; background: #1D1D21; color: #ECECEF; cursor: pointer; display: flex; align-items: center; justify-content: center;"><svg width="12" height="12" viewBox="0 0 12 12" stroke="#ECECEF" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M1 1l10 10M11 1L1 11"></path></svg></button>
-    </div>
-
-    <div onWheel="{{onWheel}}" style="height: 250px; margin-top: 6px; position: relative; overflow: hidden; border-radius: 10px;">
-      <div style="position: absolute; right: 0; top: 0; z-index: 1; display: flex; align-items: center; gap: 2px; padding: 3px; background: #141417; border: 1px solid #34343B; border-radius: 10px;">
-        <button type="button" aria-label="Zoom out" onClick="{{zoomOut}}" style="width: 26px; height: 26px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #ECECEF; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
-        <button type="button" aria-label="Reset zoom" onClick="{{zoomReset}}" style="height: 26px; min-width: 48px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #FFE6CC; font-family: 'JetBrains Mono', monospace; font-size: 11px; cursor: pointer; padding: 0 4px;">{{zoomLabel}}</button>
-        <button type="button" aria-label="Zoom in" onClick="{{zoomIn}}" style="width: 26px; height: 26px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #ECECEF; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14"></path></svg></button>
-      </div>
-      <svg width="100%" height="250" viewBox="0 0 264 250" role="img" aria-label="{{pvAria}}">
+    <!-- the preview: big, zoomable, with the state to show it in -->
+    <section class="pvbox" aria-label="Preview" onWheel="{{onWheel}}" style="position: relative; height: 42%; min-height: 200px; max-height: 420px; flex-shrink: 0; border-radius: 14px; background: #0F0F12; overflow: hidden;">
+      <canvas id="pvc" aria-label="{{pvAria}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: {{engineShow}};"></canvas>
+      <sc-if value="{{noEngine}}" hint-placeholder-val="{{false}}">
+      <svg width="100%" height="100%" viewBox="0 0 480 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="{{pvAria}}" style="display: block;">
         <defs>
           <radialGradient id="gl" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="{{pvCol}}" stop-opacity="{{glowA}}"></stop><stop offset="100%" stop-color="{{pvCol}}" stop-opacity="0"></stop></radialGradient>
-          <radialGradient id="hc" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#FFFFFF" stop-opacity="1"></stop><stop offset="45%" stop-color="#FFF6E8" stop-opacity=".85"></stop><stop offset="100%" stop-color="{{pvCol}}" stop-opacity="0"></stop></radialGradient>
+          <radialGradient id="hc" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#FFFFFF"></stop><stop offset="45%" stop-color="#FFF6E8" stop-opacity=".85"></stop><stop offset="100%" stop-color="{{pvCol}}" stop-opacity="0"></stop></radialGradient>
           <radialGradient id="s1" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#FFFFFF"></stop><stop offset="40%" stop-color="#9EC2FF" stop-opacity=".8"></stop><stop offset="100%" stop-color="#9EC2FF" stop-opacity="0"></stop></radialGradient>
           <radialGradient id="s2" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#FFFFFF"></stop><stop offset="40%" stop-color="#FFC266" stop-opacity=".8"></stop><stop offset="100%" stop-color="#FFC266" stop-opacity="0"></stop></radialGradient>
         </defs>
-        <g transform="translate(132 122) scale({{zoom}}) translate(-132 -122)">
-        <sc-if value="{{showOthers}}" hint-placeholder-val="{{true}}">
-          <ellipse cx="132" cy="122" rx="104" ry="112" fill="none" stroke="#26262C" stroke-dasharray="3 5"></ellipse>
-          <circle cx="40" cy="176" r="20" fill="url(#s1)"></circle>
-          <circle cx="40" cy="176" r="11" fill="none" stroke="#C8DAFF" stroke-width=".8" opacity=".8"></circle>
-          <circle cx="228" cy="92" r="18" fill="url(#s2)"></circle>
-          <circle cx="228" cy="92" r="10" fill="none" stroke="#FFD9A0" stroke-width=".8" opacity=".8"></circle>
-          <circle cx="150" cy="14" r="12" fill="url(#s1)"></circle>
-        </sc-if>
-        <g transform="translate(22 12)">
-          <circle cx="110" cy="110" r="{{glowR}}" fill="url(#gl)"></circle>
-          <g fill="none" stroke="{{pvCol}}" stroke-width="1.3" stroke-linejoin="round" opacity=".95">
-            <path d="M110 38L152.3 51.8L178.5 87.8L178.5 132.2L152.3 168.2L110 182L67.7 168.2L41.5 132.2L41.5 87.8L67.7 51.8Z"></path>
-            <path d="M110 72L146.1 98.3L132.3 140.7L87.7 140.7L73.9 98.3Z"></path>
-            <path d="M110 110L110 72M110 110L146.1 98.3M110 110L132.3 140.7M110 110L87.7 140.7M110 110L73.9 98.3"></path>
-            <path d="M110 72L67.7 51.8M110 72L110 38M110 72L152.3 51.8M146.1 98.3L152.3 51.8M146.1 98.3L178.5 87.8M146.1 98.3L178.5 132.2M132.3 140.7L178.5 132.2M132.3 140.7L152.3 168.2M132.3 140.7L110 182M87.7 140.7L110 182M87.7 140.7L67.7 168.2M87.7 140.7L41.5 132.2M73.9 98.3L41.5 132.2M73.9 98.3L41.5 87.8M73.9 98.3L67.7 51.8"></path>
+        <g transform="translate(240 150) scale({{zoom}}) translate(-240 -150)">
+          <sc-if value="{{others}}" hint-placeholder-val="{{true}}">
+            <ellipse cx="240" cy="150" rx="{{orbitRx}}" ry="{{orbitRy}}" fill="none" stroke="#26262C" stroke-dasharray="3 5"></ellipse>
+            <circle cx="{{sat1x}}" cy="{{sat1y}}" r="18" fill="url(#s1)"></circle>
+            <circle cx="{{sat2x}}" cy="{{sat2y}}" r="16" fill="url(#s2)"></circle>
+            <circle cx="{{sat3x}}" cy="{{sat3y}}" r="12" fill="url(#s1)"></circle>
+          </sc-if>
+          <g transform="translate(240 150) scale({{coreScale}}) translate(-110 -110)">
+            <circle cx="110" cy="110" r="{{glowR}}" fill="url(#gl)"></circle>
+            <g fill="none" stroke="{{pvCol}}" stroke-width="1.3" stroke-linejoin="round" opacity=".95">
+              <path d="M110 38L152.3 51.8L178.5 87.8L178.5 132.2L152.3 168.2L110 182L67.7 168.2L41.5 132.2L41.5 87.8L67.7 51.8Z"></path>
+              <path d="M110 72L146.1 98.3L132.3 140.7L87.7 140.7L73.9 98.3Z"></path>
+              <path d="M110 110L110 72M110 110L146.1 98.3M110 110L132.3 140.7M110 110L87.7 140.7M110 110L73.9 98.3"></path>
+              <path d="M110 72L67.7 51.8M110 72L110 38M110 72L152.3 51.8M146.1 98.3L152.3 51.8M146.1 98.3L178.5 87.8M146.1 98.3L178.5 132.2M132.3 140.7L178.5 132.2M132.3 140.7L152.3 168.2M132.3 140.7L110 182M87.7 140.7L110 182M87.7 140.7L67.7 168.2M87.7 140.7L41.5 132.2M73.9 98.3L41.5 132.2M73.9 98.3L41.5 87.8M73.9 98.3L67.7 51.8"></path>
+            </g>
+            <circle cx="110" cy="110" r="{{coreR}}" fill="url(#hc)"></circle>
           </g>
-          <circle cx="110" cy="110" r="{{coreR}}" fill="url(#hc)"></circle>
-        </g>
         </g>
       </svg>
-      <sc-if value="{{playing}}" hint-placeholder-val="{{false}}">
-        <div style="position: absolute; left: 0; bottom: 0; font-size: 11px; color: #FFB066; background: #1D1D21; border: 1px solid #34343B; border-radius: 6px; padding: 4px 8px;">▶ {{playing}}</div>
       </sc-if>
-    </div>
+      <button type="button" aria-label="Close settings" title="Close" style="position: absolute; right: 10px; top: 10px; width: 30px; height: 30px; border: 0; border-radius: 8px; background: #27272D; color: #B4B4BC; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
 
-    <div style="font-size: 11px; color: #8B8B94; margin: 4px 0 8px;">Show the main core as</div>
-    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px;">
-      <sc-for list="{{pvStates}}" as="o" hint-placeholder-count="6"><sc-if value="{{o.on}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 28px; border-radius: 8px; border: 1px solid #FF8A1F; background: #2E1D0E; color: #FFE6CC; cursor: pointer;">{{o.label}}</button></sc-if><sc-if value="{{o.off}}" hint-placeholder-val="{{true}}"><button type="button" onClick="{{o.pick}}" style="font-size: 12px; height: 28px; border-radius: 8px; border: 1px solid #2C2C33; background: #1D1D21; color: #B4B4BC; cursor: pointer;">{{o.label}}</button></sc-if></sc-for>
-    </div>
-
-    <div style="margin-top: auto;">
-      <sc-if value="{{isBox}}" hint-placeholder-val="{{false}}">
-        <div style="font-size: 11px; color: #8B8B94; margin-bottom: 6px;">The text box</div>
-        <div style="background: {{boxHex}}; border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; border: 1px solid #2C2C33;">
+      <sc-if value="{{showBox}}" hint-placeholder-val="{{false}}">
+        <div style="position: absolute; right: 52px; top: 14px; width: 42%; max-width: 300px; background: {{boxHex}}; border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; border: 1px solid #2C2C33;">
           <span style="width: 3px; border-radius: 2px; background: {{pvCol}}; flex-shrink: 0;"></span>
           <div style="min-width: 0;">
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; color: {{pvCol}};">vigil · {{pv}}</div>
+            <div style="font-family: Consolas, 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; color: {{pvCol}};">vigil · {{pv}}</div>
             <div style="font-family: {{boxFont}}; font-size: {{boxFontPx}}; color: {{boxText}}; margin-top: 4px; line-height: 1.45;">The satellites slide round the orbit and trail behind.</div>
           </div>
         </div>
       </sc-if>
-      <sc-if value="{{notBox}}" hint-placeholder-val="{{true}}">
-        <div style="font-size: 11px; color: #8B8B94; line-height: 1.6;">Drag the core to feel the gravity · scroll over it or use − / + to zoom up to 3× · click the % to reset.</div>
+      <sc-if value="{{playing}}" hint-placeholder-val="{{false}}">
+        <div style="position: absolute; left: 12px; top: 12px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #ECECEF; background: #18181BE6; border: 1.5px solid #FF8A1F; border-radius: 8px; padding: 4px 10px;">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="#FF8A1F" aria-hidden="true"><path d="M6 3l14 9-14 9z"></path></svg>{{playing}}</div>
       </sc-if>
+
+      <!-- bottom bar: state on the left, zoom on the right -->
+      <div style="position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <div role="group" aria-label="Show the main core as" style="display: {{pvStatesShow}}; gap: 4px; flex-wrap: wrap;">
+          <sc-for list="{{pvStates}}" as="o" hint-placeholder-count="6">
+            <button type="button" onClick="{{o.pick}}" aria-pressed="{{o.on}}" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 14px; box-sizing: border-box; border: 1.5px solid {{o.edge}}; background: #27272D; color: {{o.col}}; font-size: 12px;">
+              <span style="width: 7px; height: 7px; border-radius: 50%; background: {{o.dot}};"></span>{{o.label}}</button>
+          </sc-for>
+        </div>
+        <div style="flex: 1;"></div>
+        <div style="display: flex; align-items: center; gap: 2px; padding: 2px; background: #27272D; border-radius: 14px;">
+          <button type="button" aria-label="Zoom out" onClick="{{zoomOut}}" style="width: 26px; height: 26px; border: 0; border-radius: 13px; background: transparent; color: #ECECEF; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
+          <button type="button" aria-label="Reset zoom" title="Reset zoom" onClick="{{zoomReset}}" style="height: 26px; min-width: 46px; border: 0; border-radius: 13px; background: transparent; color: #ECECEF; font-size: 12px; padding: 0 4px; font-variant-numeric: tabular-nums;">{{zoomLabel}}</button>
+          <button type="button" aria-label="Zoom in" onClick="{{zoomIn}}" style="width: 26px; height: 26px; border: 0; border-radius: 13px; background: transparent; color: #ECECEF; display: flex; align-items: center; justify-content: center; padding: 0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14"></path></svg></button>
+        </div>
+      </div>
+    </section>
+
+    <!-- the page -->
+    <div style="flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 16px;">
+      <div style="display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px;">
+        <h1 style="margin: 0; font-size: 16px; font-weight: 600;">{{pageTitle}}</h1>
+        <span style="font-size: 12px; color: #8B8B94; flex: 1;">{{pageHint}}</span>
+        <button type="button" onClick="{{resetPage}}" style="height: 26px; padding: 0 10px; border: 0; border-radius: 13px; background: transparent; color: #8B8B94; font-size: 12px;">Reset</button>
+      </div>
+
+      <!-- LOOK, CLUSTER, REPLIES, PERFORMANCE: sections of rows, one template -->
+      <sc-if value="{{isRows}}" hint-placeholder-val="{{true}}">
+        <div class="rows two">
+          <sc-for list="{{sections}}" as="sec" hint-placeholder-count="2">
+            <section style="background: #212126; border-radius: 12px; padding: 2px 16px 4px; align-self: start;">
+              <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; padding: 12px 0 4px;">{{sec.title}}</div>
+              <sc-for list="{{sec.rows}}" as="r" hint-placeholder-count="3">
+                <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-height: 50px; padding: 7px 0; box-sizing: border-box; border-top: {{r.rule}};">
+                  <div style="flex: 1 1 130px; min-width: 0;">
+                    <div style="font-size: 13px;">{{r.label}}</div>
+                    <sc-if value="{{r.hint}}" hint-placeholder-val="{{false}}"><div style="font-size: 11.5px; color: #8B8B94; margin-top: 2px;">{{r.hint}}</div></sc-if>
+                  </div>
+                  <sc-if value="{{r.isSlider}}" hint-placeholder-val="{{false}}">
+                    <div style="display: flex; align-items: center; gap: 10px; flex: 0 1 250px; min-width: 170px;">
+                      <span style="font-size: 11px; color: #8B8B94; min-width: {{r.loW}}; text-align: right;">{{r.lo}}</span>
+                      <input type="range" min="0" max="100" value="{{r.v}}" onChange="{{r.set}}" aria-label="{{r.label}}" style="flex: 1; background: linear-gradient(to right, #FF8A1F {{r.v}}%, #34343B {{r.v}}%);">
+                      <span style="font-size: 11px; color: #8B8B94; min-width: {{r.hiW}}; font-variant-numeric: tabular-nums;">{{r.hi}}</span>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{r.isSeg}}" hint-placeholder-val="{{false}}">
+                    <div role="group" aria-label="{{r.label}}" style="display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end;">
+                      <sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.on}}" style="height: 28px; padding: 0 11px; border-radius: 14px; box-sizing: border-box; border: 1.5px solid {{o.edge}}; background: #27272D; color: {{o.col}}; font-size: 12px; white-space: nowrap;">{{o.label}}</button></sc-for>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{r.isToggle}}" hint-placeholder-val="{{false}}">
+                    <button type="button" role="switch" aria-checked="{{r.on}}" aria-label="{{r.label}}" onClick="{{r.toggle}}" style="width: 42px; height: 24px; border-radius: 12px; border: 0; background: {{r.bg}}; position: relative; padding: 0; flex-shrink: 0;"><span style="position: absolute; top: 3px; left: {{r.knobX}}; width: 18px; height: 18px; border-radius: 9px; background: {{r.knob}};"></span></button>
+                  </sc-if>
+                  <sc-if value="{{r.isTiles}}" hint-placeholder-val="{{false}}">
+                    <div role="group" aria-label="{{r.label}}" style="display: flex; gap: 6px;">
+                      <sc-for list="{{r.opts}}" as="o" hint-placeholder-count="4"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.on}}" aria-label="{{o.label}}" title="{{o.label}}" style="width: {{r.tileW}}; height: 40px; border-radius: 9px; box-sizing: border-box; border: 1.5px solid {{o.edge}}; background: #19191D; color: {{o.ink}}; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0; font-size: 12px;"><sc-if value="{{o.icon}}" hint-placeholder-val="{{true}}"><svg width="22" height="22" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="{{o.icon}}"></path></svg></sc-if><sc-if value="{{o.face}}" hint-placeholder-val="{{false}}"><span style="font-family: {{o.face}}; font-size: 15px;">Aa</span><span style="color: {{o.col}};">{{o.label}}</span></sc-if></button></sc-for>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{r.isSwatch}}" hint-placeholder-val="{{false}}">
+                    <div role="group" aria-label="{{r.label}}" style="display: flex; gap: 6px;">
+                      <sc-for list="{{r.opts}}" as="o" hint-placeholder-count="5"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.on}}" aria-label="{{r.label}}: {{o.label}}" title="{{o.label}}" style="width: 26px; height: 26px; border-radius: 7px; box-sizing: border-box; border: 1.5px solid {{o.edge}}; background: {{o.bg}}; color: {{o.fg}}; font-size: 10.5px; padding: 0;">{{o.text}}</button></sc-for>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </section>
+          </sc-for>
+        </div>
+        <sc-if value="{{pageNote}}" hint-placeholder-val="{{false}}"><p style="margin: 10px 2px 0; font-size: 12px; color: #8B8B94;">{{pageNote}}</p></sc-if>
+      </sc-if>
+
+      <!-- MOTIONS: every state at a glance on the left, the chosen one's motions on the right -->
+      <sc-if value="{{isMotions}}" hint-placeholder-val="{{false}}">
+        <div class="mgrid">
+          <section style="background: #212126; border-radius: 12px; padding: 8px;">
+            <sc-for list="{{mrows}}" as="g" hint-placeholder-count="11">
+              <sc-if value="{{g.head}}" hint-placeholder-val="{{false}}"><div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; padding: 8px 8px 4px;">{{g.head}}</div></sc-if>
+              <button type="button" onClick="{{g.pick}}" aria-pressed="{{g.on}}" style="width: 100%; display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 10px; border-radius: 9px; box-sizing: border-box; border: 1.5px solid {{g.edge}}; background: transparent; color: {{g.col}}; font-size: 13px; text-align: left;">
+                <span style="width: 8px; height: 8px; border-radius: 50%; background: {{g.dot}}; flex-shrink: 0;"></span>
+                <span style="flex: 1; min-width: 0; white-space: nowrap;">{{g.label}}</span>
+                <span style="display: flex; gap: 3px; align-items: center;"><sc-for list="{{g.icons}}" as="ic" hint-placeholder-count="3"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{{g.ink}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic}}"></path></svg></sc-for><span style="font-size: 11px; color: #8B8B94;">{{g.more}}</span><sc-if value="{{g.acts}}" hint-placeholder-val="{{false}}"><span title="{{g.acts}} actions" style="display: flex; align-items: center; gap: 2px; margin-left: 6px; font-size: 11px; color: #8B8B94;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{sparkle}}"></path></svg>{{g.acts}}</span></sc-if></span>
+              </button>
+            </sc-for>
+          </section>
+          <section style="background: #212126; border-radius: 12px; padding: 14px 16px 16px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span style="width: 10px; height: 10px; border-radius: 50%; background: {{mdot}};"></span>
+              <span style="font-size: 15px; font-weight: 600; flex: 1;">{{mstateName}}</span>
+              <button type="button" onClick="{{tryIt}}" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 14px; box-sizing: border-box; border: 1.5px solid transparent; background: #27272D; color: #ECECEF; font-size: 12px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3l14 9-14 9z"></path></svg>Try it</button>
+              <button type="button" onClick="{{resetState}}" style="height: 28px; padding: 0 10px; border-radius: 14px; border: 0; background: transparent; color: #8B8B94; font-size: 12px;">Reset</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; min-height: 40px; margin: 10px 0 2px; padding: 8px 12px; border-radius: 9px; background: #19191D;">
+              <sc-if value="{{minfo.icon}}" hint-placeholder-val="{{false}}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF8A1F" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink: 0;"><path d="{{minfo.icon}}"></path></svg></sc-if>
+              <div style="min-width: 0; font-size: 12px; color: #A1A1AA; line-height: 1.4;"><b style="color: #ECECEF; font-weight: 600;">{{minfo.name}}</b> {{minfo.text}}</div>
+            </div>
+            <sc-for list="{{mcards}}" as="c" hint-placeholder-count="2">
+              <div style="display: flex; align-items: baseline; gap: 8px; margin: 16px 0 8px;">
+                <span style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94;">{{c.title}}</span>
+                <span style="font-size: 12px; color: #8B8B94;">{{c.hint}}</span>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px;">
+              <sc-for list="{{c.used}}" as="t" hint-placeholder-count="4">
+                <button type="button" onClick="{{t.pick}}" onMouseEnter="{{t.hover}}" onMouseLeave="{{unhover}}" aria-pressed="true" disabled="{{t.dis}}" aria-label="{{t.label}}: in use, click to remove" style="height: 58px; border-radius: 10px; box-sizing: border-box; border: 1.5px {{t.dash}} {{t.edge}}; background: #19191D; color: {{t.col}}; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; font-size: 11.5px; padding: 0 4px; white-space: nowrap; overflow: hidden;"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="{{t.ink}}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{t.icon}}"></path></svg>{{t.label}}</button>
+              </sc-for>
+                <sc-if value="{{c.none}}" hint-placeholder-val="{{false}}"><div style="grid-column: 1 / -1; font-size: 12px; color: #8B8B94; padding: 6px 0;">None. Pick from below.</div></sc-if>
+              </div>
+              <div style="display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; font-size: 10.5px; letter-spacing: .06em; color: #6E6E78;"><span>MORE</span><span style="flex: 1; height: 1px; background: #2C2C33;"></span></div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px;">
+              <sc-for list="{{c.rest}}" as="t" hint-placeholder-count="4">
+                <button type="button" onClick="{{t.pick}}" onMouseEnter="{{t.hover}}" onMouseLeave="{{unhover}}" aria-pressed="false" disabled="{{t.dis}}" aria-label="{{t.label}}: click to use" style="height: 58px; border-radius: 10px; box-sizing: border-box; border: 1.5px {{t.dash}} {{t.edge}}; background: #19191D; color: {{t.col}}; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; font-size: 11.5px; padding: 0 4px; white-space: nowrap; overflow: hidden;"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="{{t.ink}}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{t.icon}}"></path></svg>{{t.label}}</button>
+              </sc-for>
+              </div>
+            </sc-for>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- SHORTCUTS -->
+      <sc-if value="{{isKeys}}" hint-placeholder-val="{{false}}">
+        <div class="rows two">
+          <sc-for list="{{kgroups}}" as="g" hint-placeholder-count="3">
+            <div style="background: #212126; border-radius: 12px; padding: 10px 16px 6px;">
+              <div style="font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8B8B94; margin-bottom: 2px;">{{g.title}}</div>
+              <sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
+                <div style="display: flex; align-items: center; gap: 10px; min-height: 44px; border-top: {{r.rule}}; font-size: 13px;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink: 0;"><path d="{{r.icon}}"></path></svg>
+                  <span style="flex: 1; min-width: 0;" title="{{r.note}}">{{r.name}}<sc-if value="{{r.warn}}" hint-placeholder-val="{{false}}"><span style="display: block; font-size: 11px; color: #FFB066;">{{r.warn}}</span></sc-if></span>
+                  <sc-if value="{{r.isMouse}}" hint-placeholder-val="{{false}}">
+                    <sc-for list="{{r.mods}}" as="o" hint-placeholder-count="4"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.on}}" aria-label="{{r.name}}: hold {{o.label}}" style="height: 26px; min-width: 40px; padding: 0 7px; border-radius: 13px; box-sizing: border-box; border: 1.5px solid {{o.edge}}; background: #27272D; color: {{o.col}}; font-size: 11.5px;">{{o.label}}</button></sc-for>
+                    <span style="font-size: 12px; color: #8B8B94; width: 52px;">+ {{r.gesture}}</span>
+                  </sc-if>
+                  <sc-if value="{{r.recording}}" hint-placeholder-val="{{false}}">
+                    <button type="button" autoFocus="{{true}}" onKeyDown="{{r.capture}}" onBlur="{{r.cancel}}" aria-label="Press the new shortcut for {{r.name}}" style="height: 28px; padding: 0 12px; border-radius: 8px; border: 1.5px dashed #FF8A1F; background: #27272D; color: #ECECEF; font-size: 12px;">Press keys · Esc cancels</button>
+                  </sc-if>
+                  <sc-if value="{{r.isKeys}}" hint-placeholder-val="{{true}}">
+                    <button type="button" onClick="{{r.record}}" disabled="{{r.fixed}}" aria-label="{{r.name}}: {{r.keyText}}, click to change" title="{{r.tip}}" style="display: flex; align-items: center; gap: 4px; height: 30px; padding: 0 4px; border-radius: 8px; box-sizing: border-box; border: 1.5px solid {{r.edge}}; background: transparent;">
+                      <sc-for list="{{r.keys}}" as="k" hint-placeholder-count="3"><kbd style="min-width: 24px; height: 22px; box-sizing: border-box; padding: 0 6px; border-radius: 5px; border: 1px solid #44444C; border-bottom-width: 2px; background: #27272D; color: #ECECEF; font-family: inherit; font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center;">{{k}}</kbd></sc-for>
+                      <sc-if value="{{r.unset}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: #8B8B94; padding: 0 6px;">Set…</span></sc-if>
+                    </button>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
     </div>
-  </aside>
-  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="position: absolute; right: 4px; bottom: 4px; cursor: nwse-resize;"><path d="M13 5L5 13M13 9L9 13M13 1L1 13" stroke="#55555E" stroke-width="1.2" stroke-linecap="round"></path></svg>
+  </main>
+  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="position: absolute; right: 3px; bottom: 3px; cursor: nwse-resize;"><path d="M13 5L5 13M13 9L9 13M13 1L1 13" stroke="#55555E" stroke-width="1.2" stroke-linecap="round"></path></svg>
 </div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1080,"height":720}}'>
+// Lucide icons (ISC licence), each as one path
+const CIR = (cx, cy, r) => 'M' + (cx - r) + ' ' + cy + 'a' + r + ' ' + r + ' 0 1 0 ' + (2 * r) + ' 0a' + r + ' ' + r + ' 0 1 0 ' + (-2 * r) + ' 0';
+const LN = (a, b, c, d) => 'M' + a + ' ' + b + 'L' + c + ' ' + d;
+const PL = (t, z) => { const n = t.trim().split(/[\s,]+/).map(Number), o = []; for (let i = 0; i < n.length; i += 2) o.push(n[i] + ' ' + n[i + 1]); return 'M' + o.join('L') + (z ? 'Z' : ''); };
+const RR = (x, y, w, h, r) => 'M' + (x + r) + ' ' + y + 'h' + (w - 2 * r) + 'a' + r + ' ' + r + ' 0 0 1 ' + r + ' ' + r + 'v' + (h - 2 * r) + 'a' + r + ' ' + r + ' 0 0 1 ' + (-r) + ' ' + r + 'h' + (-(w - 2 * r)) + 'a' + r + ' ' + r + ' 0 0 1 ' + (-r) + ' ' + (-r) + 'v' + (-(h - 2 * r)) + 'a' + r + ' ' + r + ' 0 0 1 ' + r + ' ' + (-r) + 'Z';
+const IC = {
+  palette: 'M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z' + CIR(13.5, 6.5, .5) + CIR(17.5, 10.5, .5) + CIR(6.5, 12.5, .5) + CIR(8.5, 7.5, .5),
+  message: 'M7.9 20A9 9 0 1 0 4 16.1L2 22Z',
+  gauge: 'm12 14 4-4M3.34 19a10 10 0 1 1 17.32 0',
+  activity: 'M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2',
+  eye: 'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0' + CIR(12, 12, 3),
+  puzzle: 'M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z',
+  blend: CIR(9, 9, 7) + CIR(15, 15, 7),
+  rotateCw: 'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5',
+  rotateCcw: 'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5',
+  refresh: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5',
+  swords: PL('14.5 17.5 3 6 3 3 6 3 17.5 14.5') + LN(13, 19, 19, 13) + LN(16, 16, 20, 20) + LN(19, 21, 21, 19) + PL('14.5 6.5 18 3 21 3 21 6 17.5 9.5') + LN(5, 14, 9, 18) + LN(7, 17, 4, 20) + LN(3, 19, 5, 21),
+  cog: 'M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM12 2v2M12 22v-2m5-1.34-1-1.73M11 10.27 7 3.34m13.66 13.66-1.73-1M3.34 7l1.73 1M14 12h8M2 12h2m16.66-5-1.73 1M3.34 17l1.73-1M17 3.34l-1 1.73M11 13.73l-4 6.93',
+  orbit: CIR(12, 12, 3) + CIR(19, 5, 2) + CIR(5, 19, 2) + 'M10.4 21.9a10 10 0 0 0 9.941-15.416M13.5 2.1a10 10 0 0 0-9.841 15.416',
+  dna: 'm10 16 1.5 1.5M14 8l-1.5-1.5M15 2c-1.798 1.998-2.518 3.995-2.807 5.993m4.307 2.507 1 1M17 6l-2.891-2.891M2 15c6.667-6 13.333 0 20-6m-2 0 .891.891M3.109 14.109 4 15m2.5-2.5 1 1M7 18l2.891 2.891M9 22c1.798-1.998 2.518-3.995 2.807-5.993',
+  keyboard: RR(2, 4, 20, 16, 2) + 'M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10',
+  hammer: 'm15 12-8.373 8.373a1 1 0 1 1-3-3L12 9m6 6 4-4m-.5.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5',
+  grid: RR(3, 3, 18, 18, 2) + 'M3 9h18M3 15h18M9 3v18M15 3v18',
+  arrows: 'm16 3 4 4-4 4M20 7H4m4 14-4-4 4-4M4 17h16',
+  minimize: PL('4 14 10 14 10 20') + PL('20 10 14 10 14 4') + LN(14, 10, 21, 3) + LN(3, 21, 10, 14),
+  fish: 'M6.5 12c.94-3.46 4.94-6 8.5-6 3.56 0 6.06 2.54 7 6-.94 3.47-3.44 6-7 6s-7.56-2.53-8.5-6ZM18 12v.5M16 17.93a9.77 9.77 0 0 1 0-11.86M7 10.67C7 8 5.58 5.97 2.73 5.5c-1 1.5-1 5 .23 6.5-1.24 1.5-1.24 5-.23 6.5C5.58 18.03 7 16 7 13.33',
+  tower: 'M4.9 16.1C1 12.2 1 5.8 4.9 1.9M7.8 4.7a6.14 6.14 0 0 0-.8 7.5' + CIR(12, 9, 2) + 'M16.9 4.7a6.14 6.14 0 0 1 .8 7.5M19.1 1.9a9.96 9.96 0 0 1 0 14.1M9.5 18h5m-6.5 4 4-11 4 11',
+  bell: 'M10.268 21a2 2 0 0 0 3.464 0M22 8c0-2.3-.8-4.3-2-6M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326M4 2C2.8 3.7 2 5.7 2 8',
+  unlock: RR(3, 11, 18, 11, 2) + 'M7 11V7a5 5 0 0 1 9.9-1',
+  lock: RR(3, 11, 18, 11, 2) + 'M7 11V7a5 5 0 0 1 10 0v4',
+  flower: CIR(12, 12, 3) + 'M12 16.5A4.5 4.5 0 1 1 7.5 12 4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 1 1 4.5 4.5 4.5 4.5 0 1 1-4.5 4.5M12 7.5V9m-4.5 3H9m7.5 0H15m-3 4.5V15M8 8l1.88 1.88M14.12 9.88 16 8M8 16l1.88-1.88M14.12 14.12 16 16',
+  chevrons: 'm7 6 5 5 5-5m-10 7 5 5 5-5',
+  moon: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z',
+  hole: CIR(12, 12, 10) + CIR(12, 12, 1),
+  radio: 'M4.9 19.1C1 15.2 1 8.8 4.9 4.9M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5' + CIR(12, 12, 2) + 'M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5M19.1 4.9C23 8.8 23 15.1 19.1 19',
+  mic: 'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM19 10v2a7 7 0 0 1-14 0v-2M12 19v3',
+  binary: RR(14, 14, 4, 6, 2) + RR(6, 4, 4, 6, 2) + 'M6 20h4M14 10h4M6 14h2v6M14 4h2v6',
+  zap: 'M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z',
+  scanEye: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2' + CIR(12, 12, 1) + 'M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0',
+  vibrate: 'm2 8 2 2-2 2 2 2-2 2m20-8-2 2 2 2-2 2 2 2' + RR(8, 5, 8, 14, 1),
+  sunDim: CIR(12, 12, 4) + 'M12 4h.01M20 12h.01M12 20h.01M4 12h.01M17.657 6.343h.01M17.657 17.657h.01M6.343 17.657h.01M6.343 6.343h.01',
+  crosshair: CIR(12, 12, 10) + LN(22, 12, 18, 12) + LN(6, 12, 2, 12) + LN(12, 6, 12, 2) + LN(12, 22, 12, 18),
+  step: LN(6, 4, 6, 20) + PL('10 4 20 12 10 20', true),
+  unfold: 'M12 22v-6M12 8V2M4 12H2m8 0H8m8 0h-2m8 0h-2m-5 7-3 3-3-3m6-14-3-3-3 3',
+  scan: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
+  triangle: 'M13.73 4a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z',
+  alert: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01',
+  waves: 'M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1',
+  sparkles: 'M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0zM20 3v4M22 5h-4M4 17v2M5 18H3',
+  layers: 'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83zM2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17',
+  eyeOff: 'M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49M14.084 14.158a3 3 0 0 1-4.242-4.242M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143M2 2l20 20',
+  reply: 'M20 18v-2a4 4 0 0 0-4-4H4M9 17l-5-5 5-5',
+  volume: 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0-12.728',
+  sliders: 'M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4',
+  move: 'M12 2v20m-3-17 3-3 3 3m-6 14 3 3 3-3M2 12h20M5 9l-3 3 3 3m14-6 3 3-3 3',
+  hand: 'M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15',
+  pointer: 'M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z',
+  send: 'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11zM21.854 2.147l-10.94 10.939',
+  newline: 'M9 10l-5 5 5 5M20 4v7a4 4 0 0 1-4 4H4',
+  x: 'M18 6 6 18M6 6l12 12',
+};
+const MOT = {
+  'Puzzle': ['puzzle', 'One layer rises in pieces; both turn like a cube being solved.'], 'Smooth puzzle': ['blend', 'The puzzle with eased turns.'],
+  'Long spin': ['rotateCw', 'One layer spins three turns, the other spins back.'], 'Blades': ['swords', 'Triangles float out behind and smash across the front in pairs.'],
+  'Oracle': ['eye', 'Calm; now and then a line of light climbs it.'], 'Engine': ['cog', 'A turbine belt runs round while the caps fire like pistons.'],
+  'Gyro': ['orbit', 'Two belts at right angles run against each other.'], 'Helix': ['dna', 'A spiral of lifted patches climbs the turning shell.'],
+  'Typewriter': ['keyboard', 'Patches pop out row by row like keys.'], 'Forge': ['hammer', 'Pieces rise glowing and come down hard.'],
+  'Loom': ['grid', 'Two belts cross like warp and weft.'], 'Conveyor': ['arrows', 'Two rings take turns stepping one slot on.'],
+  'Compressor': ['minimize', 'Squeezed flat in three clicks, then vents.'], 'Swimmers': ['fish', 'Two fish swim just under the surface.'],
+  'Beacon': ['tower', 'A beam sweeps round and flares facing you.'], 'Knock': ['bell', 'Taps twice toward you, then pauses.'],
+  'Unlock': ['unlock', 'Bursts open, turns, locks back click by click.'], 'Bloom': ['flower', 'Opens ring by ring like a flower and seals.'],
+  'Zip': ['chevrons', 'A zipper runs down a spiral snapping patches shut.'], 'Dormant': ['moon', 'Drawn in, barely turning, a faint scan.'],
+  'Black hole': ['hole', 'Bursts apart and falls into a void. Asleep only.'], 'Broadcast': ['radio', 'Patches rise and fall with the voice.'],
+  'Receiver': ['mic', 'Front patches open with the microphone level.'], 'Decoding': ['binary', 'Steps 36° while a scan plane reads it.'],
+  'Locked': ['lock', 'Stops square to you, drawn in and still.'], 'Crazy': ['zap', 'Fits of spikes, jerks and flicking patches.'],
+  'look': ['eye', 'Glances one way, then the other.'], 'peek': ['scanEye', 'Leans aside to see past something.'], 'twirl': ['refresh', 'Spins fast and coasts down.'],
+  'shiver': ['vibrate', 'A quick shudder.'], 'blink': ['sunDim', 'Dims once or twice.'], 'align': ['crosshair', 'Turns a vertex to you and holds.'],
+  'step': ['step', 'Two 72° snaps, like a lock.'], 'unfold': ['unfold', 'A cut opens down the sphere and closes.'], 'scan': ['scan', 'A plane sweeps top to bottom.'],
+  'spike': ['triangle', 'Sharp spikes snap out and back.'], 'crazy': ['alert', 'The ERROR fit, rarely.'], 'ripple': ['waves', 'A wave of patches runs across.'],
+  'orbit': ['orbit', 'A patch flies once round the core.'], 'petal': ['flower', 'Patches round a node open and close.'],
+  'constellation': ['sparkles', 'A chain of nodes lights up and fades.'], 'tumble': ['rotateCcw', 'A slow half turn that settles exactly.'],
+};
+const STATECOL = { Idle: '#7FA8FF', Thinking: '#FF9A3C', Working: '#3CCBF4', 'Needs you': '#FF7043', Done: '#5FD68A', Asleep: '#8C7DFF', Speaking: '#4FD6C8', Listening: '#5ED17A', Transcribing: '#B48CFF', Away: '#7A6CF0', Error: '#F04848' };
+const ROUT = ['Oracle', 'Puzzle', 'Smooth puzzle', 'Long spin', 'Blades', 'Engine', 'Gyro', 'Helix', 'Typewriter', 'Forge', 'Loom', 'Conveyor', 'Compressor', 'Swimmers', 'Beacon', 'Knock', 'Unlock', 'Bloom', 'Zip', 'Dormant', 'Black hole', 'Broadcast', 'Receiver', 'Decoding', 'Locked', 'Crazy'];
+const ACT = ['look', 'peek', 'twirl', 'shiver', 'blink', 'align', 'step', 'unfold', 'scan', 'spike', 'crazy', 'ripple', 'orbit', 'petal', 'constellation', 'tumble'];
+// the default map, as motion_map_default in the C: each state its own routines; Idle every action, Asleep shiver
+const DSEL = { Idle: ['Oracle'], Thinking: ['Puzzle', 'Smooth puzzle', 'Long spin', 'Blades'], Working: ['Engine', 'Gyro', 'Helix', 'Typewriter', 'Forge', 'Loom', 'Conveyor', 'Compressor'], 'Needs you': ['Swimmers', 'Beacon', 'Knock'], Done: ['Unlock', 'Bloom', 'Zip'], Asleep: ['Dormant', 'Black hole'], Speaking: ['Broadcast'], Listening: ['Receiver'], Transcribing: ['Decoding'], Away: ['Locked'], Error: ['Crazy'] };
+const DACT = { Idle: ACT.slice(), Asleep: ['shiver'] };
+const KEYS = [
+  { g: 0, id: 'mode', name: 'One core / all cores', icon: 'layers', def: ['Ctrl', 'Alt', 'C'] },
+  { g: 0, id: 'hide', name: 'Show or hide Vigil', icon: 'eyeOff', def: ['Ctrl', 'Alt', 'V'], taken: true },
+  { g: 0, id: 'reply', name: 'Reply to the main core', icon: 'reply', def: ['Ctrl', 'Alt', 'R'] },
+  { g: 0, id: 'speak', name: 'Read the reply aloud', icon: 'volume', def: [], note: 'macOS only so far' },
+  { g: 0, id: 'settings', name: 'Open Settings', icon: 'sliders', def: [] },
+  { g: 2, id: 'send', name: 'Send', icon: 'send', def: ['Enter'] },
+  { g: 2, id: 'nl', name: 'New line', icon: 'newline', def: ['Shift', 'Enter'] },
+  { g: 2, id: 'close', name: 'Close', icon: 'x', def: ['Esc'], fixed: true },
+];
+const MOUSE = [
+  { id: 'move', name: 'Move', icon: 'move', def: 'Alt', gesture: 'drag' },
+  { id: 'carry', name: 'Carry', icon: 'hand', def: 'Alt', gesture: 'click' },
+  { id: 'type', name: 'Type a reply', icon: 'pointer', def: '—', gesture: '2× click' },
+  { id: 'spin', name: 'Spin', icon: 'rotateCw', def: '—', gesture: 'drag' },
+];
+const MODS = ['—', 'Alt', 'Ctrl', 'Shift'];
+const KNAME = { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift', Meta: 'Win', Escape: 'Esc', Enter: 'Enter', ' ': 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+// every setting's default, and which page it is on (for the page's Reset)
+const DEFAULTS = () => ({ shape: 'Geodesic', glow: 50, size: 34, core: 34, frame: 'Segments', mode: 'Single core', others: true, names: 'On hover', gravity: 34, rest: '2 min', scroll: 'Roll', live: false,
+  font: 'Terminal', tsize: 30, bsize: 40, boxc: 'Black', textc: 'Auto', opens: 'Next to core', sel: {}, act: {},
+  keys: Object.fromEntries(KEYS.map((k) => [k.id, k.def])), mods: Object.fromEntries(MOUSE.map((m) => [m.id, m.def])), smooth: 'Balanced' });
+const ON_PAGE = { look: ['shape', 'glow', 'size', 'core', 'frame'], cluster: ['mode', 'others', 'names', 'gravity', 'rest', 'scroll'], replies: ['font', 'tsize', 'bsize', 'boxc', 'textc', 'opens'], motions: ['sel', 'act'], keys: ['keys', 'mods'], perf: ['smooth', 'live'] };
+const PAGES = [['look', 'Look', 'palette', 'how a core looks'], ['cluster', 'Cluster', 'orbit', 'the cores and their orbit'], ['replies', 'Replies', 'message', 'the box with the last reply'], ['motions', 'Motions', 'activity', 'what each state may play'], ['keys', 'Shortcuts', 'keyboard', 'click a key to change it'], ['perf', 'Performance', 'gauge', 'smoother costs more CPU']];
+const ON = '#FF8A1F', OFF = 'transparent', TXT_ON = '#ECECEF', TXT_OFF = '#B4B4BC';
+
 class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = Object.assign({ side: true, page: 'look', zoom: 1, pv: 'Thinking', mstate: 'Thinking', mpart: 'Routines', playing: '', rec: null }, DEFAULTS());
+    // #motions, #keys, … opens on that page; #fold starts with the sidebar folded (for screenshots)
+    const h = (typeof location !== 'undefined' ? location.hash.slice(1) : '').split(',');
+    for (const x of h) { if (PAGES.some((q) => q[0] === x)) this.state.page = x; if (x === 'fold') this.state.side = false; }
+  }
+  componentDidMount() {
+    if (!window.VC) return;
+    const now = VC.now();
+    this.eng = { main: VC.create(now), sats: [VC.create(now), VC.create(now), VC.create(now)], last: now, off: {} };
+    ['Working', 'Idle', 'Thinking'].forEach((st, i) => VC.state(this.eng.sats[i], VC.st(st)));
+    const loop = () => { this.drawEngine(); requestAnimationFrame(loop); };
+    for (let i = 0; i < 30; i++) this.drawEngine(); // a first picture at once
+    requestAnimationFrame(loop);
+  }
+  playReal(name) {
+    if (!this.eng) return;
+    const rt = VC.rt(name), w = VC.whim(name);
+    VC.state(this.eng.main, VC.st(this.state.mstate));
+    if (rt >= 0) VC.play(this.eng.main, rt); else if (w > 0) VC.playWhim(this.eng.main, w, VC.now());
+  }
+  drawEngine() {
+    const cv = document.getElementById('pvc'); if (!cv || !this.eng) return;
+    const s = this.state, E = this.eng, now = VC.now(), dt = Math.min(.05, now - E.last); E.last = now;
+    const dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+    if (!W || !H) return;
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    const shown = s.page === 'motions' ? s.mstate : s.pv;
+    VC.state(E.main, VC.st(shown));
+    VC.tick(now, dt);
+    const ctx = cv.getContext('2d'); ctx.clearRect(0, 0, W, H);
+    const R = Math.min(W, H) * .2 * (.7 + s.size / 100 * .6) * s.zoom, glow = .4 + s.glow / 100 * 1.4, core = .2 + s.core / 100 * .3;
+    const put = (i, px, x, y) => { // the C draws a px square; it goes onto the preview centred at x, y
+      px = Math.max(8, Math.min(1600, Math.round(px))); const img = VC.render(i, px, now, glow, core); if (!img) return;
+      const o = E.off[i] || (E.off[i] = document.createElement('canvas')); if (o.width !== px) { o.width = o.height = px; }
+      o.getContext('2d').putImageData(img, 0, 0); ctx.drawImage(o, Math.round(x - px / 2), Math.round(y - px / 2));
+    };
+    if (s.others) { // the satellites on their orbit: looser gravity, a wider orbit
+      const g = s.gravity / 100, rx = R * (2.3 + (1 - g) * .8), ry = rx * .62, t = now * (.25 + g * .2);
+      E.sats.forEach((i, k) => { const a = t + k * 2.1; put(i, R * .34 / VC.SHELL_FRAC, W / 2 + Math.cos(a) * rx, H / 2 + Math.sin(a) * ry); });
+    }
+    put(E.main, R / VC.SHELL_FRAC, W / 2, H / 2);
+  }
   renderVals() {
-    const s = this.state || {};
-    const D = { zoom: 1, mfocus: '', tab: 'look', q: '', shape: 'Geodesic', glow: 'Normal', core: 'M', size: 'M', frame: 'Segments', mode: 'Single core', others: true, names: 'On hover', gravity: 'Loose', font: 'Terminal', tsize: 'M', bsize: 'M', boxc: 'Black', textc: 'Auto', opens: 'Next to core', scroll: 'Roll', rest: '2 min', smooth: 'Balanced', live: false, pv: 'Thinking', mstate: 'Thinking', mpart: 'Routines', playing: '', cIdle: 15, cThink: 30, cWork: 30, cSleep: 6, cHand: 60 };
-    const v = (k) => (s[k] !== undefined ? s[k] : D[k]);
-    const set = (k, x) => () => this.setState({ [k]: x });
-    const seg = (k, opts) => opts.map((o) => ({ label: o, on: v(k) === o, off: v(k) !== o, pick: set(k, o) }));
+    const s = this.state, set = (k, x) => () => this.setState({ [k]: x });
+    const chip = (k, opts) => opts.map((o) => ({ label: o, on: s[k] === o, edge: s[k] === o ? ON : OFF, col: s[k] === o ? TXT_ON : TXT_OFF, pick: set(k, o) }));
+    const slide = (k) => (e) => this.setState({ [k]: +e.target.value });
+    const pvCol = STATECOL[s.pv], z = s.zoom, setZoom = (x) => this.setState({ zoom: Math.round(Math.max(0.6, Math.min(3, x)) * 100) / 100 });
 
-    const TABS = [['look', 'Look', 'How a core looks.'], ['orbit', 'Cluster', 'The main core, the small cores round it, and where they sit.'], ['box', 'Text box', 'The box that shows a session’s last reply.'], ['mouse', 'Mouse & away', 'What the mouse does to a core, and when the cores rest.'], ['keys', 'Shortcuts', 'Every shortcut is yours to change: click Change and press the keys. For the mouse, pick the key to hold.'], ['perf', 'Performance', 'How often each core’s picture is redrawn. Higher is smoother and costs more CPU.'], ['motions', 'Motions', 'Which motions each state may play.']];
-    const tab = v('tab');
-    const q = v('q');
-    const searching = q.trim().length > 0;
-    const tabs = TABS.map(([id, label]) => ({ label, on: !searching && tab === id, off: searching || tab !== id, pick: () => this.setState({ tab: id, q: '' }) }));
-    const cur = TABS.find((t) => t[0] === tab);
-
-    const INDEX = [
-      ['Shape', 'Dodecahedron, buckyball or geodesic shell', 'look'], ['Glow', 'Light round the shell', 'look'], ['Inner core', 'The bright heart', 'look'], ['Size', 'How big the main core is', 'look'], ['Focus frame', 'Frame round a carried or rested-on core', 'look'],
-      ['Mode', 'Single core or all cores', 'orbit'], ['Other sessions', 'Small cores round the main one', 'orbit'], ['Names over cores', 'Labels in all-cores mode', 'orbit'], ['Gravity', 'How the orbit holds the small cores', 'orbit'], ['Reset positions', 'Forget where cores were put', 'orbit'],
-      ['Font', 'Terminal or clean', 'box'], ['Text size', 'Reply text size', 'box'], ['Box size', 'How large the box grows', 'box'], ['Box colour', 'Background of the text box', 'box'], ['Text colour', 'Colour of reply text', 'box'], ['Opens', 'Next to the core or the middle of the screen', 'box'],
-      ['Scroll on a core', 'Wheel rolls or turns the core', 'mouse'], ['Shortcuts', 'Change any key or mouse modifier', 'keys'], ['Switch one / all cores', 'Ctrl+Alt+C', 'keys'], ['Move a core', 'Alt + drag', 'keys'], ['Carry a core', 'Alt + click', 'keys'], ['Reply', 'Double-click a core, or a key', 'keys'], ['Rest after', 'Away time before STANDBY', 'mouse'],
-      ['Smoothness', 'Frame rate presets and custom fps', 'perf'], ['FPS', 'Pictures per second per state', 'perf'], ['Live numbers', 'Ticks, pictures and CPU per second', 'perf'],
-      ['Routines', 'What each state runs', 'motions'], ['Actions', 'Little moves while left alone', 'motions']
-    ];
-    const ql = q.trim().toLowerCase();
-    const results = searching ? INDEX.filter(([t, d]) => (t + ' ' + d).toLowerCase().includes(ql)).map(([t, d, id]) => ({ t, d, tabName: TABS.find((x) => x[0] === id)[1], pick: () => this.setState({ tab: id, q: '' }) })) : [];
-
-    const SHAPES = [['Dodeca', 'M14 3L24.5 10.6L20.5 23H7.5L3.5 10.6Z'], ['Bucky', 'M14 3A11 11 0 1 0 14.01 3M14 8L19.7 12.2L17.5 19H10.5L8.3 12.2Z'], ['Geodesic', 'M14 2.5L24 8.3V19.7L14 25.5L4 19.7V8.3ZM14 2.5V25.5M4 8.3L24 19.7M24 8.3L4 19.7'], ['Fine', 'M14 3A11 11 0 1 0 14.01 3M14 3V25M3 14H25M6.2 6.2L21.8 21.8M21.8 6.2L6.2 21.8']];
-    const shapes = SHAPES.map(([l, icon]) => ({ label: l, icon, on: v('shape') === l, off: v('shape') !== l, pick: set('shape', l) }));
-
-    const BOX = [['Black', '#0E0E10'], ['Graphite', '#26262B'], ['Navy', '#17203A'], ['Plum', '#2A1F3D'], ['Pine', '#14302A']];
-    const boxc = BOX.map(([l, hex]) => ({ label: l, hex, on: v('boxc') === l, off: v('boxc') !== l, pick: set('boxc', l) }));
-    const TEXTHEX = { Auto: '#ECECEF', White: '#FFFFFF', Cream: '#F3E7CF', Mint: '#BDF2D8', Sky: '#BFE0FF' };
-
-    const STATECOL = { Idle: '#7FA8FF', Thinking: '#FF9A3C', Working: '#3CCBF4', 'Needs you': '#FF7043', Done: '#5FD68A', Asleep: '#8C7DFF', Speaking: '#4FD6C8', Listening: '#5ED17A', Transcribing: '#B48CFF', Away: '#7A6CF0', Error: '#F04848' };
-    const pv = v('pv');
-    const pvCol = STATECOL[pv];
-    const pvStates = ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep'].map((o) => ({ label: o, on: pv === o, off: pv !== o, pick: set('pv', o) }));
-    const GLOWA = { Soft: 0.22, Normal: 0.38, Bright: 0.6 }, GLOWR = { Soft: 88, Normal: 104, Bright: 112 }, CORER = { XS: 10, S: 15, M: 20, L: 27 };
-
-    // performance
-    const LADDER = [2, 4, 6, 10, 15, 20, 24, 30, 45, 60, 90, 120, 144, 165, 240];
-    const PRESET = { Saver: [10, 15, 20, 4, 30], Balanced: [15, 22, 30, 6, 60], Smooth: [30, 45, 60, 10, 60], Max: ['display', 'display', 'display', 15, 'display'] };
-    const smoothSub = { Saver: 'least CPU', Balanced: 'today', Smooth: 'up to 60', Max: 'display rate', Custom: 'your own' };
-    const smoothV = v('smooth');
-    const smooth = ['Saver', 'Balanced', 'Smooth', 'Max', 'Custom'].map((o) => ({ label: o, sub: smoothSub[o], on: smoothV === o, off: smoothV !== o, pick: set('smooth', o) }));
-    const NOTES = { Saver: 'For a laptop on battery: cores still react at full speed to the mouse, but turn slowly on their own.', Balanced: 'The rates the panel uses today.', Smooth: 'Every state at least 30 pictures a second; busy states 60.', Max: 'Every picture at the refresh rate of the monitor the core is on (60, 120, 144 Hz…). The most CPU.', Custom: 'Set each rate yourself. Anything above a monitor’s refresh rate is capped to it.' };
-    const custom = smoothV === 'Custom';
-    const keys = ['cIdle', 'cThink', 'cWork', 'cSleep', 'cHand'];
-    const step = (k, dir) => () => { const i = LADDER.indexOf(v(k)); const j = Math.max(0, Math.min(LADDER.length - 1, (i < 0 ? 5 : i) + dir)); this.setState({ [k]: LADDER[j] }); };
-    const RL = [['Idle', 'Waiting for you, nothing running', '#7FA8FF'], ['Thinking', 'Claude is thinking', '#FF9A3C'], ['Working · Needs you · Done', 'Tools running, a prompt, a finished reply', '#3CCBF4'], ['Asleep · Away', 'Long idle, or you are away', '#8C7DFF'], ['Under the mouse', 'Hovered, scrolled or carried', '#FFB066']];
-    const rates = RL.map(([k, d, dot], i) => {
-      const val = custom ? v(keys[i]) : PRESET[smoothV][i];
-      return { k, d, dot, v: val === 'display' ? 'display Hz' : val + ' fps', fixed: !custom, edit: custom, up: step(keys[i], 1), down: step(keys[i], -1) };
+    // motions
+    const ms = s.mstate, part = s.mpart, sel = s.sel[ms] || DSEL[ms] || [], act = s.act[ms] || DACT[ms] || [];
+    const chosen = part === 'Routines' ? sel : act, pool = part === 'Routines' ? ROUT : ACT;
+    const toggle = (n) => () => {
+      if (part === 'Routines' && chosen.includes(n) && chosen.length === 1) return; // a state needs one routine
+      const next = chosen.includes(n) ? chosen.filter((x) => x !== n) : chosen.concat([n]);
+      this.setState({ [part === 'Routines' ? 'sel' : 'act']: Object.assign({}, part === 'Routines' ? s.sel : s.act, { [ms]: next }) });
+    };
+    const mtiles = pool.map((n) => {
+      const dis = n === 'Black hole' && ms !== 'Asleep', on = !dis && chosen.includes(n);
+      return { label: n, icon: IC[MOT[n][0]], about: MOT[n][1], dis, on, edge: on ? ON : '#34343B', dash: dis ? 'dashed' : 'solid', col: dis ? '#5A5A63' : on ? TXT_ON : TXT_OFF, ink: dis ? '#5A5A63' : on ? ON : '#A1A1AA',
+        pick: toggle(n), play: () => { this.playReal(n); this.setState({ playing: n, pv: STATECOL[ms] && ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep'].includes(ms) ? ms : s.pv }); } };
     });
 
-    // Lucide icons (ISC licence), one path each so a list can carry them
-    const CIR = (cx, cy, r) => 'M' + (cx - r) + ' ' + cy + 'a' + r + ' ' + r + ' 0 1 0 ' + (2 * r) + ' 0a' + r + ' ' + r + ' 0 1 0 ' + (-2 * r) + ' 0';
-    const LN = (a, b, c, d) => 'M' + a + ' ' + b + 'L' + c + ' ' + d;
-    const PL = (t, z) => { const n = t.trim().split(/[\s,]+/).map(Number), o = []; for (let i = 0; i < n.length; i += 2) o.push(n[i] + ' ' + n[i + 1]); return 'M' + o.join('L') + (z ? 'Z' : ''); };
-    const RR = (x, y, w, h, r) => 'M' + (x + r) + ' ' + y + 'h' + (w - 2 * r) + 'a' + r + ' ' + r + ' 0 0 1 ' + r + ' ' + r + 'v' + (h - 2 * r) + 'a' + r + ' ' + r + ' 0 0 1 ' + (-r) + ' ' + r + 'h' + (-(w - 2 * r)) + 'a' + r + ' ' + r + ' 0 0 1 ' + (-r) + ' ' + (-r) + 'v' + (-(h - 2 * r)) + 'a' + r + ' ' + r + ' 0 0 1 ' + r + ' ' + (-r) + 'Z';
-    const IC = {
-      eye: 'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0' + CIR(12, 12, 3),
-      puzzle: 'M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z',
-      blend: CIR(9, 9, 7) + CIR(15, 15, 7),
-      rotateCw: 'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5',
-      rotateCcw: 'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5',
-      refresh: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5',
-      swords: PL('14.5 17.5 3 6 3 3 6 3 17.5 14.5') + LN(13, 19, 19, 13) + LN(16, 16, 20, 20) + LN(19, 21, 21, 19) + PL('14.5 6.5 18 3 21 3 21 6 17.5 9.5') + LN(5, 14, 9, 18) + LN(7, 17, 4, 20) + LN(3, 19, 5, 21),
-      cog: 'M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM12 2v2M12 22v-2m5-1.34-1-1.73M11 10.27 7 3.34m13.66 13.66-1.73-1M3.34 7l1.73 1M14 12h8M2 12h2m16.66-5-1.73 1M3.34 17l1.73-1M17 3.34l-1 1.73M11 13.73l-4 6.93',
-      orbit: CIR(12, 12, 3) + CIR(19, 5, 2) + CIR(5, 19, 2) + 'M10.4 21.9a10 10 0 0 0 9.941-15.416M13.5 2.1a10 10 0 0 0-9.841 15.416',
-      dna: 'm10 16 1.5 1.5M14 8l-1.5-1.5M15 2c-1.798 1.998-2.518 3.995-2.807 5.993m4.307 2.507 1 1M17 6l-2.891-2.891M2 15c6.667-6 13.333 0 20-6m-2 0 .891.891M3.109 14.109 4 15m2.5-2.5 1 1M7 18l2.891 2.891M9 22c1.798-1.998 2.518-3.995 2.807-5.993',
-      keyboard: RR(2, 4, 20, 16, 2) + 'M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10',
-      hammer: 'm15 12-8.373 8.373a1 1 0 1 1-3-3L12 9m6 6 4-4m-.5.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5',
-      grid: RR(3, 3, 18, 18, 2) + 'M3 9h18M3 15h18M9 3v18M15 3v18',
-      arrows: 'm16 3 4 4-4 4M20 7H4m4 14-4-4 4-4M4 17h16',
-      minimize: PL('4 14 10 14 10 20') + PL('20 10 14 10 14 4') + LN(14, 10, 21, 3) + LN(3, 21, 10, 14),
-      fish: 'M6.5 12c.94-3.46 4.94-6 8.5-6 3.56 0 6.06 2.54 7 6-.94 3.47-3.44 6-7 6s-7.56-2.53-8.5-6ZM18 12v.5M16 17.93a9.77 9.77 0 0 1 0-11.86M7 10.67C7 8 5.58 5.97 2.73 5.5c-1 1.5-1 5 .23 6.5-1.24 1.5-1.24 5-.23 6.5C5.58 18.03 7 16 7 13.33',
-      tower: 'M4.9 16.1C1 12.2 1 5.8 4.9 1.9M7.8 4.7a6.14 6.14 0 0 0-.8 7.5' + CIR(12, 9, 2) + 'M16.9 4.7a6.14 6.14 0 0 1 .8 7.5M19.1 1.9a9.96 9.96 0 0 1 0 14.1M9.5 18h5m-6.5 4 4-11 4 11',
-      bell: 'M10.268 21a2 2 0 0 0 3.464 0M22 8c0-2.3-.8-4.3-2-6M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326M4 2C2.8 3.7 2 5.7 2 8',
-      unlock: RR(3, 11, 18, 11, 2) + 'M7 11V7a5 5 0 0 1 9.9-1',
-      lock: RR(3, 11, 18, 11, 2) + 'M7 11V7a5 5 0 0 1 10 0v4',
-      flower: CIR(12, 12, 3) + 'M12 16.5A4.5 4.5 0 1 1 7.5 12 4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 1 1 4.5 4.5 4.5 4.5 0 1 1-4.5 4.5M12 7.5V9m-4.5 3H9m7.5 0H15m-3 4.5V15M8 8l1.88 1.88M14.12 9.88 16 8M8 16l1.88-1.88M14.12 14.12 16 16',
-      chevrons: 'm7 6 5 5 5-5m-10 7 5 5 5-5',
-      moon: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z',
-      hole: CIR(12, 12, 10) + CIR(12, 12, 1),
-      radio: 'M4.9 19.1C1 15.2 1 8.8 4.9 4.9M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5' + CIR(12, 12, 2) + 'M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5M19.1 4.9C23 8.8 23 15.1 19.1 19',
-      mic: 'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM19 10v2a7 7 0 0 1-14 0v-2M12 19v3',
-      binary: RR(14, 14, 4, 6, 2) + RR(6, 4, 4, 6, 2) + 'M6 20h4M14 10h4M6 14h2v6M14 4h2v6',
-      zap: 'M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z',
-      scanEye: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2' + CIR(12, 12, 1) + 'M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0',
-      vibrate: 'm2 8 2 2-2 2 2 2-2 2m20-8-2 2 2 2-2 2 2 2' + RR(8, 5, 8, 14, 1),
-      sunDim: CIR(12, 12, 4) + 'M12 4h.01M20 12h.01M12 20h.01M4 12h.01M17.657 6.343h.01M17.657 17.657h.01M6.343 17.657h.01M6.343 6.343h.01',
-      crosshair: CIR(12, 12, 10) + LN(22, 12, 18, 12) + LN(6, 12, 2, 12) + LN(12, 6, 12, 2) + LN(12, 22, 12, 18),
-      step: LN(6, 4, 6, 20) + PL('10 4 20 12 10 20', true),
-      unfold: 'M12 22v-6M12 8V2M4 12H2m8 0H8m8 0h-2m8 0h-2m-5 7-3 3-3-3m6-14-3-3-3 3',
-      scan: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
-      triangle: 'M13.73 4a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z',
-      alert: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01',
-      waves: 'M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1',
-      sparkles: 'M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0zM20 3v4M22 5h-4M4 17v2M5 18H3',
-      layers: 'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83zM2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17',
-      eyeOff: 'M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49M14.084 14.158a3 3 0 0 1-4.242-4.242M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143M2 2l20 20',
-      reply: 'M20 18v-2a4 4 0 0 0-4-4H4M9 17l-5-5 5-5',
-      volume: 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0-12.728',
-      sliders: 'M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4',
-      move: 'M12 2v20m-3-17 3-3 3 3m-6 14 3 3 3-3M2 12h20M5 9l-3 3 3 3m14-6 3 3-3 3',
-      hand: 'M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15',
-      pointer: 'M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z',
-      send: 'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11zM21.854 2.147l-10.94 10.939',
-      newline: 'M9 10l-5 5 5 5M20 4v7a4 4 0 0 1-4 4H4',
-      x: 'M18 6 6 18M6 6l12 12',
-    };
-    // motion: [icon, what it does] (the text is the C's own, ROUTINES and WHIMS)
-    const MOT = {
-      'Puzzle': ['puzzle', 'One layer rises in separate pieces; both turn like a cube being solved: two quick turns, a halt, three times.'],
-      'Smooth puzzle': ['blend', 'The puzzle with eased turns that flow into each other; only the halt is still.'],
-      'Long spin': ['rotateCw', 'One layer spins three full turns, then the other spins back, while the shell turns slowly.'],
-      'Blades': ['swords', 'Single triangles float out behind the core and smash across the front in pairs, like a volley of arrows.'],
-      'Oracle': ['eye', 'Exact and calm; now and then a line of light climbs it. Pointed at, it stirs with calm spikes.'],
-      'Engine': ['cog', 'A turbine belt runs round the middle while the patches on the caps fire in order like pistons.'],
-      'Gyro': ['orbit', 'Two belts at right angles run against each other like the rings of a gyroscope.'],
-      'Helix': ['dna', 'The shell turns while a spiral of lifted patches climbs it, like a screw being driven.'],
-      'Typewriter': ['keyboard', 'Row by row the patches pop out like keys; at the end of a row, a ring and a carriage return.'],
-      'Forge': ['hammer', 'One to three pieces rise slowly, glowing hotter, and come down hard: sparks, embers, a ring.'],
-      'Loom': ['grid', 'Two belts cross like warp and weft; a bright shuttle runs along one, the other clicks a step.'],
-      'Conveyor': ['arrows', 'The belt floats up as two rings that take turns stepping one slot on, each with a click.'],
-      'Compressor': ['minimize', 'Squeezed flat in three hard clicks, then it vents in one clean stroke and a ring of exhaust.'],
-      'Swimmers': ['fish', 'Two fish of fine patches swim just under the surface, leaving a wake.'],
-      'Beacon': ['tower', 'A lighthouse beam of lifted patches sweeps round; each time it faces you it flares.'],
-      'Knock': ['bell', 'Knock, knock: it taps twice toward you, a ring each time, then a pause.'],
-      'Unlock': ['unlock', 'Charges, bursts open with spikes and a ring, turns a full circle, then locks back click by click.'],
-      'Bloom': ['flower', 'Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals.'],
-      'Zip': ['chevrons', 'A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain.'],
-      'Dormant': ['moon', 'Drawn in slightly and barely turning; a faint scan every 6 s.'],
-      'Black hole': ['hole', 'Gathers power, bursts apart and falls back into a void with a violet dust disc. Asleep only.'],
-      'Broadcast': ['radio', 'The patches rise and fall with the voice, like the bars of an equaliser.'],
-      'Receiver': ['mic', 'Holds still; the patches facing you open with the microphone level.'],
-      'Decoding': ['binary', 'Steps 36 degrees at a time while a scan plane reads the rows.'],
-      'Locked': ['lock', 'Stops square to you, drawn in and still.'],
-      'Crazy': ['zap', 'Fits of going crazy: spikes out and in, jerks, flicking patches.'],
-      'look': ['eye', 'Glances one way, then the other.'], 'peek': ['scanEye', 'Leans to one side to see past something.'],
-      'twirl': ['refresh', 'Spins round fast and coasts down.'], 'shiver': ['vibrate', 'A quick shudder.'],
-      'blink': ['sunDim', 'Dims once or twice.'], 'align': ['crosshair', 'Turns a vertex exactly toward you, holds, carries on.'],
-      'step': ['step', 'Two snap steps of 72 degrees, like a combination lock.'], 'unfold': ['unfold', 'A fresh cut of patches opens down the sphere, then closes in reverse.'],
-      'scan': ['scan', 'One plane sweeps top to bottom.'], 'spike': ['triangle', 'One or two sharp spikes snap out of random nodes and back.'],
-      'crazy': ['alert', 'The full ERROR fit, rarely, out of nowhere.'], 'ripple': ['waves', 'A wave of lifted patches runs over the sphere from one side to the other.'],
-      'orbit': ['orbit', 'One patch lifts off, flies once round the core and docks again.'], 'petal': ['flower', 'The patches round one node open like a flower, ring by ring, and close.'],
-      'constellation': ['sparkles', 'A short chain of neighbouring nodes lights up one by one, then fades.'], 'tumble': ['rotateCcw', 'A slow half turn about a random axis that settles exactly.'],
-    };
-
-    // shortcuts: keys set now (s.keys), the key held for each mouse gesture (s.mods), the row being recorded (s.rec)
-    const KEYS = [
-      { g: 0, id: 'mode', name: 'Single core / all cores', icon: 'layers', def: ['Ctrl', 'Alt', 'C'] },
-      { g: 0, id: 'hide', name: 'Show or hide Vigil', icon: 'eyeOff', def: ['Ctrl', 'Alt', 'V'], tag: 'NEW', taken: true },
-      { g: 0, id: 'reply', name: 'Reply to the main core', sub: 'Opens the reply line under its last answer', icon: 'reply', def: ['Ctrl', 'Alt', 'R'], tag: 'NEW' },
-      { g: 0, id: 'speak', name: 'Read the last reply aloud', sub: 'Voice is on macOS only so far', icon: 'volume', def: [], tag: 'MAC' },
-      { g: 0, id: 'settings', name: 'Open Settings', icon: 'sliders', def: [] },
-      { g: 2, id: 'send', name: 'Send the reply', icon: 'send', def: ['Enter'] },
-      { g: 2, id: 'nl', name: 'New line', icon: 'newline', def: ['Shift', 'Enter'] },
-      { g: 2, id: 'close', name: 'Close the reply line', icon: 'x', def: ['Esc'], fixed: true },
-    ];
-    const MOUSE = [
-      { id: 'move', name: 'Move a core', sub: 'The cluster, or one core in all-cores mode', icon: 'move', def: 'Alt', gesture: 'drag' },
-      { id: 'carry', name: 'Carry a core', sub: 'It rides on the pointer; the next click puts it down', icon: 'hand', def: 'Alt', gesture: 'click' },
-      { id: 'type', name: 'Type a reply', sub: 'To that session, under its last answer', icon: 'pointer', def: 'None', gesture: '2× click' },
-      { id: 'spin', name: 'Spin the shell', sub: 'Flick it and it coasts back to its own speed', icon: 'rotateCw', def: 'None', gesture: 'drag' },
-      { id: 'talk', name: 'Push to talk', sub: 'Hold on a core and speak; voice is on macOS only so far', icon: 'mic', def: 'None', gesture: 'hold', tag: 'MAC' },
-    ];
-    const MODS = ['None', 'Alt', 'Ctrl', 'Shift'];
-    const keysNow = s.keys || Object.fromEntries(KEYS.map((k) => [k.id, k.def]));
-    const modsNow = s.mods || Object.fromEntries(MOUSE.map((m) => [m.id, m.def]));
-    const KNAME = { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift', Meta: 'Win', Escape: 'Esc', Enter: 'Enter', ' ': 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+    // shortcuts
     const keyRow = (k, i) => {
-      const cur = keysNow[k.id] || [], rec = s.rec === k.id, changed = cur.join('+') !== k.def.join('+'), taken = k.taken && !changed;
-      return {
-        name: k.name, icon: IC[k.icon], tag: k.tag || '', isMouse: false, rule: i ? '1px solid #2C2C33' : '0',
-        sub: taken ? cur.join(' + ') + ' is held by another app: pick another' : (k.sub || (k.fixed ? 'Always Esc' : changed ? 'Default: ' + (k.def.length ? k.def.join(' + ') : 'not set') : ' ')),
-        subCol: taken ? '#FFB066' : '#8B8B94',
-        keys: cur, unset: !cur.length, recording: rec, showKeys: !rec, fixed: !!k.fixed, canChange: !k.fixed,
-        btnText: cur.length ? 'Change' : 'Set', btnEdge: taken ? '#FF8A1F' : '#34343B', btnBg: taken ? '#2E1D0E' : '#27272D', btnCol: taken ? '#FFE6CC' : '#ECECEF',
-        changeLabel: (cur.length ? 'Change the shortcut for ' : 'Set a shortcut for ') + k.name,
-        resetCol: changed ? '#ECECEF' : '#5A5A63',
-        record: () => this.setState({ rec: k.id }),
-        cancel: () => this.setState({ rec: null }),
-        reset: () => this.setState({ keys: Object.assign({}, keysNow, { [k.id]: k.def }), rec: null }),
+      const cur = s.keys[k.id] || [], taken = k.taken && cur.join('+') === k.def.join('+');
+      return { name: k.name, icon: IC[k.icon], note: k.note || '', isMouse: false, isKeys: s.rec !== k.id, recording: s.rec === k.id, rule: i ? '1px solid #2C2C33' : '0',
+        keys: cur, unset: !cur.length, keyText: cur.length ? cur.join(' + ') : 'not set', fixed: !!k.fixed, edge: taken ? ON : 'transparent',
+        warn: taken ? 'Held by another app' : '', tip: k.fixed ? 'Always Esc' : 'Click, then press the new keys',
+        record: () => this.setState({ rec: k.id }), cancel: () => this.setState({ rec: null }),
         capture: (e) => {
           e.preventDefault();
           if (e.key === 'Escape') { this.setState({ rec: null }); return; }
-          if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return; // waits for the key itself
+          if (e.key === 'Backspace' || e.key === 'Delete') { this.setState({ keys: Object.assign({}, s.keys, { [k.id]: [] }), rec: null }); return; }
+          if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
           const c = []; if (e.ctrlKey) c.push('Ctrl'); if (e.altKey) c.push('Alt'); if (e.shiftKey) c.push('Shift'); if (e.metaKey) c.push('Win');
           c.push(KNAME[e.key] || (e.key.length === 1 ? e.key.toUpperCase() : e.key));
-          this.setState({ keys: Object.assign({}, keysNow, { [k.id]: c }), rec: null });
-        },
-      };
+          this.setState({ keys: Object.assign({}, s.keys, { [k.id]: c }), rec: null });
+        } };
     };
-    const mouseRow = (m, i) => ({
-      name: m.name, sub: m.sub, icon: IC[m.icon], tag: m.tag || '', isMouse: true, recording: false, showKeys: false, subCol: '#8B8B94', rule: i ? '1px solid #2C2C33' : '0',
-      gesture: m.gesture, modLabel: 'Key to hold for ' + m.name,
-      mods: MODS.map((o) => ({ label: o, on: modsNow[m.id] === o, off: modsNow[m.id] !== o, pick: () => this.setState({ mods: Object.assign({}, modsNow, { [m.id]: o }) }) })),
-    });
-    const kgroups = [
-      { title: 'ANYWHERE', rows: KEYS.filter((k) => k.g === 0).map(keyRow) },
-      { title: 'ON A CORE', rows: MOUSE.map(mouseRow) },
-      { title: 'IN THE REPLY LINE', rows: KEYS.filter((k) => k.g === 2).map(keyRow) },
-    ];
+    const mouseRow = (m, i) => ({ name: m.name, icon: IC[m.icon], note: '', isMouse: true, isKeys: false, recording: false, rule: i ? '1px solid #2C2C33' : '0', gesture: m.gesture, warn: '',
+      mods: MODS.map((o) => ({ label: o, on: s.mods[m.id] === o, edge: s.mods[m.id] === o ? ON : OFF, col: s.mods[m.id] === o ? TXT_ON : TXT_OFF, pick: () => this.setState({ mods: Object.assign({}, s.mods, { [m.id]: o }) }) })) });
 
-    // preview zoom: as the Core Bestiary, 20 % steps from 100 % to 300 %
-    const zoom = v('zoom') || 1;
-    const setZoom = (z) => this.setState({ zoom: Math.round(Math.max(1, Math.min(3, z)) * 100) / 100 });
+    const SHAPES = [['Dodeca', 'M14 3L24.5 10.6L20.5 23H7.5L3.5 10.6Z'], ['Bucky', 'M14 3A11 11 0 1 0 14.01 3M14 8L19.7 12.2L17.5 19H10.5L8.3 12.2Z'], ['Geodesic', 'M14 2.5L24 8.3V19.7L14 25.5L4 19.7V8.3ZM14 2.5V25.5M4 8.3L24 19.7M24 8.3L4 19.7'], ['Fine', 'M14 3A11 11 0 1 0 14.01 3M14 3V25M3 14H25M6.2 6.2L21.8 21.8M21.8 6.2L6.2 21.8']];
+    const BOX = [['Black', '#0E0E10'], ['Graphite', '#26262B'], ['Navy', '#17203A'], ['Plum', '#2A1F3D'], ['Pine', '#14302A']];
+    const TEXT = [['Auto', '#ECECEF'], ['White', '#FFFFFF'], ['Cream', '#F3E7CF'], ['Mint', '#BDF2D8'], ['Sky', '#BFE0FF']];
+    const page = PAGES.find((p) => p[0] === s.page), t = (s.gravity / 100);
+    const SMOOTH = { Saver: 'least CPU', Balanced: 'default', Smooth: 'up to 60', Max: 'display rate', Custom: 'your own' };
+    const NOTE = { Saver: 'For a laptop on battery: cores still answer the mouse at full speed.', Balanced: 'The rates the panel uses today.', Smooth: 'At least 30 pictures a second; busy states 60.', Max: 'Every picture at the monitor’s refresh rate. The most CPU.', Custom: 'Set each state’s rate yourself.' };
 
-    // motions
-    const ROUT = ['Puzzle', 'Smooth puzzle', 'Long spin', 'Blades', 'Oracle', 'Engine', 'Gyro', 'Helix', 'Typewriter', 'Forge', 'Loom', 'Conveyor', 'Compressor', 'Swimmers', 'Beacon', 'Knock', 'Unlock', 'Bloom', 'Zip', 'Dormant', 'Black hole', 'Broadcast', 'Receiver', 'Decoding', 'Locked', 'Crazy'];
-    const ACT = ['look', 'peek', 'twirl', 'shiver', 'blink', 'align', 'step', 'unfold', 'scan', 'spike', 'crazy', 'ripple', 'orbit', 'petal', 'constellation', 'tumble'];
-    const DSEL = { Idle: ['Oracle', 'Gyro'], Thinking: ['Puzzle', 'Smooth puzzle', 'Long spin', 'Blades'], Working: ['Engine', 'Forge', 'Conveyor', 'Typewriter'], 'Needs you': ['Beacon', 'Knock'], Done: ['Bloom', 'Unlock'], Asleep: ['Dormant', 'Black hole'], Speaking: ['Broadcast'], Listening: ['Receiver'], Transcribing: ['Decoding'], Away: ['Dormant'], Error: ['Locked', 'Crazy'] };
-    const DACT = { Idle: ['look', 'peek', 'blink', 'twirl', 'orbit'], Asleep: ['blink', 'petal'] };
-    const ms = v('mstate');
-    const part = v('mpart');
-    const sel = (s.sel && s.sel[ms]) || DSEL[ms] || [];
-    const act = (s.act && s.act[ms]) || DACT[ms] || [];
-    const toggleIn = (field, list, name, base) => () => { const cur = list.includes(name) ? list.filter((x) => x !== name) : list.concat([name]); const m = Object.assign({}, s[field] || {}); m[ms] = cur; this.setState({ [field]: m }); };
-    const pool = part === 'Routines' ? ROUT : ACT;
-    const chosen = part === 'Routines' ? sel : act;
-    const mchips = pool.map((n) => {
-      const dis = part === 'Routines' && n === 'Black hole' && ms !== 'Asleep';
-      const on = !dis && chosen.includes(n);
-      const t = toggleIn(part === 'Routines' ? 'sel' : 'act', chosen, n);
-      return { label: n, icon: IC[MOT[n][0]], about: MOT[n][1], playLabel: 'Play ' + n + ' in the preview', on, off: !dis && !on, dis, pick: () => { t(); this.setState({ mfocus: n }); }, play: () => this.setState({ mfocus: n, playing: n + ' · ' + ms, pv: ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep'].includes(ms) ? ms : pv }) };
-    });
-    const msCC = ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep'].map((o) => ({ label: o, dot: STATECOL[o], on: ms === o, off: ms !== o, pick: () => this.setState({ mstate: o, playing: '' }) }));
-    const msP = ['Speaking', 'Listening', 'Transcribing', 'Away', 'Error'].map((o) => ({ label: o, dot: STATECOL[o], on: ms === o, off: ms !== o, pick: () => this.setState({ mstate: o, playing: '' }) }));
-
+    // the row pages: sections of rows, each row a name (and hint) on the left and one control on the right
+    const segR = (k, opts) => ({ isSeg: true, opts: opts.map((o) => ({ label: o, on: s[k] === o, edge: s[k] === o ? ON : OFF, col: s[k] === o ? TXT_ON : TXT_OFF, pick: set(k, o) })) });
+    const sliR = (k, lo, hi) => ({ isSlider: true, v: s[k], set: slide(k), lo: lo || '', hi: hi || s[k] + '%', loW: lo ? '38px' : '0px', hiW: hi ? '38px' : '34px' });
+    const togR = (k) => ({ isToggle: true, on: !!s[k], toggle: () => this.setState({ [k]: !s[k] }), bg: s[k] ? ON : '#34343B', knob: s[k] ? '#1F1206' : '#A1A1AA', knobX: s[k] ? '21px' : '3px' });
+    const SHAPE_ICON = { Dodeca: 'M14 3L24.5 10.6L20.5 23H7.5L3.5 10.6Z', Bucky: 'M14 3A11 11 0 1 0 14.01 3M14 8L19.7 12.2L17.5 19H10.5L8.3 12.2Z', Geodesic: 'M14 2.5L24 8.3V19.7L14 25.5L4 19.7V8.3ZM14 2.5V25.5M4 8.3L24 19.7M24 8.3L4 19.7', Fine: 'M14 3A11 11 0 1 0 14.01 3M14 3V25M3 14H25M6.2 6.2L21.8 21.8M21.8 6.2L6.2 21.8' };
+    const SECTIONS = {
+      look: [
+        { title: 'SHELL', rows: [
+          { label: 'Shape', hint: s.shape, isTiles: true, tileW: '44px', opts: Object.keys(SHAPE_ICON).map((l) => ({ label: l, icon: SHAPE_ICON[l], face: '', on: s.shape === l, edge: s.shape === l ? ON : '#34343B', ink: s.shape === l ? ON : '#B4B4BC', pick: set('shape', l) })) },
+          { label: 'Glow', ...sliR('glow') }, { label: 'Inner core', ...sliR('core') }] },
+        { title: 'ON SCREEN', rows: [
+          { label: 'Size', ...sliR('size', 'S', 'L') },
+          { label: 'Focus frame', hint: 'round a carried core, or one you rest on', ...segR('frame', ['Segments', 'Lens', 'Polar', 'Diamond', 'Lock', 'Orbits', 'None']) }] },
+      ],
+      cluster: [
+        { title: 'LAYOUT', rows: [
+          { label: 'Layout', ...segR('mode', ['Single core', 'All cores']) },
+          { label: 'Other sessions', hint: 'small cores round the main one', ...togR('others') },
+          { label: 'Names over cores', hint: 'all-cores mode', ...segR('names', ['On hover', 'Always']) }] },
+        { title: 'MOTION', rows: [
+          { label: 'Gravity', hint: 'drag the core above to feel it', ...sliR('gravity', 'Floaty', 'Firm') },
+          { label: 'Scroll on a core', ...segR('scroll', ['Roll', 'Roll back', 'Turn', 'Turn back', 'Off']) }] },
+        { title: 'AWAY', rows: [
+          { label: 'Rest after', hint: 'no mouse or keys this long: the cores show STANDBY', ...segR('rest', ['1 min', '2 min', '5 min', 'Never']) }] },
+      ],
+      replies: [
+        { title: 'TEXT', rows: [
+          { label: 'Font', isTiles: true, tileW: '104px', opts: [['Terminal', "Consolas, 'JetBrains Mono', monospace"], ['Clean', "'Segoe UI', Inter, sans-serif"]].map(([l, face]) => ({ label: l, face, icon: '', on: s.font === l, edge: s.font === l ? ON : '#34343B', ink: s.font === l ? TXT_ON : TXT_OFF, col: s.font === l ? TXT_ON : '#8B8B94', pick: set('font', l) })) },
+          { label: 'Text size', ...sliR('tsize') }] },
+        { title: 'BOX', rows: [
+          { label: 'Box size', hint: 'how far it grows before it scrolls', ...sliR('bsize') },
+          { label: 'Box colour', isSwatch: true, opts: BOX.map(([l, hex]) => ({ label: l, bg: hex, fg: '', text: '', on: s.boxc === l, edge: s.boxc === l ? ON : '#44444C', pick: set('boxc', l) })) },
+          { label: 'Text colour', isSwatch: true, opts: TEXT.map(([l, hex]) => ({ label: l, bg: '#19191D', fg: hex, text: 'Aa', on: s.textc === l, edge: s.textc === l ? ON : '#44444C', pick: set('textc', l) })) },
+          { label: 'Opens', ...segR('opens', ['Next to core', 'Middle']) }] },
+      ],
+      perf: [
+        { title: 'SMOOTHNESS', rows: [{ label: 'Preset', hint: NOTE[s.smooth], ...segR('smooth', Object.keys(SMOOTH)) }] },
+        { title: 'CHECK THE COST', rows: [{ label: 'Live numbers', hint: 'pictures and CPU time a second', ...togR('live') }] },
+      ],
+    };
+    const sections = (SECTIONS[s.page] || []).map((sec) => ({ title: sec.title, rows: sec.rows.map((r, i) => Object.assign({ hint: '', isSlider: false, isSeg: false, isToggle: false, isTiles: false, isSwatch: false, rule: i ? '1px solid #2C2C33' : '0' }, r)) }));
     return {
-      q, tabs, searching, results, noResults: searching && results.length === 0,
-      pageTitle: searching ? 'Search' : cur[1], pageDesc: searching ? results.length + ' matching settings' : cur[2], showPageReset: !searching,
-      onSearch: (e) => this.setState({ q: e.target.value }),
-      isLook: !searching && tab === 'look', isOrbit: !searching && tab === 'orbit', isBox: !searching && tab === 'box', notBox: searching || tab !== 'box', isMouse: !searching && tab === 'mouse', isPerf: !searching && tab === 'perf', isMotions: !searching && tab === 'motions',
-      shapes, glow: seg('glow', ['Soft', 'Normal', 'Bright']), core: seg('core', ['XS', 'S', 'M', 'L']), size: seg('size', ['S', 'M', 'L', 'XL']), frame: seg('frame', ['Segments', 'Lens', 'Polar', 'Diamond', 'Lock', 'Orbits', 'None']),
-      mode: seg('mode', ['Single core', 'All cores']), othersOn: v('others'), othersOff: !v('others'), toggleOthers: () => this.setState({ others: !v('others') }), names: seg('names', ['On hover', 'Always']), gravity: seg('gravity', ['Floaty', 'Loose', 'Steady', 'Firm']),
-      font: seg('font', ['Terminal', 'Clean']), tsize: seg('tsize', ['XS', 'S', 'M', 'L', 'XL']), bsize: seg('bsize', ['S', 'M', 'L', 'XL']), boxc, textc: seg('textc', ['Auto', 'White', 'Cream', 'Mint', 'Sky']), opens: seg('opens', ['Next to core', 'Middle']),
-      scroll: seg('scroll', ['Roll', 'Roll back', 'Turn', 'Turn back', 'Off']), rest: seg('rest', ['1 min', '2 min', '5 min', 'Never']),
-      smooth, smoothNote: NOTES[smoothV], rates, liveOn: v('live'), liveOff: !v('live'), toggleLive: () => this.setState({ live: !v('live') }),
-      mfocus: v('mfocus'), mfocusIcon: v('mfocus') ? IC[MOT[v('mfocus')][0]] : '', mfocusAbout: v('mfocus') ? MOT[v('mfocus')][1] : '',
-      isKeys: !searching && tab === 'keys', kgroups, goKeys: () => this.setState({ tab: 'keys', q: '' }),
-      zoom, zoomLabel: Math.round(zoom * 100) + '%', zoomIn: () => setZoom(zoom + 0.2), zoomOut: () => setZoom(zoom - 0.2), zoomReset: () => setZoom(1),
-      onWheel: (e) => { if (e && e.preventDefault) e.preventDefault(); setZoom(zoom * Math.exp(-(e.deltaY || 0) * 0.0015)); },
-      mstatesCC: msCC, mstatesP: msP, mstateUpper: ms.toUpperCase(), mpart: seg('mpart', ['Routines', 'Actions']), mchips,
-      mpartNote: part === 'Routines' ? 'Each time the state starts it picks one of the ticked routines. ▶ plays one in the preview.' : 'While a core is left alone it now and then plays one of the ticked actions.',
-      mcount: ms + ' uses ' + sel.length + ' routines and ' + act.length + ' actions. Changes apply the next time the state starts.',
-      pvStates, pv, pvCol, pvAria: 'Preview: the main core showing ' + pv, glowA: GLOWA[v('glow')], glowR: GLOWR[v('glow')], coreR: CORER[v('core')], showOthers: v('others'), playing: v('playing'),
-      boxHex: (BOX.find((b) => b[0] === v('boxc')) || BOX[0])[1], boxText: TEXTHEX[v('textc')], boxFont: v('font') === 'Terminal' ? "'JetBrains Mono', monospace" : "Inter, 'Segoe UI', sans-serif", boxFontPx: { XS: '11px', S: '12px', M: '13px', L: '14px', XL: '16px' }[v('tsize')]
+      isRows: !!SECTIONS[s.page], sections, pageNote: '',
+      sideOpen: s.side, sideW: s.side ? '188px' : '58px', sideLabel: s.side ? 'Fold the sidebar' : 'Open the sidebar', sideArrow: s.side ? 'm16 15-3-3 3-3' : 'm14 9 3 3-3 3', toggleSide: () => this.setState({ side: !s.side }),
+      pages: PAGES.map(([id, label, icon]) => ({ label, icon: IC[icon], current: s.page === id ? 'page' : false, edge: s.page === id ? ON : OFF, col: s.page === id ? TXT_ON : TXT_OFF, pick: () => this.setState({ page: id, rec: null }) })),
+      pageTitle: page[1], pageHint: page[3],
+      resetAll: () => this.setState(Object.assign(DEFAULTS(), { zoom: 1 })),
+      resetPage: () => { const d = DEFAULTS(), o = {}; for (const k of ON_PAGE[s.page]) o[k] = d[k]; this.setState(o); },
+      noEngine: !window.VC, engineShow: window.VC ? 'block' : 'none',
+      isLook: s.page === 'look', isCluster: s.page === 'cluster', isReplies: s.page === 'replies', isMotions: s.page === 'motions', isKeys: s.page === 'keys', isPerf: s.page === 'perf',
+      // preview
+      pv: s.pv, pvCol, pvAria: 'Preview: the main core showing ' + s.pv, zoom: z, zoomLabel: Math.round(z * 100) + '%',
+      zoomIn: () => setZoom(z + 0.2), zoomOut: () => setZoom(z - 0.2), zoomReset: () => setZoom(1),
+      onWheel: (e) => { e.preventDefault(); setZoom(z * Math.exp(-(e.deltaY || 0) * 0.0015)); },
+      pvStates: ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep'].map((o) => ({ label: o, dot: STATECOL[o], on: s.pv === o, edge: s.pv === o ? ON : OFF, col: s.pv === o ? TXT_ON : TXT_OFF, pick: () => this.setState({ pv: o, playing: '' }) })),
+      coreScale: 0.6 + s.size / 100 * 0.8, glowA: 0.15 + s.glow / 100 * 0.55, glowR: 80 + s.glow / 100 * 40, coreR: 8 + s.core / 100 * 24,
+      others: s.others, orbitRx: 150 + (1 - t) * 40, orbitRy: 100 + (1 - t) * 25,
+      sat1x: 240 - 150 - (1 - t) * 40, sat1y: 170, sat2x: 240 + 140 + (1 - t) * 36, sat2y: 110, sat3x: 270, sat3y: 150 - 100 - (1 - t) * 25,
+      showBox: s.page === 'replies', boxHex: BOX.find((b) => b[0] === s.boxc)[1], boxText: TEXT.find((b) => b[0] === s.textc)[1],
+      boxFont: s.font === 'Terminal' ? "Consolas, 'JetBrains Mono', monospace" : "'Segoe UI', Inter, sans-serif", boxFontPx: (11 + s.tsize / 100 * 5).toFixed(1) + 'px',
+      playing: s.playing ? s.playing + ' · ' + s.mstate : '',
+      // look
+      shapeName: s.shape, shapes: SHAPES.map(([l, icon]) => ({ label: l, icon, on: s.shape === l, edge: s.shape === l ? ON : '#34343B', ink: s.shape === l ? ON : '#B4B4BC', pick: set('shape', l) })),
+      lookSliders: [['Glow', 'glow'], ['Size', 'size'], ['Inner core', 'core']].map(([label, k]) => ({ label, v: s[k], set: slide(k) })),
+      frames: chip('frame', ['Segments', 'Lens', 'Polar', 'Diamond', 'Lock', 'Orbits', 'None']),
+      // cluster
+      modes: chip('mode', ['Single core', 'All cores']), names: chip('names', ['On hover', 'Always']), rest: chip('rest', ['1 min', '2 min', '5 min', 'Never']),
+      toggleOthers: () => this.setState({ others: !s.others }), othersBg: s.others ? ON : '#34343B', othersKnob: s.others ? '#1F1206' : '#A1A1AA', othersKnobX: s.others ? '21px' : '3px',
+      gravity: s.gravity, setGravity: slide('gravity'),
+      // replies
+      fonts: [['Terminal', "Consolas, 'JetBrains Mono', monospace"], ['Clean', "'Segoe UI', Inter, sans-serif"]].map(([l, face]) => ({ label: l, face, on: s.font === l, edge: s.font === l ? ON : '#34343B', col: s.font === l ? TXT_ON : TXT_OFF, pick: set('font', l) })),
+      boxSliders: [['Text size', 'tsize'], ['Box size', 'bsize']].map(([label, k]) => ({ label, v: s[k], set: slide(k) })),
+      boxc: BOX.map(([l, hex]) => ({ label: l, hex, on: s.boxc === l, edge: s.boxc === l ? ON : '#44444C', pick: set('boxc', l) })),
+      textc: TEXT.map(([l, hex]) => ({ label: l, hex, on: s.textc === l, edge: s.textc === l ? ON : '#44444C', pick: set('textc', l) })),
+      opens: chip('opens', ['Next to core', 'Middle']),
+      // motions
+      mstates: Object.keys(STATECOL).map((o) => ({ label: o, dot: STATECOL[o], on: ms === o, edge: ms === o ? ON : OFF, col: ms === o ? TXT_ON : TXT_OFF, pick: () => this.setState({ mstate: o, playing: '' }) })),
+      mparts: [['Routines', sel.length], ['Actions', act.length]].map(([o, n]) => ({ label: o + ' · ' + n, on: part === o, edge: part === o ? ON : OFF, col: part === o ? TXT_ON : TXT_OFF, pick: set('mpart', o) })),
+      mhint: part === 'Routines' ? 'one picked at random each time · ▶ to watch' : 'played now and then when left alone',
+      mtiles,
+      pvStatesShow: s.page === 'motions' ? 'none' : 'flex',
+      mrows: Object.keys(STATECOL).map((o, k) => { const r = s.sel[o] || DSEL[o] || [], a = s.act[o] || DACT[o] || [], on = ms === o;
+        return { head: k === 0 ? 'CLAUDE CODE' : k === 6 ? 'PANEL' : '', label: o, dot: STATECOL[o], on, edge: on ? ON : OFF, col: on ? TXT_ON : TXT_OFF, ink: on ? ON : '#8B8B94',
+          icons: r.slice(0, 4).map((n) => IC[MOT[n][0]]), more: r.length > 4 ? '+' + (r.length - 4) : '', acts: a.length || '', pick: () => this.setState({ mstate: o, playing: '', hov: '' }) }; }),
+      mstateName: ms, mdot: STATECOL[ms], sparkle: IC.sparkles,
+      minfo: s.hov ? { icon: IC[MOT[s.hov][0]], name: s.hov, text: MOT[s.hov][1] } : s.playing ? { icon: IC[MOT[s.playing][0]], name: s.playing, text: 'is playing in the preview.' } : { icon: '', name: '', text: 'Rest the pointer on a motion to watch it in the preview; click it to use it in ' + ms + ' or not.' },
+      unhover: () => { clearTimeout(this.hovT); if (s.hov) this.setState({ hov: '' }); },
+      tryIt: () => { const r = sel.length ? sel : ['Oracle']; const n = r[Math.floor(Math.random() * r.length)]; this.playReal(n); this.setState({ playing: n }); },
+      resetState: () => this.setState({ sel: Object.assign({}, s.sel, { [ms]: undefined }), act: Object.assign({}, s.act, { [ms]: undefined }) }),
+      mgroups: [['Claude Code', ['Idle', 'Thinking', 'Working', 'Needs you', 'Done', 'Asleep']], ['Panel', ['Speaking', 'Listening', 'Transcribing', 'Away', 'Error']]].map(([label, list], gi) => ({ label, rule: gi ? '1px solid #2C2C33' : '0',
+        opts: list.map((o) => ({ label: o, dot: STATECOL[o], on: ms === o, edge: ms === o ? ON : OFF, col: ms === o ? TXT_ON : TXT_OFF, pick: () => this.setState({ mstate: o, playing: '' }) })) })),
+      mcards: [['Routines', ROUT, sel, 'one picked at random each time it starts'], ['Actions', ACT, act, 'played now and then while left alone']].map(([title, pool2, chosen2, hint]) => {
+        const tog = (n) => () => {
+          const isR = title === 'Routines';
+          if (isR && chosen2.includes(n) && chosen2.length === 1) return; // a state needs one routine
+          const next = chosen2.includes(n) ? chosen2.filter((x) => x !== n) : chosen2.concat([n]);
+          this.setState({ [isR ? 'sel' : 'act']: Object.assign({}, isR ? s.sel : s.act, { [ms]: next }) });
+        };
+        const tile = (n) => { const dis = n === 'Black hole' && ms !== 'Asleep';
+          const used = chosen2.includes(n);
+          return { label: n, icon: IC[MOT[n][0]], about: MOT[n][1], dis, dash: dis ? 'dashed' : 'solid', edge: used ? ON : dis ? '#34343B' : '#2C2C33', col: used ? TXT_ON : dis ? '#5A5A63' : TXT_OFF, ink: used ? ON : dis ? '#5A5A63' : '#8B8B94',
+            pick: tog(n), hover: () => { clearTimeout(this.hovT); this.setState({ hov: n }); this.hovT = setTimeout(() => { this.playReal(n); this.setState({ playing: n }); }, 350); } }; }; // rest on it: it plays
+        return { title: title.toUpperCase() + ' · ' + chosen2.length, hint, none: !chosen2.length,
+          used: pool2.filter((n) => chosen2.includes(n)).map(tile), rest: pool2.filter((n) => !chosen2.includes(n)).map(tile) };
+      }),
+      // shortcuts
+      kgroups: [{ title: 'ANYWHERE', rows: KEYS.filter((k) => k.g === 0).map(keyRow) }, { title: 'ON A CORE · KEY TO HOLD', rows: MOUSE.map(mouseRow) }, { title: 'IN THE REPLY LINE', rows: KEYS.filter((k) => k.g === 2).map(keyRow) }],
+      // performance
+      smooth: Object.keys(SMOOTH).map((o) => ({ label: o, sub: SMOOTH[o], on: s.smooth === o, edge: s.smooth === o ? ON : '#34343B', col: s.smooth === o ? TXT_ON : TXT_OFF, pick: set('smooth', o) })),
+      smoothNote: NOTE[s.smooth],
     };
   }
 }
