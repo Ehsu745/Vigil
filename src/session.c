@@ -1,7 +1,9 @@
 /* Session state machine and the per-state look. Events move a session between states; each frame the
  * drawn look eases toward the look of the state it is in. */
 #include "dodeca.h"
+#include <errno.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -88,6 +90,7 @@ void room_apply(Room *r, const Event *e) {
         session_init(s, e->sid, e->t, NULL);
     }
     s->last = e->t;
+    if (e->pid > 0) s->pid = e->pid;
     if (e->cwd[0]) snprintf(s->name, sizeof s->name, "%s", e->cwd);
     if (!strcmp(ev, "SessionStart")) set_state(s, ST_IDLE, e->t);
     else if (!strcmp(ev, "UserPromptSubmit")) set_state(s, ST_THINK, e->t);
@@ -116,8 +119,13 @@ static void ease(float *a, float b, float k) { *a += (b - *a) * k; }
 static void ease_col(Col *a, Col b, float k) { ease(&a->r, b.r, k); ease(&a->g, b.g, k); ease(&a->b, b.b, k); }
 
 void room_tick(Room *r, const Shape *sh, double now, float dt) {
+    /* every two seconds: is each session's Claude Code process still there? A session that was closed without
+     * a SessionEnd event (its window was closed, it was killed) goes as soon as its process is gone. */
+    int check = now - r->checked > 2.0;
+    if (check) r->checked = now;
     for (int i = 0; i < r->n;) {
-        if (now - r->s[i].last > DROP_AFTER) drop(r, &r->s[i]);
+        int gone = check && r->s[i].pid > 0 && kill(r->s[i].pid, 0) == -1 && errno == ESRCH;
+        if (gone || now - r->s[i].last > DROP_AFTER) drop(r, &r->s[i]);
         else i++;
     }
     float k = 1.0f - expf(-dt * 4.0f);

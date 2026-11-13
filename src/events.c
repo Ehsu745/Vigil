@@ -59,6 +59,7 @@ int event_parse(const char *line, size_t n, Event *e) {
     field(line, end, "cwd", e->cwd, sizeof e->cwd);
     field(line, end, "tool", e->tool, sizeof e->tool);
     field(line, end, "n", e->ntype, sizeof e->ntype);
+    if (field(line, end, "pid", num, sizeof num)) e->pid = atoi(num);
     return e->t > 0;
 }
 

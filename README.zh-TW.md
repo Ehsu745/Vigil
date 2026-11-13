@@ -19,7 +19,7 @@
 | DONE | `Stop` | 核心爆亮加一圈衝擊波，2.5 秒後回 IDLE |
 | SLEEP | IDLE 超過 90 秒 | 整體變暗，實心核仍看得見 |
 
-`SessionEnd` 會移除那一顆；30 分鐘沒有任何事件的 session 也會移除。
+`SessionEnd` 會移除那一顆。hook 也會記下 Claude Code 的行程編號，顯示程式每兩秒檢查一次，行程不在了就移除（例如直接關掉視窗、沒送出 `SessionEnd` 的情況）。查不到行程編號的 session 則是 30 分鐘沒有事件後移除。
 
 ## 需求
 
@@ -52,14 +52,50 @@ python3 install_hooks.py --apply  # 實際寫入（會先備份）
 python3 install_hooks.py --pane --apply    # 之後每次開 Claude Code 自動開窗格
 ```
 
-加了 `--pane` 安裝之後，`SessionStart` 會多執行 `open_pane.sh`：把 Claude Code 所在的窗格往右切一塊跑 `dodeca-core --pane --exit-when-empty`，縮到 34 個字元寬，再把鍵盤焦點還給 Claude Code。已經有窗格開著就不會再開；最後一個 session 結束 15 秒後窗格自己關掉。
+加了 `--pane` 安裝之後，`SessionStart` 會多執行 `open_pane.sh`：把 Claude Code 所在的窗格往右切一塊跑 `dodeca-core --pane --exit-when-empty`，縮到 34 個字元寬，再把鍵盤焦點還給 Claude Code。已經有窗格的分頁不會再開；最後一個 session 結束 15 秒後窗格自己關掉。
 
+- 多個分頁：每個跑 Claude Code 的分頁都會在右緣得到一個窄窗格，同一個分頁不會重複切。浮動面板只有一個，其他分頁的窗格只負責佔位（`spacer.sh`）；面板原本所在的分頁被關掉時，會由其中一個佔位窗格接手。
 - 窗格寬度：環境變數 `DODECA_PANE_COLS`（預設 34）。
-- 縮窄窗格要靠 iTerm2 的 Python API（`pane_api.py`）：AppleScript 能切窗格，但在全螢幕視窗裡不能調寬度。需要兩個一次性步驟：在 iTerm2 的 Settings > General > Magic 勾選 Enable Python API；再把腳本複製到 iTerm2 找腳本的資料夾：`mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py`（之後 `open_pane.sh` 會自動保持這份複本是最新的）。沒設定的話窗格會是一半寬，可以自己拖分隔線，面板會跟著變。
+- 縮窄窗格要靠 iTerm2 的 Python API（`pane_api.py`）：AppleScript 能切窗格，但在全螢幕視窗裡不能調寬度。需要兩個一次性步驟：在 iTerm2 的 Settings > General > Magic 勾選 Enable Python API；再把腳本複製到 iTerm2 找腳本的資料夾：`mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py`（之後 `open_pane.sh` 會自動保持這份複本是最新的）。沒設定的話窗格會是一半寬（可以自己拖分隔線，面板會跟著變），而且因為 AppleScript 看不出分頁裡有沒有窗格，整個 iTerm2 只會開一個。
 - 除錯：`DODECA_PANE_DEBUG=1 sh open_pane.sh` 會在前景執行並顯示 iTerm2 的回應。
 - 額外參數：環境變數 `DODECA_PANE_ARGS`，例如 `"--shape geo2 --res 1200"`。
 - 第一次執行時 macOS 會問是否允許控制 iTerm2，要按允許。
 - 不用自動開的話，自己切一個窗格跑 `./dodeca-core --pane` 也一樣。
+
+### 快速開新 session：`cct`、`ccs`
+
+在 `~/.zshrc` 加上這兩個函式，就能從目前的資料夾直接在 iTerm2 開一個新的 Claude Code，參數會原封不動傳給 `claude`：
+
+- `cct`：開新分頁跑 `claude`。新分頁的 `SessionStart` 會替它切出自己的側邊窗格。
+- `ccs`：把目前的窗格往右切一塊跑 `claude`，跟現在的 session 並排在同一個分頁。
+
+```sh
+cct() {
+  local dir="$PWD" args="$*"
+  osascript <<EOF
+tell application "iTerm2"
+  tell current window
+    create tab with default profile
+    tell current session to write text "cd '${dir}' && claude ${args}"
+  end tell
+end tell
+EOF
+}
+
+ccs() {
+  local dir="$PWD" args="$*"
+  osascript <<EOF
+tell application "iTerm2"
+  tell current session of current window
+    set newSession to (split vertically with default profile)
+    tell newSession to write text "cd '${dir}' && claude ${args}"
+  end tell
+end tell
+EOF
+}
+```
+
+例如 `cct --continue`、`ccs --model sonnet`。資料夾路徑含單引號時會出錯。
 
 ## 浮動面板（macOS）
 
@@ -74,7 +110,7 @@ sh mac/build.sh
 
 - 面板只留在啟動時所在的那個 Space，也就是啟動它的那個全螢幕 iTerm2 視窗；切到別的桌面或 App 不會跟過去。
 - 加 `--all-spaces` 會改成每個 Space 都出現，這時只在 iTerm2 是最前面的 App 時顯示（再加 `--always` 取消這個限制）。
-- 切到沒有那個空窗格的 iTerm2 分頁時，面板仍會浮在右緣，可能蓋到文字；介意的話用 `--bg 1e1e1e` 給它實心底色。
+- 切到沒有側邊窗格的 iTerm2 分頁（例如沒在跑 Claude Code 的分頁）時，面板仍會浮在右緣，可能蓋到文字；介意的話用 `--bg 1e1e1e` 給它實心底色。
 - 手動執行時面板寬度是螢幕的 17%，用 `--width`（單位是點）和 `--top` 調整位置，`--inset` 調整第一個 session 上方的留白（預設 30）；由 `open_pane.sh` 啟動時會加 `--fit-pane`，改成跟著那個空窗格的大小。
 - 字體預設 Monaco 12，用 `--font`、`--font-size` 對齊你的 iTerm2 設定。
 - 想退回終端機窗格版：`export DODECA_PANE_MODE=terminal`。
@@ -96,6 +132,7 @@ sh mac/build.sh
 ```
 --pane            側邊窗格的直排版面
 --exit-when-empty 沒有 session 超過 15 秒就結束
+--count           印出目前有幾個 session 在跑後結束（給腳本用）
 --demo [N]        用 N 個假 session（1-6，預設 3）
 --shape NAME      dodeca | bucky | geo2（預設）| geo3
 --res N           影像最長邊的像素數（預設 960，`--pane` 時 420；越大越細但終端機負擔越重）
@@ -115,9 +152,10 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 | 檔案 | 內容 |
 |---|---|
 | `mac/panel.m` | 浮動面板：Cocoa 視窗、文字標籤、把畫布轉成透明影像 |
-| `pane_api.py` | 用 iTerm2 Python API 切窗格並設定寬度 |
-| `open_pane.sh` | `SessionStart` hook：在 iTerm2 裡自動切出側邊窗格 |
-| `hook.py` | 每個事件 append 一行 JSON：時間、session id、事件名、資料夾名、工具名、通知類型 |
+| `pane_api.py` | 用 iTerm2 Python API 切窗格並設定寬度，每個分頁只切一次 |
+| `spacer.sh` | 其他分頁裡替浮動面板佔位的空窗格 |
+| `open_pane.sh` | `SessionStart` hook：在 iTerm2 裡替每個分頁自動切出側邊窗格 |
+| `hook.py` | 每個事件 append 一行 JSON：時間、session id、事件名、資料夾名、工具名、通知類型，以及（`SessionStart`、`UserPromptSubmit` 時）Claude Code 的行程編號 |
 | `src/events.c` | 跟著事件檔讀新增的行 |
 | `src/session.c` | 事件對應到狀態，以及每個狀態的外觀參數表 `LOOKS` |
 | `src/geom.c` | 產生正十二面體、截角二十面體、測地球的頂點與邊 |
@@ -128,7 +166,7 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 
 ## 隱私
 
-事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱和通知類型，不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
+事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱、通知類型和 Claude Code 的行程編號，不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
 
 ## 已知限制
 

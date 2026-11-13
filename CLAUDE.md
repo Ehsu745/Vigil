@@ -38,14 +38,15 @@ Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──�
 - `src/main.c`: terminal main loop, the output modes (kitty / iTerm2 inline PNG / half-block cells), options, `--snapshot`.
 - `mac/panel.m`: the floating panel. It reuses `events.c`, `geom.c`, `session.c` and `render.c`, but not `main.c`.
 - `hook.py`, `install_hooks.py`: the Claude Code hook and its installer.
-- `open_pane.sh`, `pane_api.py`: open and size the iTerm2 side pane on `SessionStart`.
+- `open_pane.sh`, `pane_api.py`: give each iTerm2 tab running Claude Code its side pane on `SessionStart` (once per tab, marked with the `user.dodeca` session variable).
+- `spacer.sh`: the blank pane in every tab but the floating panel's; takes the panel over if the panel's tab is closed (uses `dodeca-core --count`).
 
 To change colors or motion, edit `LOOKS` in `src/session.c`. A new state needs changes in `dodeca.h` (the enum), `session.c` (`STATE_NAME`, `STATE_TEXT`, `LOOKS`, the transitions), and both READMEs.
 
 ## Rules
 
 - **The hook must never get in Claude Code's way.** `hook.py` always exits 0, prints nothing and finishes fast. It writes each event with a single `O_APPEND` write so concurrent sessions don't interleave lines.
-- **Privacy:** the event file holds only time, session id, event name, folder name (not the full path), tool name and notification type. Never add prompts, tool input/output or paths. The file is mode 600 and its directory 700.
+- **Privacy:** the event file holds only time, session id, event name, folder name (not the full path), tool name, notification type and Claude Code's process id. Never add prompts, tool input/output or paths. The file is mode 600 and its directory 700.
 - **No dependencies:** the Python scripts use only the standard library. The C code uses only libc, libm and zlib (plus Cocoa for the panel).
 - **Don't run `python3 install_hooks.py --apply` or `--remove` without asking.** They edit the user's `~/.claude/settings.json`. Running it without flags is a dry run and is safe.
 - The labels use a built-in 3×5 bitmap font (ASCII letters, digits, a few symbols). Anything else renders as `?`.

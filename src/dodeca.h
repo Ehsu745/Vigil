@@ -14,7 +14,7 @@
 typedef struct { float r, g, b; } Col;
 
 /* ---- events.c: follow the JSONL file the hook appends to ------------------------------------ */
-typedef struct { double t; char sid[72], ev[24], cwd[40], tool[40], ntype[32]; } Event;
+typedef struct { double t; int pid; char sid[72], ev[24], cwd[40], tool[40], ntype[32]; } Event;
 typedef struct { char path[1024]; long pos; char *buf; size_t buflen; } Tail;
 void tail_init(Tail *t, const char *path);
 int tail_history(Tail *t, double since, Event *out, int max); /* events newer than `since` already in the file */
@@ -46,6 +46,7 @@ typedef struct { int e, dir; float t, sp; } Pulse;
 typedef struct {
     char sid[72], name[40], tool[40];
     int state;
+    int pid;       /* the Claude Code process, when the hook could tell; 0 = unknown */
     double created, last, state_t, hold_work_until, burst_at;
     Look cur;      /* what is drawn now: eases toward LOOKS[shown state] */
     float ax, ay;  /* rotation */
@@ -54,7 +55,7 @@ typedef struct {
     uint32_t rng;
 } Session;
 
-typedef struct { Session s[MAX_SESS]; int n; } Room;
+typedef struct { Session s[MAX_SESS]; int n; double checked; } Room;
 
 void room_apply(Room *r, const Event *e);
 void room_tick(Room *r, const Shape *sh, double now, float dt);

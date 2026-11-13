@@ -1,16 +1,17 @@
 #!/bin/sh
-# Claude Code SessionStart hook: open the dodeca-core side pane next to this session, once.
+# Claude Code SessionStart hook: make sure the tab this session runs in has the dodeca-core side pane.
 #
-# Splits the iTerm2 pane Claude Code is running in, narrows the new pane on the right, and gives the
-# keyboard back to Claude Code. If the floating panel has been built (mac/build.sh), the new pane stays
-# empty and the panel floats over it; otherwise the pane itself draws the sessions (dodeca-core --pane).
-# Does nothing outside iTerm2 or when a pane is already open. Prints nothing and always exits 0, so it
-# cannot disturb Claude Code.
+# Adds a narrow pane at the right edge of the tab and gives the keyboard back to Claude Code. If the
+# floating panel has been built (mac/build.sh) the pane stays empty and the panel floats over it;
+# otherwise the pane itself draws the sessions (dodeca-core --pane). There is one floating panel, so in
+# any further tab the pane only holds the space free (spacer.sh). A tab that already has its pane is
+# left alone. Does nothing outside iTerm2. Prints nothing and always exits 0, so it cannot disturb
+# Claude Code.
 #
-# Narrowing the pane needs iTerm2's Python API (pane_api.py); AppleScript can split a pane but cannot
-# resize one in a full-screen window. Without the Python API the new pane is half the width.
-# To turn it on, once: enable the Python API in iTerm2 (Settings > General > Magic) and copy the script
-# to where iTerm2 looks for scripts:
+# This needs iTerm2's Python API (pane_api.py): AppleScript can split a pane but cannot resize one in a
+# full-screen window, and cannot tell whether a tab already has the pane. Without the Python API there
+# is one pane only, at half the width. To turn the API on, once: enable it in iTerm2 (Settings >
+# General > Magic) and copy the script to where iTerm2 looks for scripts:
 #   mkdir -p ~/Library/Application\ Support/iTerm2/Scripts
 #   cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/dodeca_pane.py
 #
@@ -23,14 +24,6 @@
 [ -n "$ITERM_SESSION_ID" ] || exit 0
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-if [ -x "$DIR/dodeca-panel" ] && [ "$DODECA_PANE_MODE" != "terminal" ]; then
-    CMD="'$DIR/dodeca-panel' --fit-pane --exit-when-empty $DODECA_PANE_ARGS"
-elif [ -x "$DIR/dodeca-core" ]; then
-    CMD="'$DIR/dodeca-core' --pane --exit-when-empty $DODECA_PANE_ARGS"
-else
-    exit 0
-fi
-
 PIDFILE="$HOME/.dodeca-core/pane.pid"
 SID=${ITERM_SESSION_ID#*:} # "w0t0p0:UUID" -> the session's id
 COLS=${DODECA_PANE_COLS:-34}
@@ -39,21 +32,41 @@ API_SCRIPT="$HOME/Library/Application Support/iTerm2/Scripts/dodeca_pane.py"
 
 pane_is_open() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
 
+WAS_OPEN=0
+pane_is_open && WAS_OPEN=1
+
+if [ -x "$DIR/dodeca-panel" ] && [ "$DODECA_PANE_MODE" != "terminal" ]; then
+    if [ "$WAS_OPEN" = 1 ]; then
+        CMD="sh '$DIR/spacer.sh' $DODECA_PANE_ARGS" # the panel exists: this tab only needs the space kept free
+    else
+        CMD="'$DIR/dodeca-panel' --fit-pane --exit-when-empty $DODECA_PANE_ARGS"
+    fi
+elif [ -x "$DIR/dodeca-core" ]; then
+    CMD="'$DIR/dodeca-core' --pane --exit-when-empty $DODECA_PANE_ARGS" # drawn in the terminal: one per tab
+else
+    exit 0
+fi
+
 open_pane() {
-    # First choice: the Python API, which can also set the width. it2run asks iTerm2 to start a script
-    # from its own Scripts folder and returns at once, so wait and see whether the pane appears.
+    # First choice: the Python API. it2run asks iTerm2 to start a script from its own Scripts folder and
+    # returns at once; the script does nothing if this tab already has its pane.
     if [ -x "$IT2RUN" ] && [ -f "$API_SCRIPT" ]; then
         cmp -s "$DIR/pane_api.py" "$API_SCRIPT" || cp "$DIR/pane_api.py" "$API_SCRIPT" # keep the copy current
         "$IT2RUN" dodeca_pane.py "$SID" "$CMD" "$COLS"
+        [ "$WAS_OPEN" = 1 ] && return 0
         i=0
-        while [ "$i" -lt 20 ]; do
+        while [ "$i" -lt 20 ]; do # nothing was open before: wait and see whether the pane appears
             sleep 0.5
             pane_is_open && return 0
             i=$((i + 1))
         done
         echo "open_pane: the Python API script opened nothing within 10 s (see iTerm2 > Scripts > Manage > Console); using AppleScript" >&2
     fi
-    # Otherwise AppleScript: the pane opens, at half the width.
+    # Otherwise AppleScript, which cannot check the tab: one pane only, at half the width.
+    if pane_is_open; then
+        [ -n "$DODECA_PANE_DEBUG" ] && echo "open_pane: a pane is already open (pid $(cat "$PIDFILE")) and the Python API is not set up" >&2
+        return 0
+    fi
     osascript - "$SID" "$CMD" <<'EOF'
 on run argv
     set sid to item 1 of argv
@@ -74,11 +87,6 @@ on run argv
 end run
 EOF
 }
-
-if pane_is_open; then
-    [ -n "$DODECA_PANE_DEBUG" ] && echo "open_pane: a pane is already open (pid $(cat "$PIDFILE")); close it first" >&2
-    exit 0
-fi
 
 if [ -n "$DODECA_PANE_DEBUG" ]; then
     open_pane

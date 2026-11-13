@@ -269,6 +269,7 @@ static void usage(void) {
          "\n"
          "  --pane            side-pane layout: sessions top to bottom, text first, then the polyhedron\n"
          "  --exit-when-empty quit once no session has been running for 15 seconds\n"
+         "  --count           print how many sessions are running and exit\n"
          "  --demo [N]        made-up sessions instead of the events file (1-6, default 3)\n"
          "  --shape NAME      dodeca | bucky | geo2 (default) | geo3\n"
          "  --kitty | --iterm | --cells   force how the picture is sent (default: ask the terminal)\n"
@@ -283,6 +284,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    int count = 0;
     int out = OUT_AUTO, layout = LAYOUT_GRID, res = 0, fps = 20, demo_n = 0, snap_w = 900, snap_h = 500, exit_empty = 0;
     float glow = 1.0f, core_frac = 0.35f;
     double snap_at = 8.0;
@@ -293,6 +295,7 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "--demo")) { demo_n = 3; if (v && v[0] >= '1' && v[0] <= '6' && !v[1]) { demo_n = v[0] - '0'; i++; } }
         else if (!strcmp(a, "--pane")) layout = LAYOUT_LIST;
         else if (!strcmp(a, "--exit-when-empty")) exit_empty = 1;
+        else if (!strcmp(a, "--count")) count = 1;
         else if (!strcmp(a, "--kitty")) out = OUT_KITTY;
         else if (!strcmp(a, "--iterm")) out = OUT_ITERM;
         else if (!strcmp(a, "--cells")) out = OUT_CELLS;
@@ -326,6 +329,18 @@ int main(int argc, char **argv) {
     Col bg = {0, 0, 0};
     uint8_t *rgb = NULL;
     size_t rgb_cap = 0;
+
+    /* --count: how many sessions are running right now, for scripts */
+    if (count) {
+        Tail t;
+        double now = wall();
+        tail_init(&t, events);
+        int n = tail_history(&t, now - 1800, ev, 1024);
+        for (int i = 0; i < n; i++) room_apply(&room, &ev[i]);
+        room_tick(&room, &shape, now, 0); /* drops the sessions whose process is gone */
+        printf("%d\n", room.n);
+        return 0;
+    }
 
     /* --snapshot: run the demo on a made-up clock and write one frame */
     if (snapshot) {
