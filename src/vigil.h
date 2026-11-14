@@ -242,9 +242,11 @@ typedef struct {
     /* set by a routine (or action) every frame, zero otherwise; read by the renderer */
     unsigned char tmi[MAX_T];            /* each triangle's own matrix: tmx[tmi - 1] (0 = none), applied after it slid out */
     float tmx[MAX_T + 1][9];
-    int ntm, tt_on, ta_on, trail_on;
+    int ntm, tt_on, ta_on, trail_on, edge_on;
     float tt[MAX_T][3];                  /* each triangle carried off whole, shell units */
     float talpha[MAX_T];                 /* how see-through each triangle is (1 = as usual), when ta_on */
+    float edge_k[MAX_T];                 /* a blade, when edge_on: its corner dots fade and its cutting edge (edge_v, two */
+    unsigned char edge_v[MAX_T][2];      /* nodes) glows into it, by this much (0..1) */
     float squash, sq_ax[3];              /* the shell pressed flat along sq_ax (Compressor) */
     float bright;                        /* core and threads brighter by this factor (1 = as usual) */
     float hole;                          /* the black hole's void, 0..1 (its dust and stars: rs.hole) */

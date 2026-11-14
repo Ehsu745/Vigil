@@ -470,11 +470,12 @@ static void r_long(Ctx *c) {
 #define BL_T2 (BL_T1 + BL_SWEEP + BL_PAUSE)
 #define BL_TH (BL_T2 + BL_SWEEP + .2f)
 #define BL_END (BL_TH + BL_OUT + 4 * BL_STAG)
-static const float BL_LEN = .5f;  /* a blade's length, shell radii (of the core at its usual size) */
+static const float BL_LEN = .625f; /* a blade's length, shell radii (of the core at its usual size) */
 static const float BL_SHRINK = .22f; /* the core draws in by this much while its blades are out, to give them room */
-/* a blade's corners in its own frame (along it to the tip, across it), times its length: the tip, a corner almost
- * under it on a long straight edge, and the other a little out to the side and up, a thin sheared dagger */
-static const float BL_SHAPE[3][2] = {{.66f, 0}, {-.34f, -.03f}, {-.25f, .13f}};
+/* a blade's corners in its own frame (along it to the tip, across it), times its length: the tip, a corner right
+ * under it (the long edge, straight along the blade), and the other a little out to the side and up (the short edge
+ * across the foot; the middle one, from there to the tip, is the cutting edge): a thin sheared dagger */
+static const float BL_SHAPE[3][2] = {{.66f, 0}, {-.34f, 0}, {-.25f, .13f}};
 
 static void frame_cols(float *F, const float *a, const float *b, const float *c) { for (int r = 0; r < 3; r++) { F[r * 3] = a[r]; F[r * 3 + 1] = b[r]; F[r * 3 + 2] = c[r]; } }
 static void m3_to_q(const float *m, float *q) { /* a rotation as a unit quaternion (w, x, y, z) */
@@ -505,16 +506,26 @@ static void m3_slerp(float *out, const float *A, const float *B, float u) { /* t
     q_to_m3(q, out);
 }
 static float wrap_pi(float a) { return atan2f(sinf(a), cosf(a)); }
-/* blade i hovering in the fan behind the core, on the right (side > 0) or the left: they fan out from straight up to
- * low on that side, each pointing away from the core */
+/* blade i hovering behind the core while it waits, along the curve y = -e^(2x) / 2 (y up, BL_CURVE shell radii to
+ * one unit): blade 1 (i = 0) at x = -1, blade 2 at -0.5, blade 3 at 0, 4 and 5 as far the other way. Each stands
+ * square to the curve: its long edge along the curve's normal, from the corner where the long and short edges meet,
+ * which sits on the curve. The core's centre is at x = 0, level with blade 5: so blade 5 lies to the side of it and
+ * the others rise above, the steepest first. Mirrored on the left (side < 0). p is the blade's centre (as everywhere),
+ * th the way its tip points. */
+static const float BL_CURVE = .21f; /* as large as fits: blade 1's tip just inside the tile */
 static void blade_fan(int i, float side, float clock, float *p, float *th) {
-    float deg = 95 - i * 18.75f, a = (side > 0 ? deg : 180 - deg) * PI_F / 180, r = 1.0f + .025f * sinf(clock * 2.2f + i * 1.3f);
-    set3(p, r * cosf(a), -r * sinf(a), -.55f);
+    float x = (i - 2) * .5f, y = -.5f * expf(2 * x) + .5f * expf(2), m = -expf(2 * x), bob = .02f * sinf(clock * 2.2f + i * 1.3f);
+    float a = atan2f(1, -m * side); /* the normal, up from the curve (math angle, y up) */
+    float T[2] = {cosf(a), -sinf(a)}, B[2] = {sinf(a), cosf(a)}; /* along the blade, and across it (y down) */
+    float cx = (BL_SHAPE[0][0] + BL_SHAPE[1][0] + BL_SHAPE[2][0]) / 3, cy = (BL_SHAPE[0][1] + BL_SHAPE[1][1] + BL_SHAPE[2][1]) / 3;
+    float ax = (BL_SHAPE[1][0] - cx) * BL_LEN, ay = (BL_SHAPE[1][1] - cy) * BL_LEN; /* the foot corner, from the centre */
+    float fx = side * x * BL_CURVE, fy = -y * BL_CURVE + bob;
+    set3(p, fx - T[0] * ax - B[0] * ay, fy - T[1] * ax - B[1] * ay, -.55f);
     *th = a;
 }
 /* blade i in the V, part u of a sweep in direction dir (+1: left to right); vel: the lead's speed (per second) */
 static void blade_vee(int i, float dir, float u, float *p, float *th, float *lead, float *vel) {
-    const float RX = 1.0f, Y0 = -.35f, YD = .3f, DROP = .7f, Z0 = -.55f, ZD = 1.55f, GB = .3f, GS = .15f; /* DROP: the line slopes down across */
+    const float RX = 1.0f, Y0 = -.35f, YD = .3f, DROP = .7f, Z0 = -.55f, ZD = 1.55f, GB = .5f, GS = .1f; /* DROP: the line slopes down across; the V: y = |5x| (GB = 5 GS) */
     float q = u - .75f * sinf(TAU * u) / TAU, dq = 1 - .75f * cosf(TAU * u); /* slow behind, fastest across the front */
     float L[3] = {-dir * RX * cosf(PI_F * q), Y0 + YD * sinf(PI_F * q) + DROP * (q - .5f), Z0 + ZD * sinf(PI_F * q)};
     float D[3] = {dir * RX * PI_F * sinf(PI_F * q), YD * PI_F * cosf(PI_F * q) + DROP, ZD * PI_F * cosf(PI_F * q)}, H[3];
@@ -555,7 +566,7 @@ static void blades_new_round(Ctx *c) {
 }
 /* blade b's triangle: its centre, and its own frame (to the tip, across, out) with the tip's and a corner's places in
  * it; then the matrix that turns the triangle into the blade (in that frame) */
-static void blade_model(const Shape *sh, const Blade *b, float *cen, float *Fm, float *S2) {
+static void blade_model(const Shape *sh, const Blade *b, float *cen, float *Fm, float *S2, int *side_v) {
     float en[3], et[3], eb[3], vt[3], va[3], vb[3];
     for (int q = 0; q < 3; q++) cen[q] = (sh->v[b->tip][q] + sh->v[b->a][q] + sh->v[b->b][q]) / 3;
     for (int q = 0; q < 3; q++) { vt[q] = sh->v[b->tip][q] - cen[q]; va[q] = sh->v[b->a][q] - cen[q]; vb[q] = sh->v[b->b][q] - cen[q]; }
@@ -565,7 +576,8 @@ static void blade_model(const Shape *sh, const Blade *b, float *cen, float *Fm, 
     norm3(et); cross3(eb, en, et);
     frame_cols(Fm, et, eb, en);
     float ot[2] = {dot3(vt, et), dot3(vt, eb)}, oa[2] = {dot3(va, et), dot3(va, eb)}, ob[2] = {dot3(vb, et), dot3(vb, eb)};
-    if (oa[1] > ob[1]) memcpy(oa, ob, sizeof oa); /* the corner on the straight edge: the one on the -across side */
+    *side_v = b->b;
+    if (oa[1] > ob[1]) { memcpy(oa, ob, sizeof oa); *side_v = b->a; } /* the foot corner: the one on the -across side; the other is on the cutting edge */
     float cx = (BL_SHAPE[0][0] + BL_SHAPE[1][0] + BL_SHAPE[2][0]) / 3, cy = (BL_SHAPE[0][1] + BL_SHAPE[1][1] + BL_SHAPE[2][1]) / 3, Lm = BL_LEN * CIRCUM;
     float tt[2] = {(BL_SHAPE[0][0] - cx) * Lm, (BL_SHAPE[0][1] - cy) * Lm}, ta[2] = {(BL_SHAPE[1][0] - cx) * Lm, (BL_SHAPE[1][1] - cy) * Lm};
     float det = ot[0] * oa[1] - oa[0] * ot[1];
@@ -592,8 +604,8 @@ static void r_blades(Ctx *c) {
     for (int i = 0; i < B->n; i++) {
         Blade *b = &B->blade[i];
         float cen[3], Fm[9], S2[4], P[3], th, k = 1, out = 0; /* k: how far it has become a blade (0: at home in the shell) */
-        int smash = 0;
-        blade_model(sh, b, cen, Fm, S2);
+        int smash = 0, side_v;
+        blade_model(sh, b, cen, Fm, S2, &side_v);
         if (e < BL_T1 || e >= BL_TH) { /* leaving the shell into the fan on the side the first sweep starts from, or home from there */
             float u = e < BL_T1 ? clampf((e - i * BL_STAG) / BL_OUT, 0, 1) : clampf((e - BL_TH - (4 - i) * BL_STAG) / BL_OUT, 0, 1);
             k = e < BL_T1 ? io3(u) : 1 - io3(u);
@@ -614,13 +626,13 @@ static void r_blades(Ctx *c) {
                 for (int q = 0; q < 3; q++) want[q] = om[q] / fmaxf(ll, .2f) * CORE * w;
                 has_want = 1;
             }
-            if (P[2] > 0) for (int v = 0; v < 3; v++) { int nv = sh->t[b->t][v]; m->glow[nv] = fmaxf(m->glow[nv], .25f * w); }
         } else blade_fan(i, (e < BL_T2 ? d1 : -d1), clock, P, &th); /* hovering in the fan */
         B->pos[i][0] = P[0]; B->pos[i][1] = P[1]; B->pos[i][2] = P[2];
         B->smash[i] = (unsigned char)smash;
         if (k <= 0) continue; /* at home: drawn as part of the shell */
         for (int q = 0; q < 3; q++) P[q] /= sc;
-        for (int v = 0; v < 3; v++) { int nv = sh->t[b->t][v]; m->glow[nv] = fmaxf(m->glow[nv], .3f * k); }
+        m->edge_on = 1; m->edge_k[b->t] = k; /* no corner dots; the cutting edge glows inward */
+        m->edge_v[b->t][0] = (unsigned char)b->tip; m->edge_v[b->t][1] = (unsigned char)side_v;
         /* the blade's frame in view space: along it to the tip, across, and its face toward you */
         float T[3] = {cosf(th), -sinf(th), 0}, N[3] = {0, 0, 1}, Bx[3], Fv[9], Rb[9], Rk[9], FmT[9], S3[9], Lin[9], X[9], tmp[9];
         cross3(Bx, N, T);
@@ -1585,8 +1597,8 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     m->ang_on = 0; m->scan_a = 0; m->inner = 0;
     /* what a routine sets afresh every frame */
     memset(m->tmi, 0, sizeof m->tmi);
-    m->ntm = 0; m->tt_on = m->ta_on = m->trail_on = 0; m->squash = 0; m->hole = 0;
-    memset(m->tt, 0, sizeof m->tt);
+    m->ntm = 0; m->tt_on = m->ta_on = m->trail_on = m->edge_on = 0; m->squash = 0; m->hole = 0;
+    memset(m->tt, 0, sizeof m->tt); memset(m->edge_k, 0, sizeof m->edge_k);
 
     /* particles and rings age */
     for (int i = 0; i < MAX_SPARK; i++) {

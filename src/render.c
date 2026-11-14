@@ -113,6 +113,30 @@ static void disc(Canvas *c, Clip cl, float cx, float cy, float rad, Col col, flo
     }
 }
 
+/* a blade's cutting edge (a, b) glowing into it: light that is strongest on the edge and fades out toward the far
+ * corner o, so the triangle reads as a blade with a bright edge */
+static void edge_glow(Canvas *c, Clip cl, const float *a, const float *b, const float *o, Col col, float alpha) {
+    float ex = b[0] - a[0], ey = b[1] - a[1], el = sqrtf(ex * ex + ey * ey);
+    if (el < 1e-3f || alpha <= 0.002f) return;
+    float nx = -ey / el, ny = ex / el, h = (o[0] - a[0]) * nx + (o[1] - a[1]) * ny; /* the far corner's height over the edge */
+    if (fabsf(h) < 0.5f) return;
+    float d0 = (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    int bx0 = (int)floorf(fminf(a[0], fminf(b[0], o[0]))), bx1 = (int)ceilf(fmaxf(a[0], fmaxf(b[0], o[0]))) + 1;
+    int by0 = (int)floorf(fminf(a[1], fminf(b[1], o[1]))), by1 = (int)ceilf(fmaxf(a[1], fmaxf(b[1], o[1]))) + 1;
+    if (bx0 < cl.x0) bx0 = cl.x0;
+    if (by0 < cl.y0) by0 = cl.y0;
+    if (bx1 > cl.x1) bx1 = cl.x1;
+    if (by1 > cl.y1) by1 = cl.y1;
+    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
+        float px = x + 0.5f, py = y + 0.5f;
+        /* inside: the same side of each edge as the triangle */
+        float w0 = ((b[0] - px) * (o[1] - py) - (b[1] - py) * (o[0] - px)) / d0, w1 = ((o[0] - px) * (a[1] - py) - (o[1] - py) * (a[0] - px)) / d0;
+        if (w0 < 0 || w1 < 0 || w0 + w1 > 1) continue;
+        float u = clamp01(((px - a[0]) * nx + (py - a[1]) * ny) / h), f = (1 - u) * (1 - u);
+        add(c, x, y, mix(col, WHITE, 0.5f * f), alpha * f);
+    }
+}
+
 /* faulty-lamp flicker: mostly on with a little jitter, broken up by dropouts and bursts of stutter */
 static double hash1(double n) { double x = sin(n * 127.1) * 43758.5453; return x - floor(x); }
 static float glitch_val(double t) {
@@ -473,6 +497,16 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
             draw_edge(c, cl, pa, pb, L, edge * alpha_of(mo, t2), thin, glow * sh->df, gg, k);
         }
     }
+    if (mo->edge_on) for (int t = 0; t < sh->nt; t++) { /* the blades' cutting edges */
+        float ek = mo->edge_k[t];
+        if (ek <= 0.01f) continue;
+        int va = mo->edge_v[t][0], vb = mo->edge_v[t][1], vo = sh->t[t][0];
+        for (int j = 0; j < 3; j++) if (sh->t[t][j] != va && sh->t[t][j] != vb) vo = sh->t[t][j];
+        float pa[3], pb[3], po[3];
+        at_tri(&P, mo, base, va, t, &rc_, pa); at_tri(&P, mo, base, vb, t, &rc_, pb); at_tri(&P, mo, base, vo, t, &rc_, po);
+        float d = 0.3f + 0.7f * ((pa[2] + pb[2] + po[2]) / 3 + CIRCUM) / (2 * CIRCUM); /* dimmer behind the core */
+        edge_glow(c, cl, pa, pb, po, L->eh, 0.8f * ek * d * edge * alpha_of(mo, t));
+    }
     for (int i = 0; i < sh->nv; i++) { /* the nodes: one dot for each place a node is drawn */
         int seen[MAX_DEG], ns = 0, nt = any ? sh->nvt[i] : 0;
         for (int j = 0; j <= nt; j++) {
@@ -486,6 +520,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
                 seen[ns++] = tt;
                 at_tri(&P, mo, base, i, tt, &rc_, p);
                 al = alpha_of(mo, tt);
+                if (mo->edge_on) al *= 1 - mo->edge_k[tt]; /* a blade has no corner dots */
                 if (al < 0.01f) continue;
             }
             float d = 0.3f + 0.7f * (p[2] + CIRCUM) / (2 * CIRCUM), gg = mo->glow[i];
