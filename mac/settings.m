@@ -4,6 +4,7 @@
 // is drawn by one flipped view in Windows' logical units (880 wide); what can be clicked is kept as hit boxes.
 // The preview is a view of its own with four made-up sessions, ticked while the window is open.
 #import "settings.h"
+#include "orbit.h"
 
 const unsigned TIP_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A};
 const unsigned TEXT_COLS[5] = {0, 0xF2F2F5, 0xF5D9A0, 0x9FE8C2, 0x9CCBFF};
@@ -29,6 +30,7 @@ static NSDictionary<NSString *, NSArray *> *choices(void) {
         @"glow": @[@0.7, @1.0, @1.4],
         @"scale": @[@0.75, @1.0, @1.3, @1.6],
         @"core": @[@0.25, @0.35, @0.45, @0.55],
+        @"gravity": @[@1, @2, @4, @8],
         @"frame": @[@"segments", @"lens", @"polar", @"diamond", @"lock", @"orbits", @"none"],
         @"wheelSpin": @[@0, @1, @2, @3, @4],
         @"tipMono": @[@YES, @NO],
@@ -78,7 +80,7 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     NSPoint _main, _grab, _vel; // the main core's centre (view points), where it was grabbed, its speed
     BOOL _dragging;
     NSRect _mainRect;
-    NSRect _small[4];
+    Orbit _ob[4];             // the small cores (1..3), in this view's points
 }
 - (BOOL)isOpaque { return NO; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
@@ -138,6 +140,33 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     m->hover_to = _dragging;
     room_tick(&_room, [self.host shape], now, dt);
     if (!_dragging) _orbit += dt;
+    // the small cores: gravity holds them on the orbit; dragged, the main core leaves them sliding round to the
+    // trailing side, and a fast fling sends them bouncing round the preview until the core comes close
+    CGFloat rx = cw / 2 - 8, ry = rx * 1.15, small = others ? fmin(cw * 0.2, 2 * M_PI * rx / 3 * 0.75) : 0;
+    rx -= small / 2; ry -= small / 2;
+    OrbitK ok = orbit_k([self num:@"gravity"], (float)rx, (float)small);
+    Orbit *ring[3];
+    int rn = 0;
+    for (int i = 1; i < 4; i++) if (_ob[i].init && !_ob[i].free) ring[rn++] = &_ob[i];
+    for (int i = 1; i < 4; i++) {
+        Orbit *ob = &_ob[i];
+        double a = M_PI / 2 + 2 * M_PI * (i - 1) / 3 + _orbit * 0.10;
+        float bob = (float)(3 * sin(_orbit * 0.8 + i * 1.7));
+        float tx = (float)(_main.x + rx * cos(a)), ty = (float)(_main.y + ry * sin(a)) + bob;
+        if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = (float)small; ob->init = 1; ob->free = 0; }
+        ob->w += ((float)small - ob->w) * (1 - expf(-dt * 7));
+        if (ob->free) {
+            fly_step(ob, dt);
+            float hs = ob->w / 2;
+            if (ob->px < hs) { ob->px = hs; ob->vx = fabsf(ob->vx) * ORBIT_BOUNCE; }
+            if (ob->px > b.width - hs) { ob->px = (float)b.width - hs; ob->vx = -fabsf(ob->vx) * ORBIT_BOUNCE; }
+            if (ob->py < hs) { ob->py = hs; ob->vy = fabsf(ob->vy) * ORBIT_BOUNCE; }
+            if (ob->py > b.height - hs) { ob->py = (float)b.height - hs; ob->vy = -fabsf(ob->vy) * ORBIT_BOUNCE; }
+            if (hypotf(ob->px - (float)_main.x, ob->py - (float)_main.y) < ok.CATCH || (!_dragging && ob->rest > 1.5f)) ob->free = 0;
+        } else if (bead_step(ob, (float)_main.x, (float)_main.y + bob, tx, ty, a, (float)rx, (float)ry, (float)small, _dragging ? 0 : ok.KT, &ok, ring, rn, dt) > ok.BREAK) {
+            ob->free = 1; ob->rest = 0;
+        }
+    }
     [self setNeedsDisplay:YES];
 }
 
@@ -169,17 +198,13 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     BOOL others = [[self.host setting:@"others"] boolValue];
     // the same proportions as drawSingle on the screen, on a cluster cw wide
     CGFloat cw = fmin(b.width, b.height) * 0.97 * (0.55 + 0.45 * (scale - 0.75) / 0.85) * self.zoom;
-    CGFloat big = cw * 0.6, rx = cw / 2 - 8, ry = rx * 1.15;
-    CGFloat small = others ? fmin(cw * 0.2, 2 * M_PI * rx / 3 * 0.75) : 0;
-    rx -= small / 2; ry -= small / 2;
+    CGFloat big = cw * 0.6;
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(self.bounds);
     for (int i = 1; i < 4 && others; i++) {
-        double a = M_PI / 2 + 2 * M_PI * (i - 1) / 3 + _orbit * 0.10;
-        CGFloat x = _main.x + rx * cos(a), y = _main.y + ry * sin(a) + 3 * sin(_orbit * 0.8 + i * 1.7);
-        NSRect r = NSMakeRect(x - small / 2, y - small / 2, small, small);
-        _small[i] = r;
-        int p = ((int)(small * px) / 4) * 4;
+        CGFloat w = _ob[i].w;
+        NSRect r = NSMakeRect(_ob[i].px - w / 2, _ob[i].py - w / 2, w, w);
+        int p = ((int)(w * px) / 4) * 4;
         if (p < 8) continue;
         CGImageRef img = [self newPictureOf:&_room.s[i] pixels:p now:now];
         CGContextDrawImage(ctx, NSRectToCGRect(r), img);
@@ -463,21 +488,25 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     [self slider:l + 20 y:y0 + 280 x1:r - 22 key:@"core" n:4];
     disc(r - 5, y0 + 280, 5.5, S_KNOB, 0.8);
 
-    // Motion: other sessions, focus frame, what ⌥-scroll does (scrolling alone sets the volume on the Mac)
+    // Motion: gravity, other sessions, focus frame, what ⌥-scroll does (scrolling alone sets the volume on the Mac)
     l = cx[1] + 16; r = cx[1] + cw - 16;
-    [self toggle:l :y0 + 50 :r key:@"others" title:@"Other sessions" sub:@"Small cores around the main one" enabled:YES];
-    tx(l, y0 + 104, r, y0 + 122, @"Focus frame", label, S_LABEL, 0, NO);
+    tx(l, y0 + 46, r, y0 + 64, @"Gravity", label, S_LABEL, 0, NO);
+    [self slider:l + 8 y:y0 + 82 x1:r - 8 key:@"gravity" n:4];
+    tx(l, y0 + 94, r, y0 + 112, @"Floaty", small, S_MUTED, 0, NO);
+    tx(l, y0 + 94, r, y0 + 112, @"Firm", small, S_MUTED, 2, NO);
+    [self toggle:l :y0 + 124 :r key:@"others" title:@"Other sessions" sub:@"Small cores around the main one" enabled:YES];
+    tx(l, y0 + 172, r, y0 + 190, @"Focus frame", label, S_LABEL, 0, NO);
     CGFloat fw = (r - l - 12) / 3;
     for (int i = 0; i < 7; i++) {
-        CGFloat a = l + (i % 3) * (fw + 6), b = y0 + 128 + (i / 3) * 34;
+        CGFloat a = l + (i % 3) * (fw + 6), b = y0 + 194 + (i / 3) * 34;
         [self pick:a :b :a + fw :b + 28 rad:14 key:@"frame" val:i label:FRAME_NAMES[i]];
     }
-    tx(l, y0 + 242, r, y0 + 260, @"⌥ + scroll on a core", label, S_LABEL, 0, NO);
+    tx(l, y0 + 304, r, y0 + 322, @"⌥ + scroll on a core", label, S_LABEL, 0, NO);
     for (int i = 0; i < 5; i++) {
-        CGFloat a = l + (i % 3) * (fw + 6), b = y0 + 266 + (i / 3) * 34;
+        CGFloat a = l + (i % 3) * (fw + 6), b = y0 + 326 + (i / 3) * 34;
         [self pick:a :b :a + fw :b + 28 rad:14 key:@"wheelSpin" val:i label:WHEEL_NAMES[i]];
     }
-    tx(l, y0 + 340, r, y0 + 420, @"Scroll alone sets that session's speech volume. Drag a core to spin it by hand; let go while moving and it spins on.",
+    tx(l, y0 + 398, r, y0 + 456, @"Scroll alone sets that session's speech volume. Drag a core to spin it by hand; let go while moving and it spins on.",
        small, S_MUTED, 0, YES);
 
     // Replies: font, text size, box size, colours, where the box opens, labels
