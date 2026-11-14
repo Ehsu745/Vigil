@@ -54,4 +54,25 @@ static inline void fly_step(Orbit *ob, float dt) {
     ob->vx *= fr; ob->vy *= fr; ob->px += ob->vx * dt; ob->py += ob->vy * dt;
     if (hypotf(ob->vx, ob->vy) < 4) { ob->vx = ob->vy = 0; ob->rest += dt; } else ob->rest = 0;
 }
+// ---- the orbit in 3D (macOS only): the bodies above move in the orbit's own plane; it is drawn tilted, so a small core
+// on the far side is smaller, dimmer and passes behind the main core. Seen from straight above (tilt 0) it is the
+// flat orbit. ----
+
+// the orbit's plane turned by tilt radians about an axis in the screen's plane at angle phi: a point (dx, dy) from
+// the main core's centre lands at (ox, oy) on the screen, depth (same units) toward you; < 0 is behind the main core
+static inline void orbit_tilt(float dx, float dy, float tilt, float phi, float *ox, float *oy, float *depth) {
+    float c = cosf(phi), s = sinf(phi);
+    float u = dx * c + dy * s, v = -dx * s + dy * c; // along the axis, and across it
+    *depth = -v * sinf(tilt);                        // the upper half goes away from you, as a ring seen from a little above
+    v *= cosf(tilt);
+    *ox = u * c - v * s;
+    *oy = u * s + v * c;
+}
+// how the orbit tilts on its own: a slow sway just under the most it may tilt (max, radians), its axis rocking a little
+static inline void orbit_sway(double t, float max, float *tilt, float *phi) {
+    *tilt = max * (float)(0.8 + 0.2 * sin(t * 0.11));
+    *phi = 0.35f * (float)sin(t * 0.07);
+}
+// how much bigger a small core looks for its depth (r: the orbit's radius)
+static inline float orbit_near_k(float depth, float r) { return 1 + 0.22f * depth / (r > 1 ? r : 1); }
 #endif

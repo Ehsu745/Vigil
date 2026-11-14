@@ -31,6 +31,7 @@ static NSDictionary<NSString *, NSArray *> *choices(void) {
         @"scale": @[@0.75, @1.0, @1.3, @1.6],
         @"core": @[@0.25, @0.35, @0.45, @0.55],
         @"gravity": @[@1, @2, @4, @8],
+        @"orbitTilt": @[@25, @40, @55, @70],
         @"frame": @[@"segments", @"lens", @"polar", @"diamond", @"lock", @"orbits", @"none"],
         @"wheelSpin": @[@0, @1, @2, @3, @4],
         @"tipMono": @[@YES, @NO],
@@ -81,6 +82,7 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     BOOL _dragging;
     NSRect _mainRect;
     Orbit _ob[4];             // the small cores (1..3), in this view's points
+    float _tilted;            // 0: seen from above (the pointer is near the cluster), 1: tilted
 }
 - (BOOL)isOpaque { return NO; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
@@ -167,6 +169,9 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
             ob->free = 1; ob->rest = 0;
         }
     }
+    NSPoint mp = [self convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
+    BOOL near = NSPointInRect(mp, self.bounds) && hypot(mp.x - _main.x, mp.y - _main.y) < (rx + small) * 1.3;
+    _tilted += (([[self.host setting:@"orbit3d"] boolValue] && !near ? 1.0f : 0.0f) - _tilted) * (1 - expf(-dt * 4));
     [self setNeedsDisplay:YES];
 }
 
@@ -198,25 +203,43 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     BOOL others = [[self.host setting:@"others"] boolValue];
     // the same proportions as drawSingle on the screen, on a cluster cw wide
     CGFloat cw = fmin(b.width, b.height) * 0.97 * (0.55 + 0.45 * (scale - 0.75) / 0.85) * self.zoom;
-    CGFloat big = cw * 0.6;
+    CGFloat big = cw * 0.6, ry = (cw / 2 - 8) * 1.15;
+    float tilt, phi, depth[4] = {0};
+    orbit_sway(now, [self num:@"orbitTilt"] * (float)M_PI / 180, &tilt, &phi);
+    tilt *= _tilted;
+    NSRect at[4];
+    for (int i = 1; i < 4; i++) { // where each small core is drawn: on the tilted orbit unless it is loose
+        CGFloat w = _ob[i].w, x = _ob[i].px, y = _ob[i].py;
+        if (!_ob[i].free && tilt > 0.001f) {
+            float ox, oy;
+            orbit_tilt(_ob[i].px - (float)_main.x, _ob[i].py - (float)_main.y, tilt, phi, &ox, &oy, &depth[i]);
+            x = _main.x + ox; y = _main.y + oy; w *= orbit_near_k(depth[i], (float)ry);
+        }
+        at[i] = NSMakeRect(x - w / 2, y - w / 2, w, w);
+    }
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(self.bounds);
-    for (int i = 1; i < 4 && others; i++) {
-        CGFloat w = _ob[i].w;
-        NSRect r = NSMakeRect(_ob[i].px - w / 2, _ob[i].py - w / 2, w, w);
-        int p = ((int)(w * px) / 4) * 4;
-        if (p < 8) continue;
-        CGImageRef img = [self newPictureOf:&_room.s[i] pixels:p now:now];
-        CGContextDrawImage(ctx, NSRectToCGRect(r), img);
-        CGImageRelease(img);
-    }
     _mainRect = NSMakeRect(_main.x - big / 2, _main.y - big / 2, big, big);
-    int p = ((int)(big * px) / 4) * 4;
-    if (p >= 8) {
-        CGImageRef img = [self newPictureOf:&_room.s[0] pixels:p now:now];
-        CGContextDrawImage(ctx, NSRectToCGRect(_mainRect), img);
-        CGImageRelease(img);
-        [self.host drawFocusFrame:ctx rect:_mainRect session:&_room.s[0] now:now];
+    for (int pass = 0; pass < 3; pass++) { // the small ones behind, the main one, the small ones in front
+        if (pass == 1) {
+            int p = ((int)(big * px) / 4) * 4;
+            if (p < 8) continue;
+            CGImageRef img = [self newPictureOf:&_room.s[0] pixels:p now:now];
+            CGContextDrawImage(ctx, NSRectToCGRect(_mainRect), img);
+            CGImageRelease(img);
+            [self.host drawFocusFrame:ctx rect:_mainRect session:&_room.s[0] now:now];
+            continue;
+        }
+        for (int i = 1; i < 4 && others; i++) {
+            if ((depth[i] < 0) != (pass == 0)) continue;
+            int p = ((int)(at[i].size.width * px) / 4) * 4;
+            if (p < 8) continue;
+            CGImageRef img = [self newPictureOf:&_room.s[i] pixels:p now:now];
+            CGContextSetAlpha(ctx, depth[i] < 0 ? 1 - 0.35 * fmin(1, -depth[i] / fmax(1, ry)) : 1);
+            CGContextDrawImage(ctx, NSRectToCGRect(at[i]), img);
+            CGContextSetAlpha(ctx, 1);
+            CGImageRelease(img);
+        }
     }
     [NSGraphicsContext restoreGraphicsState];
 }
@@ -487,6 +510,13 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     disc(l + 4, y0 + 280, 2.5, S_KNOB, 0.8);
     [self slider:l + 20 y:y0 + 280 x1:r - 22 key:@"core" n:4];
     disc(r - 5, y0 + 280, 5.5, S_KNOB, 0.8);
+    // the orbit in 3D (macOS only)
+    [self toggle:l :y0 + 308 :r key:@"orbit3d" title:@"3D orbit" sub:@"Flat when the mouse is near" enabled:YES];
+    BOOL o3 = [[self value:@"orbit3d"] boolValue];
+    tx(l, y0 + 358, r, y0 + 376, @"Tilt", label, o3 ? S_LABEL : 0x55555E, 0, NO);
+    [self slider:l + 8 y:y0 + 394 x1:r - 8 key:@"orbitTilt" n:4];
+    tx(l, y0 + 406, r, y0 + 424, @"Slight", small, S_MUTED, 0, NO);
+    tx(l, y0 + 406, r, y0 + 424, @"Steep", small, S_MUTED, 2, NO);
 
     // Motion: gravity, other sessions, focus frame, what ⌥-scroll does (scrolling alone sets the volume on the Mac)
     l = cx[1] + 16; r = cx[1] + cw - 16;

@@ -39,6 +39,8 @@ static float g_glow = 1.0f, g_core = 0.35f;
 static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
 static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
 static float g_gravity = 2;                     // how hard the main core holds the small ones on their orbit (one of GRAVITIES)
+static int g_orbit3d = 1;                       // the orbit drawn tilted, swaying on its own; flat while the pointer is near
+static float g_orbit_tilt = 55;                 // the most it tilts, degrees (Settings > Look > Tilt)
 static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
 static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_COLS (5: the custom colour)
 static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
@@ -128,13 +130,13 @@ static void pointer_visible(BOOL on) {
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
 static struct {
     int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
-    float core, scale, tip_size, gravity; int others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin; unsigned tip_custom, text_custom;
+    float core, scale, tip_size, gravity, orbit_tilt; int orbit3d, others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin; unsigned tip_custom, text_custom;
 } g_launch;
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
-    g_launch.gravity = g_gravity; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
+    g_launch.gravity = g_gravity; g_launch.orbit3d = g_orbit3d; g_launch.orbit_tilt = g_orbit_tilt; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
     g_launch.tip_middle = g_tip_middle; g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
     g_launch.tip_custom = g_tip_custom; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
@@ -143,7 +145,7 @@ static void remember_launch(void) {
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
-    g_gravity = g_launch.gravity; g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
+    g_gravity = g_launch.gravity; g_orbit3d = g_launch.orbit3d; g_orbit_tilt = g_launch.orbit_tilt; g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
     g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
     g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
     motion_map_default(MOTION_MAP); // the motion map has no launch option: back to its defaults
@@ -168,6 +170,8 @@ static void load_settings(void) {
     if ((n = j[@"tipSize"]) && n.floatValue >= 0.5f && n.floatValue <= 2) g_tip_size = n.floatValue;
     if ((n = j[@"others"])) g_others = n.boolValue;
     if ((n = j[@"gravity"]) && n.floatValue >= 0.5f && n.floatValue <= 8) g_gravity = n.floatValue;
+    if ((n = j[@"orbit3d"])) g_orbit3d = n.boolValue;
+    if ((n = j[@"orbitTilt"]) && n.floatValue >= 0 && n.floatValue <= 80) g_orbit_tilt = n.floatValue;
     if ((n = j[@"tipMono"])) g_tip_mono = n.boolValue;
     if ((n = j[@"tipMiddle"])) g_tip_middle = n.boolValue;
     if ((n = j[@"tipColor"]) && n.intValue >= 0 && n.intValue < 6) g_tip_bg = n.intValue;
@@ -198,6 +202,7 @@ static void save_settings(void) {
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
                         @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
                         @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0), @"gravity": @(g_gravity),
+                        @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt),
                         @"tipMono": @(g_tip_mono != 0), @"tipMiddle": @(g_tip_middle != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
                         @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin)};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
@@ -530,6 +535,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     double _lastDraw;
     double _orbitClock;     // the small cores' own clock: it stops while the pointer is on a core, so one stays put
     NSString *_lastFocus;
+    float _tilted;          // 0: the orbit seen from above (the pointer is near), 1: tilted as far as it sways
     NSMutableDictionary<NSString *, NSPanel *> *_sats; // a small core out of the cluster's window gets a window of its own
 }
 
@@ -864,6 +870,14 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     OrbitK ok = orbit_k(g_gravity, (float)rx, (float)small);
     float kt = _moving ? 0 : ok.KT; // carried: only gravity holds them, so they slide round to the trailing side
     float ease = 1 - expf(-dt * 7);
+    // the orbit in 3D: it sways on its own, and lies flat again (seen from above) while the pointer is near the cluster
+    NSPoint mouse = [NSEvent mouseLocation];
+    BOOL near = hypot(mouse.x - mx, mouse.y - my) < (rx + small) * 1.3;
+    _tilted += ((g_orbit3d && !near ? 1.0f : 0.0f) - _tilted) * (1 - expf(-dt * 4));
+    float tilt, phi;
+    orbit_sway(now, (float)(g_orbit_tilt * M_PI / 180), &tilt, &phi);
+    tilt *= _tilted;
+    float depth[MAX_SESS] = {0};
     NSString *focus = n ? sid_of(&room->s[fi]) : nil;
     if (focus && _lastFocus && ![focus isEqualToString:_lastFocus]) { // the focus moved: the two swap places from where they are
         Orbit *o = orbit_of(focus.UTF8String);
@@ -912,13 +926,19 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             ob->free = 1; // pulled too far: it lets go, and flies on with the speed it had
             ob->rest = 0;
         }
-        at[i] = NSMakeRect(ob->px - origin.x - ob->w / 2, ob->py - origin.y - ob->w / 2, ob->w, ob->w);
+        if (ob->free || tilt < 0.001f) at[i] = NSMakeRect(ob->px - origin.x - ob->w / 2, ob->py - origin.y - ob->w / 2, ob->w, ob->w);
+        else { // on the orbit, drawn tilted: smaller and behind the main core on the far side
+            float ox, oy;
+            orbit_tilt(ob->px - mx, ob->py - my, tilt, phi, &ox, &oy, &depth[i]);
+            float w = ob->w * orbit_near_k(depth[i], (float)ry);
+            at[i] = NSMakeRect(mx + ox - origin.x - w / 2, my + oy - origin.y - w / 2, w, w);
+        }
         own[i] = ob->free || !NSContainsRect(self.bounds, at[i]);
     }
     NSMutableSet *shown = [NSMutableSet set];
-    for (int pass = 0; pass < 2; pass++) // the small ones first, the one in focus on top
+    for (int pass = 0; pass < 3; pass++) // the small ones behind it, the one in focus, the small ones in front
         for (int i = 0; i < n; i++) {
-            if ((i == fi) != (pass == 1)) continue;
+            if (i == fi ? pass != 1 : pass != (depth[i] < 0 ? 0 : 2)) continue;
             if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
             const Session *s = &room->s[i];
             int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
@@ -931,9 +951,16 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             }
             _core[i] = at[i];
             if (own[i]) { [self showSat:sid_of(s) image:_img[i] rect:at[i] now:now]; [shown addObject:sid_of(s)]; continue; }
+            CGFloat dim = depth[i] < 0 ? 1 - 0.35 * fmin(1, -depth[i] / fmax(1, ry)) : 1; // the far side a little dimmer
+            CGContextSetAlpha(ctx, dim);
             CGContextDrawImage(ctx, NSRectToCGRect(at[i]), _img[i]);
+            CGContextSetAlpha(ctx, 1);
             focus_frame(ctx, at[i], s, now);
         }
+    if (n) for (int i = 0; i < n; i++) { // a small core behind the main one cannot be pointed at through it
+        NSRect m = _core[fi];
+        if (i != fi && depth[i] < 0 && hypot(NSMidX(_core[i]) - NSMidX(m), NSMidY(_core[i]) - NSMidY(m)) < m.size.width * SHELL_HIT) _core[i] = NSZeroRect;
+    }
     _coreN = n;
     for (NSString *sid in _sats.allKeys) if (![shown containsObject:sid]) [_sats[sid] orderOut:nil];
 }
@@ -1893,7 +1920,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
 // SettingsHost: what the window reads and changes
 - (id)setting:(NSString *)key {
     NSDictionary *d = @{@"shape": @(g_shape_name), @"glow": @(g_glow), @"scale": @(g_scale), @"core": @(g_core), @"frame": @(g_frame),
-                        @"others": @(g_others != 0), @"gravity": @(g_gravity), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
+                        @"others": @(g_others != 0), @"gravity": @(g_gravity), @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
                         @"tipSize": @(g_tip_size), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
                         @"textCustom": @(g_text_custom), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
                         @"away": @(g_away_after), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0),
@@ -1923,6 +1950,8 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     else if ([key isEqualToString:@"core"]) g_core = [v floatValue];
     else if ([key isEqualToString:@"others"]) g_others = [v boolValue];
     else if ([key isEqualToString:@"gravity"]) g_gravity = [v floatValue];
+    else if ([key isEqualToString:@"orbit3d"]) g_orbit3d = [v boolValue];
+    else if ([key isEqualToString:@"orbitTilt"]) g_orbit_tilt = [v floatValue];
     else if ([key isEqualToString:@"wheelSpin"]) g_wheel_spin = [v intValue];
     else if ([key isEqualToString:@"scale"]) { g_scale = [v floatValue]; [self place]; }
     else if ([key isEqualToString:@"tipMono"] || [key isEqualToString:@"tipSize"] || [key isEqualToString:@"tipMiddle"] || [key isEqualToString:@"tipColor"]
