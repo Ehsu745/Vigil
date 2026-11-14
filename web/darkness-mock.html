@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vigil · darkness over a light app (mock)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #18181b; color: #e6e8f0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { padding: 18px 24px 8px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  header p { margin: 0; color: #9a9caa; max-width: 980px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 10px 24px 14px; color: #c8cad4; }
+  .bar label { display: flex; gap: 8px; align-items: center; }
+  .chips { display: flex; gap: 4px; }
+  .chips button { background: #26262c; color: #c8cad4; border: 1px solid #34343b; border-radius: 14px; padding: 4px 12px; cursor: pointer; font: inherit; }
+  .chips button.on { border-color: #ff8a1f; color: #fff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; padding: 0 24px 28px; }
+  .card { background: #212126; border-radius: 12px; overflow: hidden; }
+  .card canvas { display: block; width: 100%; height: auto; }
+  .card .t { padding: 10px 14px 12px; }
+  .card b { color: #fff; }
+  .card span { color: #9a9caa; display: block; font-size: 12.5px; margin-top: 2px; }
+  .rec { color: #ffb066; font-size: 12px; margin-left: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Darkness over a light app — five ways</h1>
+  <p>The same moment in each card: a THINKING core turning, and three of READY's thrown pieces: a flat triangle, a needle stretching and relaxing, and a spike cone. Pick a background to see how each reads over a light window. Nothing here is the real renderer; it is a sketch of the look.</p>
+</header>
+<div class="bar">
+  <label>Background <span class="chips" id="bg"></span></label>
+  <label>Darkness colour <span class="chips" id="shade"></span></label>
+  <label>Strength <input type="range" id="str" min="0.3" max="1.3" step="0.05" value="1"></label>
+  <label><input type="checkbox" id="anim" checked> moving</label>
+</div>
+<div class="grid" id="grid"></div>
+<script>
+"use strict";
+const W = 330, H = 250, DPR = Math.min(2, window.devicePixelRatio || 1);
+const CARDS = [
+  { id: "now", name: "Now", what: "a soft round disc behind the core and a fixed one behind each piece" },
+  { id: "o1", name: "1 · Outline", what: "a thin soft dark band along every line and dot: follows any shape", rec: true },
+  { id: "o2", name: "2 · Shaped shadow", what: "each triangle's own shape filled with soft darkness" },
+  { id: "o3", name: "3 · Light look", what: "no darkness: deeper line colours that read on white" },
+  { id: "o4", name: "4 · Outline + small centre", what: "option 1, plus a small faint disc behind the bright centre only" },
+];
+const BGS = { White: "#ffffff", Paper: "#f3f1ec", Document: "doc", Code: "code", Dark: "#1e1f24" };
+const SHADES = { Black: [0, 0, 0], Navy: [10, 16, 40], Plum: [30, 10, 34], Forest: [8, 26, 16] };
+let bg = "Document", shade = "Navy";
+
+/* ---- a geodesic shell: icosahedron split once (42 nodes, 80 faces), like geo2 ---- */
+const shell = (() => {
+  const t = (1 + Math.sqrt(5)) / 2;
+  let v = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]];
+  let f = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
+  const norm = p => { const l = Math.hypot(...p); return p.map(c => c / l); };
+  v = v.map(norm);
+  const mid = {}, m = (a, b) => { const k = a < b ? a + "_" + b : b + "_" + a; if (mid[k] === undefined) { mid[k] = v.length; v.push(norm(v[a].map((c, i) => (c + v[b][i]) / 2))); } return mid[k]; };
+  const nf = [];
+  for (const [a, b, c] of f) { const ab = m(a, b), bc = m(b, c), ca = m(c, a); nf.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]); }
+  const es = new Set(), e = [];
+  for (const [a, b, c] of nf) for (const [x, y] of [[a, b], [b, c], [c, a]]) { const k = x < y ? x + "_" + y : y + "_" + x; if (!es.has(k)) { es.add(k); e.push([x, y]); } }
+  return { v, f: nf, e };
+})();
+
+/* ---- colours ---- */
+const LINE = [255, 176, 102], HALO = [255, 150, 60], DEEP = [190, 84, 10], DEEPN = [150, 60, 0];
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+/* ---- the scene at time t: the shell's projected nodes and the pieces' triangles (screen space) ---- */
+function scene(t) {
+  const cx = 118, cy = 118, R = 62, ay = t * 0.5, ax = 0.45 + Math.sin(t * 0.3) * 0.15;
+  const ca = Math.cos(ay), sa = Math.sin(ay), cb = Math.cos(ax), sb = Math.sin(ax);
+  const P = shell.v.map(([x, y, z]) => {
+    let X = x * ca + z * sa, Z = -x * sa + z * ca, Y = y * cb - Z * sb; Z = y * sb + Z * cb;
+    const k = 1 / (1 - Z * 0.18);
+    return [cx + X * R * k, cy + Y * R * k, Z];
+  });
+  const pieces = [];
+  /* a flat triangle drifting, turning */
+  { const px = 236, py = 70 + Math.sin(t * 0.9) * 6, a = t * 0.8, s = 17;
+    pieces.push([[0, 1, 2].map(i => [px + Math.cos(a + i * 2.094) * s, py + Math.sin(a + i * 2.094) * s])]); }
+  /* a needle: the same triangle drawn out long and thin, then relaxing */
+  { const k = 0.5 - 0.5 * Math.cos(t * 1.1), px = 250, py = 168, a = -0.5, L = 16 + 46 * k, w = 13 * (1 - 0.6 * k);
+    const dx = Math.cos(a), dy = Math.sin(a), nx = -dy, ny = dx;
+    pieces.push([[[px + dx * L, py + dy * L], [px - dx * 8 + nx * w, py - dy * 8 + ny * w], [px - dx * 8 - nx * w, py - dy * 8 - ny * w]]]); }
+  /* a spike cone: six triangles round one node, drawn into a point */
+  { const px = 128, py = 214, a = Math.PI * 1.15 + Math.sin(t * 0.7) * 0.15, L = 40, rr = 12;
+    const dx = Math.cos(a), dy = Math.sin(a), nx = -dy, ny = dx, tip = [px + dx * L, py + dy * L], ring = [];
+    for (let i = 0; i < 6; i++) { const g = i / 6 * Math.PI * 2 + t * 0.6, u = Math.cos(g) * rr, v = Math.sin(g) * rr * 0.45; ring.push([px + nx * u - dx * v, py + ny * u - dy * v]); }
+    const tris = []; for (let i = 0; i < 6; i++) tris.push([tip, ring[i], ring[(i + 1) % 6]]);
+    pieces.push(tris); }
+  return { cx, cy, R, P, pieces };
+}
+
+/* ---- backgrounds ---- */
+function drawBg(g) {
+  const b = BGS[bg];
+  if (b === "doc" || b === "code") {
+    g.fillStyle = b === "doc" ? "#ffffff" : "#f7f7f9"; g.fillRect(0, 0, W, H);
+    g.fillStyle = b === "doc" ? "#dfe3ea" : "#e9ebf0";
+    for (let y = 18, i = 0; y < H; y += 15, i++) {
+      const w = b === "doc" ? (i % 5 === 4 ? 140 : 250 + ((i * 37) % 50)) : 60 + ((i * 53) % 190);
+      g.fillStyle = b === "doc" ? "#c9ced8" : ["#c792ea33", "#82aaff44", "#c3e88d55", "#f7768e33"][i % 4].replace(/..$/, "88");
+      g.fillRect(b === "doc" ? 22 : 22 + (i % 3) * 14, y, w, 6);
+    }
+  } else { g.fillStyle = b; g.fillRect(0, 0, W, H); }
+}
+
+/* ---- the pieces of each look ---- */
+const glowLine = (g, a, b, col, w, glow) => { g.save(); g.strokeStyle = rgba(col, 0.95); g.lineWidth = w; g.shadowColor = rgba(HALO, 0.7); g.shadowBlur = glow; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke(); g.restore(); };
+const dot = (g, p, r, col) => { g.beginPath(); g.arc(p[0], p[1], r, 0, 7); g.fillStyle = col; g.fill(); };
+function shellEdges(S) { return shell.e.map(([a, b]) => [S.P[a], S.P[b], (S.P[a][2] + S.P[b][2]) / 2]); }
+function pieceEdges(S) { const out = []; for (const tris of S.pieces) for (const t of tris) out.push([t[0], t[1]], [t[1], t[2]], [t[2], t[0]]); return out; }
+function pieceNodes(S) { const out = []; for (const tris of S.pieces) for (const t of tris) out.push(...t); return out; }
+
+/* the lines and nodes themselves, in the glowing look (or the light look's deep colours) */
+function drawWire(g, S, light) {
+  for (const [a, b, z] of shellEdges(S)) {
+    const back = z < 0 ? 0.45 : 1;
+    if (light) { g.strokeStyle = rgba(DEEP, 0.55 + 0.4 * back); g.lineWidth = 1.3; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke(); }
+    else glowLine(g, a, b, LINE.map(c => c * (0.6 + 0.4 * back)), 1.2, 5);
+  }
+  for (const p of S.P) dot(g, p, p[2] < 0 ? 1.4 : 2.1, light ? rgba(DEEPN, p[2] < 0 ? 0.5 : 0.95) : rgba([255, 236, 214], p[2] < 0 ? 0.55 : 1));
+  for (const [a, b] of pieceEdges(S)) {
+    if (light) { g.strokeStyle = rgba(DEEP, 0.95); g.lineWidth = 1.5; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke(); }
+    else glowLine(g, a, b, [255, 226, 200], 1.4, 6);
+  }
+  for (const p of pieceNodes(S)) dot(g, p, 2.2, light ? rgba(DEEPN, 1) : "#fff");
+  /* the bright centre */
+  const r = S.R * 0.42, gr = g.createRadialGradient(S.cx, S.cy, 0, S.cx, S.cy, r);
+  if (light) { gr.addColorStop(0, "rgba(255,170,90,1)"); gr.addColorStop(0.35, "rgba(230,110,20,0.95)"); gr.addColorStop(1, "rgba(200,90,10,0)"); }
+  else { gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.3, "rgba(255,240,220,0.95)"); gr.addColorStop(0.65, "rgba(255,170,90,0.35)"); gr.addColorStop(1, "rgba(255,150,60,0)"); }
+  g.fillStyle = gr; g.beginPath(); g.arc(S.cx, S.cy, r, 0, 7); g.fill();
+}
+
+/* darkness drawn on its own layer, then laid under the wire */
+function darkLayer(fn) {
+  const c = document.createElement("canvas"); c.width = W * DPR; c.height = H * DPR;
+  const g = c.getContext("2d"); g.scale(DPR, DPR); fn(g); return c;
+}
+function softDisc(g, x, y, r, a, col) { /* solid in the middle, a long soft edge (shade_soft) */
+  const gr = g.createRadialGradient(x, y, 0, x, y, r);
+  gr.addColorStop(0, rgba(col, a)); gr.addColorStop(0.45, rgba(col, a)); gr.addColorStop(0.75, rgba(col, a * 0.5)); gr.addColorStop(1, rgba(col, 0));
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+}
+function outline(g, S, col, k, centre) { /* option 1: every line and node stroked wide and dark, softened */
+  g.filter = `blur(${2.2 * k}px)`;
+  g.strokeStyle = rgba(col, 0.9); g.lineCap = "round"; g.lineJoin = "round";
+  g.lineWidth = 5.5 * k;
+  g.beginPath(); for (const [a, b, z] of shellEdges(S)) if (z > -0.2) { g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); } g.stroke();
+  g.lineWidth = 6.5 * k;
+  g.beginPath(); for (const [a, b] of pieceEdges(S)) { g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); } g.stroke();
+  g.fillStyle = rgba(col, 0.9);
+  for (const p of pieceNodes(S)) { g.beginPath(); g.arc(p[0], p[1], 4 * k, 0, 7); g.fill(); }
+  g.filter = "none";
+  if (centre) softDisc(g, S.cx, S.cy, S.R * 0.55, 0.55 * Math.min(1, k), col);
+}
+function shaped(g, S, col, k) { /* option 2: the shell's silhouette and each piece's triangles, filled, soft-edged */
+  g.filter = `blur(${3 * k}px)`;
+  g.fillStyle = rgba(col, Math.min(0.95, 0.62 * k));
+  g.beginPath(); g.arc(S.cx, S.cy, S.R * 1.04, 0, 7); g.fill();
+  for (const tris of S.pieces) for (const t of tris) { g.beginPath(); g.moveTo(t[0][0], t[0][1]); g.lineTo(t[1][0], t[1][1]); g.lineTo(t[2][0], t[2][1]); g.closePath(); g.fill(); g.lineWidth = 5 * k; g.strokeStyle = g.fillStyle; g.stroke(); }
+  g.filter = "none";
+}
+
+function render(card, t) {
+  const g = card.g, S = scene(t), col = SHADES[shade], k = +document.getElementById("str").value;
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  drawBg(g);
+  if (card.id === "now") {
+    g.drawImage(darkLayer(d => {
+      softDisc(d, S.cx, S.cy, S.R * 1.38, Math.min(0.95, 0.85 * k), col);
+      for (const tris of S.pieces) { /* one fixed disc at each piece's middle, whatever shape it is in, and a dark keyline */
+        let x = 0, y = 0, n = 0; for (const tr of tris) for (const p of tr) { x += p[0]; y += p[1]; n++; }
+        softDisc(d, x / n, y / n, S.R * 0.62, Math.min(0.95, 0.8 * k), col);
+        d.fillStyle = rgba(col, 0.6 * Math.min(1, k)); for (const tr of tris) { d.beginPath(); d.moveTo(...tr[0]); d.lineTo(...tr[1]); d.lineTo(...tr[2]); d.closePath(); d.fill(); }
+      }
+    }), 0, 0, W, H);
+    drawWire(g, S, false);
+  } else if (card.id === "o1") { g.drawImage(darkLayer(d => outline(d, S, col, k, false)), 0, 0, W, H); drawWire(g, S, false); }
+  else if (card.id === "o2") { g.drawImage(darkLayer(d => shaped(d, S, col, k)), 0, 0, W, H); drawWire(g, S, false); }
+  else if (card.id === "o3") drawWire(g, S, true);
+  else if (card.id === "o4") { g.drawImage(darkLayer(d => outline(d, S, col, k, true)), 0, 0, W, H); drawWire(g, S, false); }
+}
+
+/* ---- page ---- */
+const grid = document.getElementById("grid"), cards = [];
+for (const c of CARDS) {
+  const el = document.createElement("div"); el.className = "card";
+  const cv = document.createElement("canvas"); cv.width = W * DPR; cv.height = H * DPR;
+  el.appendChild(cv);
+  const tt = document.createElement("div"); tt.className = "t";
+  tt.innerHTML = `<b>${c.name}</b>${c.rec ? '<em class="rec">recommended</em>' : ""}<span>${c.what}</span>`;
+  el.appendChild(tt); grid.appendChild(el);
+  cards.push({ ...c, g: cv.getContext("2d") });
+}
+function chips(id, names, get, set) {
+  const box = document.getElementById(id);
+  for (const n of names) { const b = document.createElement("button"); b.textContent = n; b.onclick = () => { set(n); paintChips(); }; box.appendChild(b); }
+  const paintChips = () => [...box.children].forEach(b => b.classList.toggle("on", b.textContent === get()));
+  paintChips();
+}
+const q = new URLSearchParams(location.search);
+if (q.get("bg") && BGS[q.get("bg")]) bg = q.get("bg");
+chips("bg", Object.keys(BGS), () => bg, n => (bg = n));
+chips("shade", Object.keys(SHADES), () => shade, n => (shade = n));
+let t0 = performance.now(), frozen = q.has("t") ? +q.get("t") : null;
+if (frozen !== null) document.getElementById("anim").checked = false;
+function frame(now) {
+  const t = document.getElementById("anim").checked ? (now - t0) / 1000 : (frozen ?? 2.2);
+  for (const c of cards) render(c, t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
