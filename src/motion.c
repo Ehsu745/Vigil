@@ -271,7 +271,7 @@ static void spike_at(Session *s, int v, float len, float hd, float up, float dn,
         if (!spike_live(&m->sp[i], now)) { slot = i; break; }
         if (m->sp[i].at < oldest) { oldest = m->sp[i].at; slot = i; }
     }
-    if (len > .4f) len = .4f; /* the shell fills 72% of its tile: further out would be cut off */
+    if (len > .4f && m->rt != RT_RESTLESS) len = .4f; /* the shell fills 72% of its tile: further out would be cut off (READY's spike cones are drawn on the layer) */
     m->sp[slot] = (Spike){v, len, up, hd, dn, now};
     m->glow[v] = fmaxf(m->glow[v], up > .1f ? .4f : 1);
 }
@@ -337,7 +337,7 @@ static void spark(Session *s, const float *M, const float *p, const float *v, fl
     m3_app(q->p, M, p); m3_app(q->v, M, v);
     for (int i = 0; i < 3; i++) { q->p[i] *= CIRCUM; q->v[i] *= CIRCUM; }
     q->life = q->max = life; q->drag = drag; q->g = g * CIRCUM; q->size = size; q->kind = (unsigned char)kind; q->hot = (unsigned char)hot;
-    q->own = col.r < 0; q->col = col; q->seed = mrand(s) * 99;
+    q->own = col.r < 0; q->col = col; q->seed = mrand(s) * 99; q->stage = 0;
 }
 static void spark_at(Session *s, const float *M, const float *p, float life, float size, Col col) { float z[3] = {0, 0, 0}; spark(s, M, p, z, life, 0, 0, size, SK_FLARE, 0, col); }
 static void trail_push(Motion *m, const float *p) {
@@ -383,6 +383,8 @@ typedef struct RCtx {
     float dt, e;      /* e: seconds since the routine started */
 } Ctx;
 /* a routine's spin given in rad/s (as the mock gives it), as the share of the shown state's own spin */
+/* READY's camera distance: the Bestiary's, which draws a point z shell radii toward you at 5 / (5 - .6 z) */
+#define READY_CAM (5.0f * CIRCUM / .6f)
 static float absrate(int shown, float r) { float base = LOOKS[shown].rot; return base > .02f ? r / base : 0; }
 static void set_rate(Ctx *c, float r) { c->w->rate = absrate(c->shown, r); }
 
@@ -1383,6 +1385,641 @@ static void r_crazy(Ctx *c) { /* fits of going crazy; pointed at, it jerks away 
     if (s->hover < .2f) C->flinched = 0;
 }
 
+/* ---- READY (panel): a reply nobody has seen yet. The core keeps IDLE's look and throws pieces of its own shell at the
+ * pointer; each piece flies back and locks into its place again. A hit means "seen": the panel opens the chat box and
+ * READY ends once the pieces are home. Ported from the Core Bestiary (web/bestiary.html, READY v7).
+ * Pieces live on the stage (see RPiece): shell radii from the core window's centre at the core's usual size, y down,
+ * so a piece far from the core never swings when the core hops, grows or turns. Each frame a piece is put where it
+ * should be on screen through its triangle's own matrix and carried offset, worked out against the very turn the
+ * renderer uses (the view, then the pointer's tilt). */
+uint32_t READY_ATKS = (1u << RA_N) - 2; /* all of them */
+const char *READY_ATK_NAME[RA_N] = {"", "Missiles", "Forge", "Slingshot", "Spike cones"};
+const char *READY_ATK_ABOUT[RA_N] = {"",
+    "Three pieces pop out and spin like thrown coins into missiles, then come at the pointer from three sides on smoke trails, aiming where you are going, bent by the core's pull. One you dodge whips round faster each time; it may crash into the core.",
+    "One blow at a time, with weight: a clump of pieces lifts out, glowing hotter and turning after the pointer for a charge of random length, takes aim at the last moment and comes down hard on where you are, faster the further it goes, and shatters into its little triangles, which float and fly home. Three blows.",
+    "One piece is flung into orbit, a light trail behind it, faster and wider; it tears free toward you and chases you for up to 4 s, aiming where you are going, whipping round faster after each dodge. Lead it into the core and it breaks a hole in the shell.",
+    "Spikes grow on your side and the triangles round each tear off as a cone drawn into a needle; it aims, trembles with a glint and shoots point first; one you dodge flies on, still a needle, before it breaks. Three, one after another."};
+void ready_play(Session *s, int a) {
+    if (a <= RA_NONE || a >= RA_N) return;
+    if (s->mo.rt != RT_RESTLESS) motion_play(s, RT_RESTLESS);
+    s->mo.atk_want = a;
+}
+
+typedef struct { float Mf[9], T[9], wox, woy, sc; } RFrame; /* the full turn the renderer uses, its tilt alone, the core's place and size on the stage */
+static void rframe(Ctx *c, RFrame *f) {
+    const Session *s = c->s;
+    float Ty[9], Tx[9], Y[3] = {0, 1, 0}, X[3] = {1, 0, 0};
+    const Motion *m = c->m; /* (the offset and lean as drawn: smoothed while READY, see motion_tick) */
+    float wlx = m->sm_on ? m->sm_lx : s->w_lean_x, wly = m->sm_on ? m->sm_ly : s->w_lean_y, wx = m->sm_on ? m->sm_x : s->w_off_x, wy = m->sm_on ? m->sm_y : s->w_off_y;
+    float ty = HOVER.tilt * s->look_x + s->lean_x + wlx, tx = HOVER.tilt * s->look_y + s->lean_y + wly; /* as render.c tilts it */
+    m3_rot(Ty, Y, ty); m3_rot(Tx, X, -tx); m3_mul(f->T, Tx, Ty);
+    m3_mul(f->Mf, f->T, c->M);
+    float ws = s->w_scale > 0 ? s->w_scale : 1;
+    f->wox = wx * ws; f->woy = wy * ws; f->sc = ws * (m->scale > 0 ? m->scale : 1);
+}
+static void r_to_view(const RFrame *f, const float *r, float *v) { v[0] = (r[0] - f->wox) / f->sc * CIRCUM; v[1] = (r[1] - f->woy) / f->sc * CIRCUM; v[2] = r[2] * CIRCUM; }
+static void r_from_view(const RFrame *f, const float *v, float *r) { r[0] = v[0] / CIRCUM * f->sc + f->wox; r[1] = v[1] / CIRCUM * f->sc + f->woy; r[2] = v[2] / CIRCUM; }
+static void tri_centre(const Shape *sh, int ti, float *o) { for (int i = 0; i < 3; i++) o[i] = (sh->v[sh->t[ti][0]][i] + sh->v[sh->t[ti][1]][i] + sh->v[sh->t[ti][2]][i]) / 3; }
+/* A piece knocked loose keeps the shell's turn from that moment (M0): placed between as_free and free_end, the helpers
+ * below use M0 for the shell's turn, and r_place keeps the piece its own size whatever the core's size does (Bestiary's
+ * asFree). Going home it blends from M0 into the live turn (home_turn) and docks exactly. */
+static const float *R_FREE_M;
+static int R_FREE_ON;
+static void as_free(const float *M0) { R_FREE_ON = 1; R_FREE_M = M0; }
+static float R_FLAT; /* 0..1, set after as_free: see flat_m */
+static void free_end(void) { R_FREE_ON = 0; R_FREE_M = NULL; R_FLAT = 0; }
+#define MOF(f) (R_FREE_M ? R_FREE_M : (f)->Mf)
+/* How much bigger triangle ti must be to be the shell's mean size (by area): a geodesic shell's triangles differ a little */
+static float tri_even(const Shape *sh, int ti) {
+    static const Shape *made; static int made_nt; static float k[MAX_T];
+    if (made != sh || made_nt != sh->nt) {
+        float a[MAX_T], sum = 0;
+        for (int t = 0; t < sh->nt; t++) {
+            const float *A = sh->v[sh->t[t][0]], *B = sh->v[sh->t[t][1]], *C = sh->v[sh->t[t][2]];
+            float u[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]}, w[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]}, x[3];
+            cross3(x, u, w); a[t] = len3(x); sum += a[t];
+        }
+        for (int t = 0; t < sh->nt; t++) k[t] = a[t] > 0 ? sqrtf(sum / sh->nt / a[t]) : 1;
+        made = sh; made_nt = sh->nt;
+    }
+    return ti >= 0 && ti < sh->nt ? k[ti] : 1;
+}
+/* A piece broken off by a hit keeps the shell's tilt of that moment, so one seen edge-on was a sliver and every one a
+ * different size. R_FLAT of the way, it is turned to face you (its nearer side: the least turn) and sized to the shell's
+ * mean triangle; it eases back as it goes home, so it docks exactly. F: that turn (view space, applied after the
+ * shell's turn MOF and pre, a turn of its own before it, may be NULL); *gs: its size */
+static void flat_m(const RFrame *f, const Shape *sh, int ti, const float *pre, float *F, float *gs) {
+    if (R_FLAT <= 0) { memcpy(F, I3, sizeof I3); *gs = 1; return; }
+    float n[3], to[3];
+    m3_app(n, MOF(f), sh->tn[ti]);
+    if (pre) { float t[3]; m3_app(t, pre, n); memcpy(n, t, sizeof n); }
+    norm3(n);
+    float z = n[2] >= 0 ? 1 : -1;
+    for (int i = 0; i < 3; i++) to[i] = n[i] + ((i == 2 ? z : 0) - n[i]) * R_FLAT;
+    if (len3(to) < 1e-4f) set3(to, 0, 0, z);
+    norm3(to);
+    turn_to(F, n, to);
+    *gs = 1 + (tri_even(sh, ti) - 1) * R_FLAT;
+}
+static void home_turn(const RFrame *f, const float *M0, float u, float *out) { /* from M0 to the live turn, u of the way */
+    if (u >= 1) { memcpy(out, f->Mf, sizeof(float) * 9); return; }
+    for (int i = 0; i < 9; i++) out[i] = M0[i] + (f->Mf[i] - M0[i]) * u;
+    m3_ortho(out);
+}
+static void r_home(Ctx *c, const RFrame *f, int ti, float *out) { float cm[3], v[3]; tri_centre(c->sh, ti, cm); m3_app(v, MOF(f), cm); r_from_view(f, v, out); }
+static void r_tip_home(const RFrame *f, const Shape *sh, int tip, float *out) { float v[3]; m3_app(v, MOF(f), sh->v[tip]); r_from_view(f, v, out); }
+static void r_normal(const RFrame *f, const Shape *sh, int ti, float *out) { m3_app(out, MOF(f), sh->tn[ti]); }
+static void r_off(const RFrame *f, const Shape *sh, int ti, int tip, float *off) { float cm[3], d[3]; tri_centre(sh, ti, cm); for (int i = 0; i < 3; i++) d[i] = sh->v[tip][i] - cm[i]; m3_app(off, MOF(f), d); }
+static void r_glow(Ctx *c, int ti, float a) { for (int i = 0; i < 3; i++) { int v = c->sh->t[ti][i]; c->m->glow[v] = fmaxf(c->m->glow[v], a); } }
+/* triangle ti turned by R (view, may scale) with its centre at view point atv (about the core, as r_to_view). It is
+ * handed to the renderer in the stage's frame (see Motion.loose): its centre on the stage and its shape turned into
+ * view space, the core's size in it unless it is loose (as_free: its own size), so nothing the core does after this
+ * (hop, lean, grow, turn) drags or bends it */
+static void r_place(Ctx *c, const RFrame *f, int ti, const float *atv, const float *R0) {
+    Motion *m = c->m;
+    float st[3], B[9];
+    r_from_view(f, atv, st);
+    m3_mul(B, R0, MOF(f));
+    if (!R_FREE_ON) m3_scale(B, f->sc);
+    for (int i = 0; i < 3; i++) m->tt[ti][i] = st[i] * CIRCUM;
+    m->tt_on = 1;
+    m->tmi[ti] = (unsigned char)tm_add(m, B);
+    m->loose[ti] = R_FREE_ON ? 2 : 1; m->loose_on = 1; /* (2: loose, its own plain shape; 1: still the shell's, spikes and all) */
+}
+/* a squeeze across axis ax (view) by a, longer along it, so a dart's point gets sharp */
+static void sharpen_m(float *S, const float *ax, float a) {
+    float w = 1 - .42f * a, h = 1 + .35f * a, d = h - w;
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) S[i * 3 + j] = (i == j ? w : 0) + d * ax[i] * ax[j];
+}
+static void r_sharp(Ctx *c, int ti, int tip, float k) { if (k <= 0) return; c->m->sharp_on = 1; c->m->sharp_v[ti] = (signed char)tip; c->m->sharp_k[ti] = k; }
+/* how far a dart's tip is from its centre, on the stage */
+static float r_dart_len(const RFrame *f, const Shape *sh, int ti, int tip, float k, float s, float slim) { float off[3], F[9], gs; r_off(f, sh, ti, tip, off); flat_m(f, sh, ti, NULL, F, &gs); return len3(off) / CIRCUM * (R_FREE_ON ? 1 : f->sc) * s * gs * (1 + .35f * slim) * (1 + .75f * k); } /* (a loose piece keeps its own size) */
+/* a dart centred at cen, pointing along dir, drawn out by k, sized s, slimmed by slim */
+static void r_dart(Ctx *c, const RFrame *f, int ti, int tip, const float *cen, const float *dir, float k, float s, float slim) {
+    float off[3], o[3], d[3] = {dir[0], dir[1], dir[2]}, R[9], cv[3], F[9], gs;
+    r_off(f, c->sh, ti, tip, off); flat_m(f, c->sh, ti, NULL, F, &gs);
+    m3_app(o, F, off); norm3(o); norm3(d);
+    turn_to(R, o, d); m3_scale(R, s * gs);
+    if (slim > 0) { float S[9]; sharpen_m(S, d, slim); m3_mul(R, S, R); }
+    m3_mul(R, R, F);
+    r_to_view(f, cen, cv);
+    r_place(c, f, ti, cv, R);
+    r_sharp(c, ti, tip, k);
+}
+static void r_dart_tip(Ctx *c, const RFrame *f, int ti, int tip, const float *tp, const float *dir, float k, float s, float slim) { /* the same, by its tip */
+    float d[3] = {dir[0], dir[1], dir[2]}, cen[3]; norm3(d);
+    float l = r_dart_len(f, c->sh, ti, tip, k, s, slim);
+    for (int i = 0; i < 3; i++) cen[i] = tp[i] - d[i] * l;
+    r_dart(c, f, ti, tip, cen, d, k, s, slim);
+}
+/* a spark at a stage point, moving at a stage velocity (shell radii a second) */
+static void r_spark(Ctx *c, const RFrame *f, const float *p, const float *v, float life, float drag, float g, float size, int kind, int hot, Col col) {
+    (void)f;
+    Motion *m = c->m;
+    int slot = -1;
+    for (int i = 0; i < MAX_SPARK; i++) if (m->spark[i].life <= 0) { slot = i; break; }
+    if (slot < 0) return;
+    spark(c->s, I3, p, v, life, drag, g, size, kind, hot, col);
+    m->spark[slot].stage = 1; /* in the stage's frame, as the pieces: the core moving never drags it */
+}
+static int r_tip_toward(const RFrame *f, const Shape *sh, int ti, const float *dir) {
+    float cm[3], cv[3]; tri_centre(sh, ti, cm); m3_app(cv, MOF(f), cm);
+    int best = sh->t[ti][0]; float bd = -9;
+    for (int i = 0; i < 3; i++) { int v = sh->t[ti][i]; float p[3], d[3]; m3_app(p, MOF(f), sh->v[v]); for (int j = 0; j < 3; j++) d[j] = p[j] - cv[j]; norm3(d); if (dot3(d, dir) > bd) { bd = dot3(d, dir); best = v; } }
+    return best;
+}
+static float wrap_a(float a) { return atan2f(sinf(a), cosf(a)); }
+/* n triangles on the side facing the pointer T, spread out: each next one as far as it can be from those taken
+ * (Bestiary's pickFacing). ok (may be NULL) says which may be taken. Returns how many it found (into out). */
+static int r_pick_facing(Ctx *c, const RFrame *f, const float *T, int n, int (*ok)(Ctx *, int), float back, float face, int *out) {
+    const Shape *sh = c->sh;
+    float d2[3] = {T[0] - f->wox, T[1] - f->woy, .45f};
+    norm3(d2);
+    int pool[MAX_T], np = 0, near[MAX_T], nn = 0, got = 0;
+    float key[MAX_T];
+    for (int ti = 0; ti < sh->nt; ti++) {
+        float nv[3]; r_normal(f, sh, ti, nv);
+        if (nv[2] <= back || (ok && !ok(c, ti))) continue;
+        key[ti] = dot3(nv, d2);
+        pool[np++] = ti;
+        if (key[ti] > face) near[nn++] = ti;
+    }
+    if (nn >= n) { memcpy(pool, near, sizeof(int) * (size_t)nn); np = nn; }
+    for (int i = 0; i < np; i++) for (int j = i + 1; j < np; j++) if (key[pool[j]] > key[pool[i]]) { int t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+    if (!np) return 0;
+    out[got++] = pool[0];
+    while (got < n && got < np) {
+        int best = -1; float bd = -1;
+        for (int k = 0; k < np; k++) {
+            int ti = pool[k], taken = 0;
+            for (int j = 0; j < got; j++) if (out[j] == ti) taken = 1;
+            if (taken) continue;
+            float d = 9;
+            for (int j = 0; j < got; j++) d = fminf(d, 1 - dot3(sh->tn[out[j]], sh->tn[ti]));
+            d += .35f * (1 + key[ti]) * .1f + mrand(c->s) * .01f;
+            if (d > bd) { bd = d; best = ti; }
+        }
+        if (best < 0) break;
+        out[got++] = best;
+    }
+    return got;
+}
+
+/* after a hit: the piece flies on along its flight, slowing and tumbling, eases back from a dart into a plain
+ * triangle, floats a moment, bobbing, and only then goes home. From the hit on it is loose (fr): it keeps the shell's
+ * turn of that moment, so the core turning, leaning or hopping never swings it round (Bestiary's knockOn) */
+#define R_COAST .45f
+#define R_FLOAT .5f
+#define R_SHAPE .15f
+#define R_FLATTEN .3f /* how long a broken-off piece takes to turn to face you */
+static void knock_on(Ctx *c, const RFrame *f, ReadyRS *R, RPiece *p, const float *vel) {
+    float o[3] = {p->pos[0] - f->wox, p->pos[1] - f->woy, 0}, sp = hypotf(vel[0], vel[1]);
+    norm3(o);
+    if (sp < 1e-4f) sp = 1e-4f;
+    float d[3] = {vel[0] / sp + .9f * o[0], vel[1] / sp + .9f * o[1], 0}; norm3(d); /* leaning away from the core */
+    if (!p->fr) { p->fr = 1; memcpy(p->M0, f->Mf, sizeof p->M0); }
+    p->st = RP_COAST; p->t0 = R->rt;
+    for (int i = 0; i < 3; i++) p->vel[i] = d[i] * sp;
+    p->ang = atan2f(p->dir[1], p->dir[0]); p->w = (mrand(c->s) < .5f ? 1 : -1) * fminf(9, 1.2f * sp);
+    p->k0 = p->k; p->s0 = p->s > 0 ? p->s : 1; p->slim0 = p->slim; p->drag = rnd(c->s, 3.5f, 7); p->flat = 0;
+}
+static void let_go(RPiece *p, float t, float arc) { p->st = RP_BACK; p->t0 = t; memcpy(p->fpos, p->pos, sizeof p->fpos); memcpy(p->fdir, p->dir, sizeof p->fdir); p->fk = p->k; p->fs = p->s > 0 ? p->s : 1; p->farc = arc; }
+static void coast_on(Ctx *c, const RFrame *f, ReadyRS *R, RPiece *p) {
+    float e = R->rt - p->t0, dt = c->dt;
+    if (p->st == RP_COAST) {
+        float u = io3(clampf(e / R_SHAPE, 0, 1)), k = expf(-dt * p->drag);
+        for (int i = 0; i < 2; i++) { p->vel[i] *= k; p->pos[i] += p->vel[i] * dt; }
+        p->ang += p->w * dt; p->w *= expf(-dt * 2.5f);
+        p->k = p->k0 * (1 - u); p->s = p->s0 + (1 - p->s0) * u; p->slim = p->slim0 * (1 - u);
+        p->flat = io3(clampf(e / R_FLATTEN, 0, 1)); p->pos[2] *= expf(-dt * 10); /* turning to face you, level with the others */
+        if (e >= R_COAST) { p->st = RP_FLOAT; p->t0 = R->rt; p->flat = 1; memcpy(p->base, p->pos, sizeof p->base); }
+    } else {
+        float v = clampf(e / R_FLOAT, 0, 1);
+        p->ang += p->w * dt; p->w = (p->w < 0 ? -1 : 1) * fmaxf(.8f, fabsf(p->w) * expf(-dt * 2));
+        p->pos[0] = p->base[0] + .015f * sinf(v * TAU); p->pos[1] = p->base[1] - .05f * sinf(v * PI_F); /* a little lift, a sway */
+        if (v >= 1) { set3(p->dir, cosf(p->ang), sinf(p->ang), 0); let_go(p, R->rt, .6f); return; }
+    }
+    set3(p->dir, cosf(p->ang), sinf(p->ang), 0);
+    if (p->fr) { as_free(p->M0); R_FLAT = p->flat; }
+    r_dart_tip(c, f, p->ti, p->tip, p->pos, p->dir, p->k, p->s, p->slim);
+    free_end();
+    r_glow(c, p->ti, .35f + .4f * (p->k0 > 0 ? p->k / p->k0 : 0));
+}
+/* a triangle by its tip at stage point tp, pointing along dir, drawn out by k, sized s (Bestiary's placeTip) */
+static void r_place_tip(Ctx *c, const RFrame *f, int ti, int tip, const float *tp, const float *dir, float k, float s) {
+    float off[3], o[3], d[3] = {dir[0], dir[1], dir[2]}, R9[9], Ro[3], tv[3], cv[3], F[9], gs;
+    r_off(f, c->sh, ti, tip, off); flat_m(f, c->sh, ti, NULL, F, &gs);
+    m3_app(o, F, off); norm3(o); norm3(d);
+    turn_to(R9, o, d); m3_scale(R9, s * gs); m3_mul(R9, R9, F);
+    m3_app(Ro, R9, off);
+    r_to_view(f, tp, tv);
+    float ks = R_FREE_ON && f->sc > 0 ? 1 / f->sc : 1; /* (r_place keeps a loose piece its own size) */
+    for (int i = 0; i < 3; i++) cv[i] = tv[i] - Ro[i] * ks * (1 + .75f * k);
+    r_place(c, f, ti, cv, R9);
+    r_sharp(c, ti, tip, k);
+}
+/* home again: from where it was let go back into its place, turning back to its own heading as it lands; a loose one
+ * blends from its own turn into the shell's (Bestiary's tipHomeward) */
+static void homeward(Ctx *c, const RFrame *f, ReadyRS *R, RPiece *p) {
+    float u = clampf((R->rt - p->t0) / .8f, 0, 1);
+    if (u >= 1) { if (!p->landed) { p->landed = 1; r_glow(c, p->ti, .9f); } p->st = RP_HOME; p->fr = 0; p->flat = 0; return; }
+    float e = io3(u), home[3], off[3], fd[3] = {p->fdir[0], p->fdir[1], p->fdir[2]}, dir[3], pos[3];
+    r_tip_home(f, c->sh, p->tip, home); /* where it docks, and the heading it docks with: the shell now */
+    r_off(f, c->sh, p->ti, p->tip, off); norm3(off); norm3(fd);
+    for (int i = 0; i < 3; i++) { pos[i] = p->fpos[i] + (home[i] - p->fpos[i]) * e; dir[i] = fd[i] + (off[i] - fd[i]) * e; }
+    pos[1] -= .3f * sinf(e * PI_F) * p->farc;
+    norm3(dir);
+    memcpy(p->pos, pos, sizeof pos);
+    float Mh[9];
+    if (p->fr) { home_turn(f, p->M0, e, Mh); as_free(Mh); R_FLAT = p->flat * (1 - e); } /* (back to its own tilt and size as it docks) */
+    r_place_tip(c, f, p->ti, p->tip, pos, dir, p->fk * (1 - e), 1 + (p->fs - 1) * (1 - e));
+    free_end();
+}
+/* the core's feelings while it attacks, shared by every attack (Bestiary's feel / feelings): fixed curves, nothing overshoots */
+static void feel(ReadyRS *R, int kind, const float *dir, float amt) {
+    int k = 0;
+    for (int i = 0; i < RF_MAX; i++) if (!R->fx[i].kind) { k = i; break; } else if (R->fx[i].at < R->fx[k].at) k = i; /* (full: the oldest goes) */
+    R->fx[k].kind = kind; R->fx[k].at = R->t; R->fx[k].amt = amt;
+    set3(R->fx[k].dir, dir ? dir[0] : 0, dir ? dir[1] : 0, dir ? dir[2] : 0);
+}
+static float pulse_c(float u) { return u <= 0 || u >= 1 ? 0 : u < .14f ? out3(u / .14f) : 1 - io3((u - .14f) / .86f); }
+static void feelings(Ctx *c, ReadyRS *R) {
+    Session *s = c->s;
+    Motion *m = c->m;
+    for (int i = 0; i < RF_MAX; i++) {
+        RFeel *q = &R->fx[i];
+        if (!q->kind) continue;
+        float e = R->t - q->at;
+        if (q->kind == RF_RECOIL) { /* the shell recoils, a ripple runs out from the blow (dir: the struck triangle's normal, model space) */
+            for (int h = 0; h < m->ng; h++) { float d = acosf(clampf(dot3(m->gn[h], q->dir), -1, 1)); c->w->grp[h] += .09f * q->amt * bump((e - d * .22f) / .25f) * (1 - d / PI_F) / wof(m, h); }
+            c->w->bright *= 1 + .9f * q->amt * expf(-e * 8); c->w->scale *= 1 - .045f * q->amt * expf(-e * 12);
+            if (e >= 1) q->kind = 0;
+        } else if (q->kind == RF_LUNGE) { /* the throw: it leans after what it threw and eases back */
+            float p = pulse_c(e / .55f) * q->amt;
+            s->w_off_x += q->dir[0] * .15f * p; s->w_off_y += q->dir[1] * .15f * p; c->w->scale *= 1 + .05f * p;
+            s->w_lean_x += q->dir[0] * .25f * p; s->w_lean_y += q->dir[1] * .25f * p;
+            if (e >= .55f) q->kind = 0;
+        } else { /* a cheer: a small bright hop and a quick happy spin */
+            float b = sinf(PI_F * clampf(e / .45f, 0, 1)) * q->amt;
+            s->w_off_y -= .07f * b; c->w->scale *= 1 + .05f * b; c->w->bright *= 1 + .35f * b; c->w->rate += absrate(c->shown, 2 * b);
+            if (e >= .45f) q->kind = 0;
+        }
+    }
+}
+/* winding up, and wanting you to look: the core runs to NEEDS YOU's orange and gets excited; it hops on the spot, a
+ * little toward you, stretched in the air and squashed as it lands, faster as the charge builds; it gazes at the
+ * pointer, spins up, and its patches ripple like waving hands (Bestiary's charge). Returns the colour's pull. */
+static float r_charge(Ctx *c, float ch, const float *T) {
+    if (!(ch > 0)) return 0;
+    ch = fminf(1, ch);
+    Session *s = c->s;
+    float d[2] = {T[0], T[1]}, l = hypotf(d[0], d[1]);
+    if (l > 1e-4f) { d[0] /= l; d[1] /= l; }
+    float ph = fmodf((float)c->tt * (1.5f + 1.6f * ch), 1), air = ph < .6f ? bump(ph / .6f) : 0, land = ph >= .6f ? bump((ph - .6f) / .4f) : 0;
+    s->w_off_y -= .11f * ch * air; s->w_off_x += d[0] * .05f * ch * air; s->w_off_y += d[1] * .03f * ch * air; s->w_tall += ch * (.07f * air - .09f * land);
+    s->w_lx += d[0] * ch; s->w_ly += d[1] * ch; s->w_lean_x += d[0] * .2f * ch; s->w_lean_y += d[1] * .2f * ch;
+    c->w->rate += absrate(c->shown, 1.3f * ch); c->w->bright *= 1 + .25f * ch * air;
+    for (int g = 0; g < c->m->ng; g++) c->w->grp[g] += .05f * ch * fmaxf(0, sinf((float)c->tt * 9 - g * 1.7f));
+    return ch;
+}
+/* a blow on the pointer (Bestiary's atkHit): a flash, a white flash, hot sparks along the blow, a burst of impact lines
+ * and a shock ring at the pointer, and the core is pleased with itself. It counts as a hit (hit_at). No hit-stop: the
+ * piece that struck flies on in real time anyway, so freezing the attack's clock only froze everything else in it (the
+ * other missiles, the next cone, the core's own cheer) for a moment, which read as a stall. */
+static void atk_hit(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, const float *dir, Col col, float size, float ringa, int heavy) {
+    float z[3] = {0, 0, 0}, l = hypotf(dir[0], dir[1]), d0[2] = {l > 0 ? dir[0] / l : 1, l > 0 ? dir[1] / l : 0};
+    r_spark(c, f, T, z, heavy ? .42f : .3f, 0, 0, size, SK_FLARE, 0, col);
+    r_spark(c, f, T, z, .1f, 0, 0, size * .45f, SK_FLARE, 0, RGB255(255, 255, 255));
+    for (int i = 0, n = heavy ? 10 : 12; i < n; i++) {
+        float d[3] = {d0[0] + rnd(c->s, -.9f, .9f), d0[1] + rnd(c->s, -.9f, .9f), rnd(c->s, -.3f, .3f)}; norm3(d);
+        float v = rnd(c->s, 1.2f, 3);
+        for (int k = 0; k < 3; k++) d[k] *= v;
+        r_spark(c, f, T, d, rnd(c->s, .22f, .45f), 2.5f, 0, rnd(c->s, .9f, 1.5f), SK_STREAK, 1, col);
+    }
+    Motion *m = c->m;
+    int k = 0;
+    for (int i = 1; i < 4; i++) if (m->imp[i].at < m->imp[k].at) k = i;
+    m->imp[k].at = c->now; m->imp[k].x = T[0]; m->imp[k].y = T[1]; m->imp[k].dx = d0[0]; m->imp[k].dy = d0[1];
+    m->imp[k].size = size; m->imp[k].ring = ringa; m->imp[k].col = col;
+    feel(R, RF_CHEER, NULL, clampf(size / 70, .35f, 1));
+    m->hit_at = c->now;
+}
+/* the shell's shards (Bestiary's shardFan / shardMove / shardPlace): triangles blown out in a fan round the blow's
+ * direction a0, leaning away from the core; each flies on, eases into a plain triangle, floats, and goes home in turn */
+static void shard_fan(Ctx *c, const RFrame *f, ReadyRS *R, const int *tris, const float (*cs)[3], int n, const float *at, float a0, float wide, float lo, float hi, const float *ax, const float *d0, float s0) {
+    float o[3] = {at[0] - f->wox, at[1] - f->woy, 0}; norm3(o);
+    a0 = atan2f(sinf(a0) + .9f * o[1], cosf(a0) + .9f * o[0]); /* leaning away from the core */
+    int ord[RS_MAX], order[RS_MAX];
+    if (n > RS_MAX) n = RS_MAX;
+    for (int i = 0; i < n; i++) ord[i] = order[i] = i;
+    for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) { /* round the fan, in order of their angle from the blow */
+        float ai = wrap_a(atan2f(cs[ord[i]][1] - at[1], cs[ord[i]][0] - at[0]) - a0), aj = wrap_a(atan2f(cs[ord[j]][1] - at[1], cs[ord[j]][0] - at[0]) - a0);
+        if (aj < ai) { int t = ord[i]; ord[i] = ord[j]; ord[j] = t; }
+    }
+    for (int i = n - 1; i > 0; i--) { int j = (int)(mrand(c->s) * (i + 1)) % (i + 1), t = order[i]; order[i] = order[j]; order[j] = t; } /* who goes home first: anyone */
+    for (int r = 0; r < n; r++) {
+        if (R->nsh >= RS_MAX) break;
+        int i = ord[r];
+        RShard *q = &R->sh[R->nsh++];
+        memset(q, 0, sizeof *q);
+        float g = a0 + (n > 1 ? ((r + .5f + rnd(c->s, -.45f, .45f)) / n - .5f) * wide * rnd(c->s, .8f, 1.1f) : rnd(c->s, -.3f, .3f));
+        float sp = rnd(c->s, lo * .45f, hi * 1.15f) * (mrand(c->s) < .2f ? .5f : 1);
+        q->ti = tris[i]; q->i = order[r]; q->wait = rnd(c->s, 0, .22f); q->drag = rnd(c->s, 3.5f, 7); q->bob = rnd(c->s, .4f, 1.6f);
+        memcpy(q->base, cs[i], sizeof q->base); set3(q->vel, cosf(g) * sp, sinf(g) * sp, 0);
+        q->w = (mrand(c->s) < .5f ? 1 : -1) * rnd(c->s, 2.5f, 10); q->k0 = R->rt; q->s0 = s0; q->ph = rnd(c->s, 0, 6);
+        if (ax && d0) { q->has_ax = 1; memcpy(q->ax, ax, sizeof q->ax); memcpy(q->d0, d0, sizeof q->d0); }
+        memcpy(q->M0, f->Mf, sizeof q->M0);
+    }
+}
+static int shard_busy(const ReadyRS *R, int ti) { for (int i = 0; i < R->nsh; i++) if (R->sh[i].ti == ti && !R->sh[i].home) return 1; return 0; }
+static void shard_move(Ctx *c, RShard *q, float t) {
+    float dt = c->dt;
+    if (t - q->k0 < R_COAST) { float k = expf(-dt * q->drag); for (int i = 0; i < 2; i++) { q->vel[i] *= k; q->base[i] += q->vel[i] * dt; } }
+    q->ang += q->w * dt; q->w = (q->w < 0 ? -1 : 1) * fmaxf(.7f, fabsf(q->w) * expf(-dt * 2.5f));
+}
+static void r_place_at(Ctx *c, const RFrame *f, int ti, const float *pos, const float *R9) { float cv[3]; r_to_view(f, pos, cv); r_place(c, f, ti, cv, R9); } /* its centre at stage point pos */
+static int shard_place(Ctx *c, const RFrame *f, RShard *q, float t) { /* 1 once it is home */
+    float k = t - q->k0, Z[3] = {0, 0, 1}, Rz[9], R9[9];
+    if (k < R_COAST + R_FLOAT) {
+        float su = io3(clampf(k / R_SHAPE, 0, 1)), s = 1 + (q->s0 - 1) * (1 - su), fl = clampf((k - R_COAST) / R_FLOAT, 0, 1);
+        float fa = io3(clampf(k / R_FLATTEN, 0, 1)); /* turning to face you, level with the others, the mean size */
+        float pos[3] = {q->base[0] + .012f * q->bob * sinf(fl * TAU + q->ph), q->base[1] - .05f * q->bob * sinf(fl * PI_F), q->base[2] * (1 - fa)}, B[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, F[9], gs;
+        if (q->has_ax && su < 1) { float to[3]; for (int i = 0; i < 3; i++) to[i] = q->d0[i] + (q->ax[i] - q->d0[i]) * su; norm3(to); turn_to(B, q->ax, to); }
+        as_free(q->M0); R_FLAT = fa;
+        flat_m(f, c->sh, q->ti, B, F, &gs);
+        m3_mul(B, F, B); m3_rot(Rz, Z, q->ang); m3_mul(R9, Rz, B); m3_scale(R9, s * gs);
+        r_place_at(c, f, q->ti, pos, R9); free_end();
+        r_glow(c, q->ti, .25f + .5f * fmaxf(0, 1 - k / R_COAST));
+        return 0;
+    }
+    float v = io3(clampf((k - R_COAST - R_FLOAT - q->i * .05f - q->wait) / .55f, 0, 1)), hm[3];
+    r_home(c, f, q->ti, hm);
+    if (v >= 1) { if (!q->home) { q->home = 1; r_glow(c, q->ti, .9f); } return 1; }
+    if (!q->ctl_set) { q->ctl_set = 1; memcpy(q->from, q->base, sizeof q->from); q->from[2] = 0; q->a0 = wrap_a(q->ang); for (int i = 0; i < 3; i++) q->ctl[i] = (q->from[i] + hm[i]) * .5f; q->ctl[1] -= .25f; }
+    q->ang = q->a0 * (1 - v);
+    float w0 = (1 - v) * (1 - v), w1 = 2 * v * (1 - v), w2 = v * v, pos[3], Mh[9], F[9], gs;
+    for (int i = 0; i < 3; i++) pos[i] = q->from[i] * w0 + q->ctl[i] * w1 + hm[i] * w2;
+    home_turn(f, q->M0, v, Mh); as_free(Mh); R_FLAT = 1 - v; /* back to its own tilt and size as it docks */
+    flat_m(f, c->sh, q->ti, NULL, F, &gs);
+    m3_rot(Rz, Z, q->ang); m3_mul(R9, Rz, F); m3_scale(R9, gs);
+    r_place_at(c, f, q->ti, pos, R9); free_end();
+    r_glow(c, q->ti, .25f);
+    return 0;
+}
+/* a missile pulled into the core (Bestiary's coreCrash): a blast at I on the shell's edge (In: out from the core there),
+ * and the shell breaks there, the missile and the 7 triangles nearest the blast blown out as shards */
+static void core_crash(Ctx *c, const RFrame *f, ReadyRS *R, RPiece *p, const float *I, const float *In) {
+    const Shape *sh = c->sh;
+    int near[7], nn = 0;
+    float best[7];
+    for (int ti = 0; ti < sh->nt; ti++) {
+        int busy = shard_busy(R, ti);
+        for (int j = 0; j < R->n && !busy; j++) if (R->p[j].ti == ti && R->p[j].st != RP_HOME) busy = 1;
+        float nv[3], hm[3];
+        r_normal(f, sh, ti, nv);
+        if (busy || nv[2] <= -.1f) continue;
+        r_home(c, f, ti, hm);
+        float d = hypotf(hm[0] - I[0], hm[1] - I[1]);
+        int at = nn < 7 ? nn++ : (d < best[6] ? 6 : -1);
+        if (at < 0) continue;
+        near[at] = ti; best[at] = d;
+        for (int j = at; j > 0 && best[j] < best[j - 1]; j--) { float t = best[j]; best[j] = best[j - 1]; best[j - 1] = t; int u = near[j]; near[j] = near[j - 1]; near[j - 1] = u; }
+    }
+    int tris[8]; float cs[8][3];
+    tris[0] = p->ti; memcpy(cs[0], p->pos, sizeof cs[0]);
+    for (int j = 0; j < nn; j++) { tris[j + 1] = near[j]; r_home(c, f, near[j], cs[j + 1]); }
+    float a0 = atan2f(In[1], In[0]), z[3] = {0, 0, 0};
+    r_spark(c, f, I, z, .4f, 0, 0, 76, SK_FLARE, 0, RGB255(255, 226, 190));
+    r_spark(c, f, I, z, .12f, 0, 0, 34, SK_FLARE, 0, RGB255(255, 255, 255));
+    for (int i = 0; i < 26; i++) { float g = a0 + rnd(c->s, -1.6f, 1.6f), v = rnd(c->s, 1.2f, 4), vel[3] = {cosf(g) * v, sinf(g) * v, rnd(c->s, -.6f, .6f)}; r_spark(c, f, I, vel, rnd(c->s, .3f, .8f), 2.2f, 1.2f, rnd(c->s, 1, 2), SK_STREAK, 1, RGB255(255, 196, 130)); }
+    for (int i = 0; i < 10; i++) { float g = rnd(c->s, 0, TAU), v = rnd(c->s, .4f, 1.2f), vel[3] = {cosf(g) * v, sinf(g) * v, rnd(c->s, -.3f, .3f)}; r_spark(c, f, I, vel, rnd(c->s, .6f, 1.1f), 1.5f, -.2f, rnd(c->s, 1.2f, 2), SK_MOTE, 0, RGB255(150, 160, 185)); } /* smoke */
+    flash(c->m, sh->nv, .35f); ring(c->m, c->now, .6f);
+    { float ax[3] = {-In[1], In[0], 0}; jerk(c->s, ax, .08f, c->now); }
+    feel(R, RF_RECOIL, sh->tn[nn ? near[0] : p->ti], 1);
+    p->st = RP_BROKE;
+    shard_fan(c, f, R, tris, (const float (*)[3])cs, nn + 1, I, a0, 3.4f, 6, 10, NULL, NULL, 1);
+}
+
+/* 1. missiles: three triangles on your side pop out, clear of the shell, and spin like thrown coins; as the spin
+ * slows each one is drawn out long and slim into a missile, and the spin runs out with its nose on the pointer. A
+ * beat, then it fires: it curls off to one side on a smoke trail and dives nose first. The core's pull bends every
+ * flight; until it has been dodged once the core is solid to it, after that one pulled in crashes into the shell. */
+static void missiles_start(Ctx *c, const RFrame *f, ReadyRS *R, const float *T) {
+    const Shape *sh = c->sh;
+    float dir[3] = {T[0] - f->wox, T[1] - f->woy, 0}; norm3(dir);
+    int pool[MAX_T], n = 0;
+    float side[MAX_T];
+    for (int ti = 0; ti < sh->nt; ti++) { float nv[3]; r_normal(f, sh, ti, nv); float l = hypotf(nv[0], nv[1]); side[ti] = l > 1e-6f ? (nv[0] * dir[0] + nv[1] * dir[1]) / l : 0; if (nv[2] > -.2f && side[ti] > .35f) pool[n++] = ti; }
+    if (n < 6) { /* the pointer right over the core: those facing it most */
+        n = 0;
+        for (int ti = 0; ti < sh->nt; ti++) pool[n++] = ti;
+        for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) if (side[pool[j]] > side[pool[i]]) { int t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+        if (n > 12) n = 12;
+    }
+    for (int i = n - 1; i > 0; i--) { int j = (int)(mrand(c->s) * (i + 1)) % (i + 1), t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+    R->n = 0;
+    for (int k = 0; k < n && R->n < 3; k++) {
+        int ti = pool[k], ok = 1;
+        for (int j = 0; j < R->n; j++) if (R->p[j].ti == ti || sh->tnb[R->p[j].ti][0] == ti || sh->tnb[R->p[j].ti][1] == ti || sh->tnb[R->p[j].ti][2] == ti) ok = 0;
+        if (!ok) continue;
+        RPiece *p = &R->p[R->n];
+        memset(p, 0, sizeof *p);
+        p->ti = ti; p->tip = r_tip_toward(f, sh, ti, dir); p->i = R->n; p->t0 = .1f + R->n * .2f; p->st = RP_MORPH; p->s = 1;
+        p->spin = (mrand(c->s) < .5f ? 1 : -1) * rnd(c->s, 2.6f, 3.4f); p->dmin = 1e9f;
+        R->n++;
+    }
+}
+static void missiles_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, float t, float dt) {
+    const float MORPH = .8f, AIM = .12f, core[2] = {f->wox, f->woy};
+    float T0[3] = {T[0], T[1], 0};
+    { int morph = 0, live = 0; /* the lock-on round the pointer while any is turning into a missile or flying; the core winding up while any is turning */
+      for (int ip = 0; ip < R->n; ip++) { if (R->p[ip].st == RP_MORPH) morph = 1; if (R->p[ip].st == RP_MORPH || R->p[ip].st == RP_FLY) live = 1; }
+      if (live) c->m->lock_on = fmaxf(c->m->lock_on, clampf((t - .5f) / .6f, 0, 1));
+      if (morph && R->n) R->charge = fmaxf(R->charge, .3f + .7f * io3(clampf(t / (R->p[0].t0 + MORPH), 0, 1)) * (R->p[0].st == RP_MORPH ? 1 : .7f)); }
+    for (int ip = 0; ip < R->n; ip++) {
+        RPiece *p = &R->p[ip];
+        if (p->st == RP_MORPH) {
+            float e = t - p->t0;
+            if (e < 0) continue;
+            float u = clampf(e / MORPH, 0, 1), nv[3], hm[3], aw[3] = {T0[0] - core[0], T0[1] - core[1], 0};
+            r_normal(f, c->sh, p->ti, nv); r_home(c, f, p->ti, hm); norm3(aw);
+            if (p->out[0] == 0 && p->out[1] == 0) {
+                float sx[3];
+                if (hypotf(nv[0], nv[1]) > .2f) set3(sx, nv[0], nv[1], 0);
+                else set3(sx, -aw[1] + aw[0] * (p->i - 1), aw[0] + aw[1] * (p->i - 1), 0);
+                norm3(sx);
+                set3(p->out, sx[0] + aw[0] * .35f, sx[1] + aw[1] * .35f, 0); norm3(p->out);
+            }
+            float g = io3(clampf(e / .5f, 0, 1)), cen[3] = {hm[0] + p->out[0] * 1.25f * f->sc, hm[1] + p->out[1] * 1.25f * f->sc, hm[2] + .1f * g};
+            cen[0] = hm[0] + (cen[0] - hm[0]) * g; cen[1] = hm[1] + (cen[1] - hm[1]) * g; /* well clear of the core */
+            float aim[3] = {T0[0] - cen[0], T0[1] - cen[1], 0}; norm3(aim);
+            float a0 = atan2f(aim[1], aim[0]), th[3], own[3];
+            r_tip_home(f, c->sh, p->tip, th);
+            for (int i = 0; i < 3; i++) own[i] = th[i] - hm[i];
+            norm3(own);
+            float spa = a0 + p->spin * TAU * (1 - out3(u)), sd[3] = {cosf(spa), sinf(spa), 0}, dir[3]; /* spinning, slowing, running out on the pointer */
+            if (e < .2f) { float w = io3(e / .2f); for (int i = 0; i < 3; i++) dir[i] = own[i] + (sd[i] - own[i]) * w; norm3(dir); }
+            else memcpy(dir, sd, sizeof dir);
+            float k = io3(clampf((e - .25f) / .65f, 0, 1)), q = e > MORPH ? .01f * sinf(e * 90 + p->i) : 0;
+            float cq[3] = {cen[0] + q, cen[1] - q, cen[2]};
+            r_dart(c, f, p->ti, p->tip, cq, dir, .9f * k, 1, .7f * k);
+            float l = r_dart_len(f, c->sh, p->ti, p->tip, .9f * k, 1, .7f * k);
+            for (int i = 0; i < 3; i++) p->pos[i] = cq[i] + dir[i] * l;
+            memcpy(p->dir, dir, sizeof p->dir); p->k = .9f * k; p->slim = .7f * k; p->s = 1;
+            r_glow(c, p->ti, .4f + .5f * k);
+            if (u < .85f && mrand(c->s) < .5f) { float v[3] = {-dir[1] * (p->spin > 0 ? .8f : -.8f), dir[0] * (p->spin > 0 ? .8f : -.8f), 0}; r_spark(c, f, p->pos, v, .2f, 3, 0, 1, SK_MOTE, 0, RGB255(215, 230, 255)); } /* glints off the spin */
+            if (e >= MORPH + AIM) { /* fire: they curl off at their own angles, one wide out on the core's far side, one wide
+                                    * the other way, the last (it fires last) almost straight: a pincer, so dodging one
+                                    * moves you into another */
+                p->st = RP_FLY; p->t0 = t;
+                float w[3] = {-aim[1], aim[0], 0}, oc[3] = {cen[0] - core[0], cen[1] - core[1], 0}; norm3(oc);
+                static const float CURL[3] = {1.35f, -1.35f, .3f};
+                float cs = dot3(w, oc) > 0 ? 1 : -1, g = atan2f(aim[1], aim[0]) + CURL[p->i % 3] * cs, v[3] = {cosf(g), sinf(g), 0};
+                for (int i = 0; i < 3; i++) p->vel[i] = v[i] * 5.5f;
+                float fp[3] = {p->pos[0] - dir[0] * .35f, p->pos[1] - dir[1] * .35f, p->pos[2]}, z[3] = {0, 0, 0};
+                r_spark(c, f, fp, z, .2f, 0, 0, 22, SK_FLARE, 0, RGB255(255, 236, 210));
+                { float ld[3] = {-aim[0], -aim[1], 0}; feel(R, RF_LUNGE, ld, .4f); }
+            }
+        } else if (p->st == RP_FLY) {
+            float fly = t - p->t0, to[2] = {T0[0] - p->pos[0], T0[1] - p->pos[1]}, d = hypotf(to[0], to[1]);
+            float up = 1 + .15f * (float)(p->nmiss < 5 ? p->nmiss : 5); /* each time you dodge it, it comes back faster and turns harder */
+            float sp = fminf(15 * up, hypotf(p->vel[0], p->vel[1]) + (fly < .12f ? 4 : 30) * dt), cur = atan2f(p->vel[1], p->vel[0]);
+            float lead = fminf(.6f, d / fmaxf(sp, 1)), want = atan2f(to[1] + R->pv[1] * lead, to[0] + R->pv[0] * lead); /* where you will be when it gets there */
+            float pr[2] = {p->pos[0] - core[0], p->pos[1] - core[1]}, hx = cosf(cur), hy = sinf(cur);
+            float ahead = -(pr[0] * hx + pr[1] * hy), miss = fabsf(pr[0] * hy - pr[1] * hx);
+            if (!p->dodged && ahead > 0 && ahead < d + .5f && miss < 1.35f) { /* the core in the way: round it, on the side it is already on */
+                float side = (pr[0] * hy - pr[1] * hx) > 0 ? -1 : 1;
+                want = cur + side * fminf(1.2f, (1.35f - miss) * 2.5f);
+            }
+            /* it turns no faster than this, so it can be dodged; past you it whips round in a tight turn and comes back
+             * (p->whip), until it points at you again */
+            if (p->whip && fabsf(wrap_a(want - cur)) < .3f) p->whip = 0;
+            float steer = (p->whip ? 16 : fminf(9, 4 + 17 * fly)) * up * dt, na = cur + clampf(wrap_a(want - cur), -steer, steer);
+            p->vel[0] = cosf(na) * sp; p->vel[1] = sinf(na) * sp;
+            { float r = fmaxf(.9f, hypotf(pr[0], pr[1])), g = 40 / (r * r); /* the core's pull: it bends the flight and slings it round */
+              p->vel[0] -= pr[0] / r * g * dt; p->vel[1] -= pr[1] / r * g * dt;
+              float v = hypotf(p->vel[0], p->vel[1]), vm = 19 * up; if (v > vm) { p->vel[0] *= vm / v; p->vel[1] *= vm / v; } }
+            float prev[3] = {p->pos[0], p->pos[1], p->pos[2]};
+            p->pos[0] += p->vel[0] * dt; p->pos[1] += p->vel[1] * dt; p->pos[2] *= expf(-dt * 6);
+            if (d < p->dmin) p->dmin = d; else if (d > p->dmin + .3f) { if (!p->whip) p->nmiss++; p->dodged = 1; p->whip = 1; p->dmin = d; } /* it came close, missed and flew on: dodged; round it comes */
+            float rr = hypotf(p->pos[0] - core[0], p->pos[1] - core[1]), cr = f->sc;
+            if (rr < cr && !p->dodged) { /* not dodged yet: the core is solid, it glances off */
+                float u[2] = {(p->pos[0] - core[0]) / fmaxf(rr, 1e-4f), (p->pos[1] - core[1]) / fmaxf(rr, 1e-4f)}, vn = p->vel[0] * u[0] + p->vel[1] * u[1];
+                p->pos[0] = core[0] + u[0] * cr * 1.02f; p->pos[1] = core[1] + u[1] * cr * 1.02f;
+                if (vn < 0) { p->vel[0] -= 1.6f * vn * u[0]; p->vel[1] -= 1.6f * vn * u[1]; }
+                rr = cr * 1.02f;
+            }
+            if (rr < cr) { /* dodged, then pulled into the core: it explodes there and breaks a hole in the shell */
+                float lo = 0, hi = 1;
+                for (int i = 0; i < 12; i++) { float u = (lo + hi) / 2; if (hypotf(prev[0] + (p->pos[0] - prev[0]) * u - core[0], prev[1] + (p->pos[1] - prev[1]) * u - core[1]) < cr) hi = u; else lo = u; }
+                float I[3] = {prev[0] + (p->pos[0] - prev[0]) * lo, prev[1] + (p->pos[1] - prev[1]) * lo, 0}, In[3] = {I[0] - core[0], I[1] - core[1], 0};
+                norm3(In);
+                core_crash(c, f, R, p, I, In);
+                continue;
+            }
+            set3(p->dir, p->vel[0], p->vel[1], 0); p->k = 1;
+            if (fly > 4) { /* chased too long: it bursts, harmlessly, and goes home */
+                float z[3] = {0, 0, 0};
+                for (int i = 0; i < 12; i++) { float a = rnd(c->s, 0, TAU), v = rnd(c->s, .6f, 1.8f), vel[3] = {cosf(a) * v, sinf(a) * v, rnd(c->s, -.3f, .3f)}; r_spark(c, f, p->pos, vel, rnd(c->s, .3f, .6f), 2.5f, 0, rnd(c->s, 1, 1.6f), SK_MOTE, 0, RGB255(200, 210, 230)); }
+                r_spark(c, f, p->pos, z, .18f, 0, 0, 16, SK_FLARE, 0, RGB255(220, 228, 245));
+                float kv[3] = {p->vel[0] * .35f, p->vel[1] * .35f, 0};
+                knock_on(c, f, R, p, kv);
+                continue;
+            }
+            float sx = p->vel[0] * dt, sy = p->vel[1] * dt, sl = sx * sx + sy * sy, tx0 = T0[0] - prev[0], ty0 = T0[1] - prev[1];
+            float sk = sl > 0 ? clampf((tx0 * sx + ty0 * sy) / sl, 0, 1) : 0;
+            if (c->s->aim_on && hypotf(tx0 - sx * sk, ty0 - sy * sk) < fmaxf(.28f * f->sc, c->s->aim_hit)) { /* the nose on the pointer (along this frame's whole step): freeze, blast */
+                r_dart_tip(c, f, p->ti, p->tip, T0, p->dir, 1, 1, p->slim);
+                { float hd[2] = {p->vel[0] / sp, p->vel[1] / sp}; atk_hit(c, f, R, T0, hd, RGB255(255, 236, 214), 58, 1, 0); }
+                for (int i = 0; i < 18; i++) { float a = na + PI_F + rnd(c->s, -1.4f, 1.4f), v = rnd(c->s, 1.2f, 3.4f), vel[3] = {cosf(a) * v, sinf(a) * v, rnd(c->s, -.5f, .5f)}; r_spark(c, f, T0, vel, rnd(c->s, .3f, .65f), 2.2f, 1.2f, rnd(c->s, 1, 1.9f), SK_STREAK, 1, RGB255(255, 190, 120)); }
+                memcpy(p->pos, T0, sizeof T0);
+                float g = na + rnd(c->s, -1.2f, 1.2f), v = rnd(c->s, 6.5f, 8), kv[3] = {cosf(g) * v, sinf(g) * v, 0};
+                knock_on(c, f, R, p, kv);
+                continue;
+            }
+            r_dart_tip(c, f, p->ti, p->tip, p->pos, p->dir, 1, 1, p->slim);
+            { float v[3] = {rnd(c->s, -.12f, .12f), rnd(c->s, -.12f, .12f), 0}; r_spark(c, f, prev, v, rnd(c->s, .45f, .8f), 1.5f, -.2f, rnd(c->s, 1, 1.5f), SK_MOTE, 0, RGB255(160, 172, 200)); } /* smoke */
+            { float v[3] = {-p->vel[0] * .1f, -p->vel[1] * .1f, 0}; r_spark(c, f, prev, v, .14f, 3, 0, 1.2f, SK_STREAK, 1, RGB255(255, 200, 140)); }
+        } else if (p->st == RP_COAST || p->st == RP_FLOAT) coast_on(c, f, R, p);
+        else if (p->st == RP_BACK) homeward(c, f, R, p);
+    }
+    for (int i = 0; i < R->nsh; i++) shard_move(c, &R->sh[i], R->rt); /* the broken shell and the missile's own pieces */
+    for (int i = 0; i < R->nsh; i++) if (!R->sh[i].home) shard_place(c, f, &R->sh[i], R->rt);
+}
+
+/* the other attacks, one file each (Bestiary's ATTACK.<name>, ported): NAME_start(c, f, R, T) picks its pieces into
+ * R->p / its own state into R->own; NAME_run(c, f, R, T, t, dt) runs it, t its clock.
+ * Building with -DREADY_SOLO and one -DREADY_SOLO_<NAME> leaves the others out (stubs), to check one alone. */
+#define READY_STUB(name) static void name##_start(Ctx *c, const RFrame *f, ReadyRS *R, const float *T) { (void)c; (void)f; (void)T; R->n = 0; } \
+                         static void name##_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, float t, float dt) { (void)c; (void)f; (void)R; (void)T; (void)t; (void)dt; }
+#if !defined(READY_SOLO) || defined(READY_SOLO_FORGE)
+#include "ready_forge.inc"
+#else
+READY_STUB(forge)
+#endif
+#if !defined(READY_SOLO) || defined(READY_SOLO_SLINGSHOT)
+#include "ready_slingshot.inc"
+#else
+READY_STUB(slingshot)
+#endif
+#if !defined(READY_SOLO) || defined(READY_SOLO_SPIKES)
+#include "ready_spikes.inc"
+#else
+READY_STUB(spikes)
+#endif
+
+/* Restless: READY's routine. IDLE's calm turn; every 1.2 to 2.6 s, while the pointer is on its screen, an attack */
+static void r_restless(Ctx *c) {
+    Session *s = c->s;
+    Motion *m = c->m;
+    ReadyRS *R = &m->rs.ready;
+    RFrame f; rframe(c, &f);
+    set_rate(c, .16f);
+    float T[3] = {s->aim_x, s->aim_y, 0};
+    if (R->next == 0) R->next = c->now + .8;
+    if (!R->atk && c->sh->nt) {
+        int a = m->atk_want;
+        if (!a && s->aim_on && c->now >= R->next && (READY_ATKS & ((1u << RA_N) - 2))) { /* one it may throw, at random */
+            int on[RA_N], n = 0;
+            for (int k = 1; k < RA_N; k++) if (READY_ATKS >> k & 1) on[n++] = k;
+            a = on[(int)(mrand(s) * n) % n];
+        }
+        m->atk_want = 0;
+        if (a) {
+            R->atk = a; R->t = R->rt = 0; R->has_last = 0; R->pv[0] = R->pv[1] = 0; R->nsh = 0;
+            memset(R->fx, 0, sizeof R->fx); memset(&R->own, 0, sizeof R->own);
+            switch (a) {
+            case RA_MISSILES: missiles_start(c, &f, R, T); break;
+            case RA_FORGE: forge_start(c, &f, R, T); break;
+            case RA_SLINGSHOT: slingshot_start(c, &f, R, T); break;
+            case RA_SPIKES: spikes_start(c, &f, R, T); break;
+            }
+        }
+    }
+    if (!R->atk) { m->rage *= expf(-c->dt * 3); return; }
+    m->atk_busy = 1;
+    float dt = c->dt;
+    R->t += dt; R->rt += c->dt;
+    if (c->dt > 0) { /* how the pointer is moving, smoothed */
+        if (R->has_last) { float k = 1 - expf(-c->dt * 8); for (int i = 0; i < 2; i++) R->pv[i] += ((T[i] - R->last[i]) / c->dt - R->pv[i]) * k; }
+        R->last[0] = T[0]; R->last[1] = T[1]; R->has_last = 1;
+    }
+    R->charge = 0;
+    switch (R->atk) {
+    case RA_MISSILES: missiles_run(c, &f, R, T, R->t, dt); break;
+    case RA_FORGE: forge_run(c, &f, R, T, R->t, dt); break;
+    case RA_SLINGSHOT: slingshot_run(c, &f, R, T, R->t, dt); break;
+    case RA_SPIKES: spikes_run(c, &f, R, T, R->t, dt); break;
+    }
+    feelings(c, R);
+    { float ch = r_charge(c, R->charge, T); /* the colour runs to NEEDS YOU's orange while it winds up */
+      m->rage += (ch - m->rage) * (1 - expf(-c->dt * (ch > m->rage ? 5 : 3))); }
+    int out = 0;
+    for (int i = 0; i < R->n; i++) if (R->p[i].st != RP_HOME && R->p[i].st != RP_BROKE) out = 1;
+    for (int i = 0; i < R->nsh; i++) if (!R->sh[i].home) out = 1;
+    if (!out || R->rt > 14) { R->atk = 0; R->n = 0; R->next = c->now + rnd(s, 1.2f, 2.6f); }
+}
+
 /* every routine: name, the state it was made for, how long it keeps DONE on screen, fine patches, run, enter, what it does */
 const Routine ROUTINES[RT_N] = {
     [RT_DRIFT] = {"Drift", -1, 0, 0, r_drift, NULL, "A slow, plain turn; the actions do the rest."},
@@ -1412,6 +2049,7 @@ const Routine ROUTINES[RT_N] = {
     [RT_DECODING] = {"Decoding", ST_TRANSCRIBE, 0, 0, r_decoding, NULL, "Steps 36 degrees at a time while a scan plane reads the rows."},
     [RT_LOCKED] = {"Locked", ST_STANDBY, 0, 0, r_locked, locked_enter, "Stops square to you, drawn in and still."},
     [RT_CRAZY] = {"Crazy", ST_ERROR, 0, 0, r_crazy, NULL, "Fits of going crazy: spikes out and in, jerks, flicking patches."},
+    [RT_RESTLESS] = {"Restless", ST_READY, 0, 0, r_restless, NULL, "Keeps calm, and every second or two throws pieces of its shell at the pointer until you point at it to read the reply. Its attacks are below."},
 };
 
 static void routine_enter(Session *s, const Shape *sh, int st, double now) {
@@ -1557,6 +2195,61 @@ static void whim(Ctx *c) {
 }
 
 /* ---- every frame ------------------------------------------------------------------------------- */
+/* ---- a state change: the old routine winds down first. What it had out on its last frame (triangles turned or carried
+ * off, blades, see-through ones, the squash, the black hole, the inner shell, a scan) eases back home over CLOSE_T while
+ * nothing new is asked, so lifted patches and spikes settle too; the old state's colour stays meanwhile. Then the new
+ * state's colour comes in and its routine starts. Nothing out: it changes at once. */
+#define CLOSE_T .5f
+static int motion_out(const Motion *m, const Shape *sh) {
+    if (m->ntm || m->tt_on || m->ta_on || m->sharp_on || m->squash > .01f || m->hole > .01f || m->inner > .01f || m->scan_a > .01f) return 1;
+    for (int t = 0; t < sh->nt; t++) if (fabsf(m->off[t]) > .03f) return 1;
+    for (int v = 0; v < sh->nv; v++) if (fabsf(m->push[v]) > .03f) return 1;
+    return 0;
+}
+static void close_begin(Motion *m, double now) {
+    m->closing = 1; m->close_at = now;
+    memcpy(m->cl.tmi, m->tmi, sizeof m->cl.tmi); memcpy(m->cl.tmx, m->tmx, sizeof m->cl.tmx); m->cl.ntm = m->ntm;
+    memcpy(m->cl.tt, m->tt, sizeof m->cl.tt); m->cl.tt_on = m->tt_on;
+    memcpy(m->cl.talpha, m->talpha, sizeof m->cl.talpha); m->cl.ta_on = m->ta_on;
+    memcpy(m->cl.sharp_k, m->sharp_k, sizeof m->cl.sharp_k); memcpy(m->cl.sharp_v, m->sharp_v, sizeof m->cl.sharp_v); m->cl.sharp_on = m->sharp_on;
+    m->cl.squash = m->squash; memcpy(m->cl.sq_ax, m->sq_ax, sizeof m->cl.sq_ax);
+    m->cl.hole = m->hole; m->cl.inner = m->inner; m->cl.scan_h = m->scan_h; m->cl.scan_a = m->scan_a;
+}
+/* R (may scale) taken u of the way from the identity: its turn part of the way about its own axis, its stretch eased */
+static void m3_part(const float *A, float u, float *out) {
+    float R[9], Rt[9], S[9], P[9];
+    memcpy(R, A, sizeof R); m3_ortho(R);
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Rt[i * 3 + j] = R[j * 3 + i];
+    m3_mul(S, Rt, A); /* the stretch left once the turn is taken out */
+    float cs = clampf((R[0] + R[4] + R[8] - 1) / 2, -1, 1), ang = acosf(cs), ax[3] = {R[7] - R[5], R[2] - R[6], R[3] - R[1]}, l = len3(ax);
+    if (ang < 1e-4f) memcpy(P, I3, sizeof P);
+    else {
+        if (l < 1e-6f) { int k = R[0] >= R[4] && R[0] >= R[8] ? 0 : R[4] >= R[8] ? 1 : 2; set3(ax, R[k] + (k == 0), R[3 + k] + (k == 1), R[6 + k] + (k == 2)); norm3(ax); }
+        else for (int i = 0; i < 3; i++) ax[i] /= l;
+        m3_rot(P, ax, ang * u);
+    }
+    for (int i = 0; i < 9; i++) S[i] = I3[i] + (S[i] - I3[i]) * u;
+    m3_mul(out, P, S);
+}
+/* one frame of winding down; 1 once it is all home */
+static int close_step(Motion *m, const Shape *sh, double now) {
+    float e = (float)(now - m->close_at), f = 1 - io3(clampf(e / CLOSE_T, 0, 1));
+    if (f > 0) {
+        if (m->cl.ntm) { memcpy(m->tmi, m->cl.tmi, sizeof m->tmi); m->ntm = m->cl.ntm; for (int i = 0; i < m->cl.ntm; i++) m3_part(m->cl.tmx[i], f, m->tmx[i]); }
+        if (m->cl.tt_on) { m->tt_on = 1; for (int t = 0; t < sh->nt; t++) for (int k = 0; k < 3; k++) m->tt[t][k] = m->cl.tt[t][k] * f; }
+        if (m->cl.ta_on) { m->ta_on = 1; for (int t = 0; t < sh->nt; t++) m->talpha[t] = 1 + (m->cl.talpha[t] - 1) * f; }
+        if (m->cl.sharp_on) { m->sharp_on = 1; memcpy(m->sharp_v, m->cl.sharp_v, sizeof m->sharp_v); for (int t = 0; t < sh->nt; t++) m->sharp_k[t] = m->cl.sharp_k[t] * f; }
+        m->squash = m->cl.squash * f; memcpy(m->sq_ax, m->cl.sq_ax, sizeof m->sq_ax);
+        m->hole = m->cl.hole * f; m->inner = m->cl.inner * f; m->scan_h = m->cl.scan_h; m->scan_a = m->cl.scan_a * f;
+        return 0;
+    }
+    if (e < 1.2f) { /* the patches and spikes it lifted, still settling (nothing drives them now) */
+        for (int t = 0; t < sh->nt; t++) if (fabsf(m->off[t]) > .03f) return 0;
+        for (int v = 0; v < sh->nv; v++) if (fabsf(m->push[v]) > .03f) return 0;
+    }
+    return 1;
+}
+
 void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     Motion *m = &s->mo;
     if ((sh->nt && m->cut_for != sh->nt) || (!sh->nt && m->cut_for)) { /* a new shape (Settings > Shape): start clean */
@@ -1565,7 +2258,12 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
         m->routine = -1;
     }
     if (!sh->nt) m->ng = 0;
-    if (m->routine != shown) routine_enter(s, sh, shown, now);
+    if (m->closing && m->routine == shown) m->closing = 0; /* back to the old state before it wound down: it carries on */
+    if (m->routine != shown && !m->closing) {
+        /* a state change: wind the old routine down first, if it has anything out (READY's loose pieces see to themselves) */
+        if (m->routine >= 0 && m->rt >= 0 && !m->loose_on && motion_out(m, sh)) close_begin(m, now);
+        else routine_enter(s, sh, shown, now);
+    }
     for (int i = 0; i < sh->nv; i++) m->glow[i] *= expf(-dt * 5);
     float M[9]; view_matrix(s, M);
     Want w; memset(&w, 0, sizeof w);
@@ -1575,6 +2273,11 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     memset(m->tmi, 0, sizeof m->tmi);
     m->ntm = 0; m->tt_on = m->ta_on = m->sharp_on = m->trail_on = 0; m->squash = 0; m->hole = 0;
     memset(m->tt, 0, sizeof m->tt); memset(m->sharp_k, 0, sizeof m->sharp_k);
+    memset(m->loose, 0, sizeof m->loose); m->loose_on = m->atk_busy = 0;
+    if (m->rt != RT_RESTLESS) m->rage *= expf(-dt * 3);
+    m->lock_on = fmaxf(0, m->lock_on - dt * 2.5f);
+    { float want = shown == ST_READY ? READY_CAM : 7; /* the camera: see Motion.cam */
+      m->cam = m->cam > 0 ? m->cam + (want - m->cam) * (1 - expf(-dt * 4)) : want; }
 
     /* particles and rings age */
     for (int i = 0; i < MAX_SPARK; i++) {
@@ -1600,8 +2303,27 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
 
     /* the state's routine, then an action on top */
     Ctx c = {s, m, sh, M, &w, shown, now, now - s->created + s->phase, dt, (float)(now - m->r_at)};
-    if (m->rt >= 0 && m->rt < RT_N) ROUTINES[m->rt].run(&c);
-    whim(&c);
+    if (m->closing) { if (close_step(m, sh, now)) { m->closing = 0; routine_enter(s, sh, shown, now); } } /* nothing asked meanwhile */
+    else {
+        if (m->rt >= 0 && m->rt < RT_N) ROUTINES[m->rt].run(&c);
+        whim(&c);
+    }
+    /* READY: the offset, lean and stretch the routine asks for, as the Bestiary draws them: the offset follows on a
+     * critically damped spring, the lean and stretch ease, so a hop, a lunge or a cheer is soft and never shakes */
+    { int on = m->rt == RT_RESTLESS && shown == ST_READY;
+      if (on && !m->sm_on) { m->sm_x = s->w_off_x; m->sm_y = s->w_off_y; m->sm_vx = m->sm_vy = 0; m->sm_lx = s->w_lean_x; m->sm_ly = s->w_lean_y; m->sm_tall = s->w_tall; }
+      if (on || m->sm_on) {
+          int n = (int)ceilf(dt / .004f); float h = dt / (float)(n > 0 ? n : 1), K = 160, D = 2 * sqrtf(160);
+          for (int i = 0; i < n; i++) {
+              m->sm_vx += (K * (s->w_off_x - m->sm_x) - D * m->sm_vx) * h; m->sm_x += m->sm_vx * h;
+              m->sm_vy += (K * (s->w_off_y - m->sm_y) - D * m->sm_vy) * h; m->sm_y += m->sm_vy * h;
+          }
+          float kl = 1 - expf(-dt * 10), kt = 1 - expf(-dt * 12);
+          m->sm_lx += (s->w_lean_x - m->sm_lx) * kl; m->sm_ly += (s->w_lean_y - m->sm_ly) * kl; m->sm_tall += (s->w_tall - m->sm_tall) * kt;
+          float gap = fabsf(s->w_off_x - m->sm_x) + fabsf(s->w_off_y - m->sm_y) + fabsf(m->sm_vx) + fabsf(m->sm_vy) + fabsf(s->w_lean_x - m->sm_lx) + fabsf(s->w_lean_y - m->sm_ly) + fabsf(s->w_tall - m->sm_tall);
+          s->w_off_x = m->sm_x; s->w_off_y = m->sm_y; s->w_lean_x = m->sm_lx; s->w_lean_y = m->sm_ly; s->w_tall = m->sm_tall;
+          m->sm_on = on || gap > 1e-3f; /* (after READY it settles first, then lets go) */
+      } }
 
     /* the pointer: the patch under it lifts and lights (DONE), the nodes under it light (THINK) */
     if (s->hover > .05f && m->ng && (shown == ST_CHEER || shown == ST_THINK)) {
@@ -1686,7 +2408,7 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     }
     m->scale += (w.scale - m->scale) * (1 - expf(-dt * 10));
     m->bright = w.bright;
-    m->rate += ((turns_busy(m) ? 0 : w.rate) - m->rate) * (1 - expf(-dt * 4));
+    m->rate += ((turns_busy(m) ? 0 : w.rate) - m->rate) * (shown == ST_READY ? 1 : 1 - expf(-dt * 4)); /* (READY: at once, so a cheer's quick spin shows, as in the Bestiary) */
     m->inner_ang += m->inner_rate * dt;
     run_turns(s, now);
 }

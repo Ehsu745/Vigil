@@ -9,8 +9,10 @@
 #define CHEER_FOR 2.5
 #define SLEEP_AFTER 90.0
 #define DROP_AFTER 1800.0 /* a session silent this long is forgotten */
+#define SUB_KEEP 20.0     /* a finished subagent stays this long (unless SUB_UNTIL_SEEN) */
+int SUB_UNTIL_SEEN;
 
-const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "SLEEP", "SPEAKING", "LISTENING", "TRANSCRIBING", "STANDBY", "ERROR"};
+const char *STATE_NAME[ST_N] = {"IDLE", "THINK", "WORK", "NEEDS YOU", "DONE", "SLEEP", "SPEAKING", "LISTENING", "TRANSCRIBING", "STANDBY", "ERROR", "READY"};
 
 #define C(r, g, b) {(r) / 255.0f, (g) / 255.0f, (b) / 255.0f}
 #define PURE C(255, 255, 255)
@@ -43,6 +45,7 @@ const Look LOOKS[ST_N] = {
     [ST_TRANSCRIBE] = {0.20f, 0.90f, 1.60f, 0.25f, 0.90f, 2.60f, 5.0f, 0, PURE, VIOLET, VIOLET, VIOLET, 0, 0},
     [ST_STANDBY]    = {0.03f, 0.20f, 0.05f, 0.40f, 0.22f, 0.00f, 4.0f, 0, PURE, INDIGO, PURE, INDIGO, 0, 0},
     [ST_ERROR]      = {0.05f, 0.95f, 0.80f, 0.50f, 0.75f, 0.00f, 5.0f, 1, NEARWHITE, RED, PINK, RED, 0, 0}, /* a voice reply could not be sent */
+    [ST_READY]      = {0.16f, 0.72f, 0.15f, 0.08f, 0.78f, 0.00f, 4.5f, 0, PURE, BLUE, PURE, BLUE, 0, 0}, /* IDLE's look; it reddens as it winds up (Motion.rage) */
 };
 
 /* pointed at: it brightens, slows down and turns a little toward the cursor, as if looking at you */
@@ -158,10 +161,42 @@ void room_move(Room *r, int from, int to) {
     r->s[to] = tmp;
 }
 
-void room_apply(Room *r, const Event *e) {
-    Session *s = find(r, e->sid);
+/* a subagent's events: its own core, which the session's own state never sees (the session is busy on the Agent call
+ * meanwhile, or has already stopped while a background one works on) */
+static void sub_apply(Room *r, const Event *e) {
+    char sid[72]; /* its session's id, a dash, its agent id, cut at 64 (as the hook makes it, for the msg file) */
+    size_t n = 0;
+    for (const char *c = e->sid; *c && n < 64; c++) sid[n++] = *c;
+    if (n < 64) sid[n++] = '-';
+    for (const char *c = e->aid; *c && n < 64; c++) sid[n++] = *c;
+    sid[n] = 0;
     const char *ev = e->ev;
-    if (!strcmp(ev, "SessionEnd")) { if (s) drop(r, s); return; }
+    Session *s = find(r, sid);
+    if (!s) {
+        if (!strcmp(ev, "SubagentStop") || !strcmp(ev, "Notification") || r->n >= MAX_SESS) return; /* (only what starts it, or its steps) */
+        s = &r->s[r->n++];
+        session_init(s, sid, e->t, NULL);
+        s->sub = 1;
+        snprintf(s->parent, sizeof s->parent, "%s", e->sid);
+        set_state(s, ST_THINK, e->t);
+    }
+    s->last = e->t;
+    snprintf(s->name, sizeof s->name, "%s", e->atype[0] ? e->atype : "agent");
+    if (!strcmp(ev, "PreToolUse")) { snprintf(s->tool, sizeof s->tool, "%s", e->tool); set_state(s, ST_WORK, e->t); s->hold_work_until = e->t + HOLD_WORK; }
+    else if (!strcmp(ev, "PostToolUse")) { set_state(s, ST_THINK, e->t); if (e->t + HOLD_WORK > s->hold_work_until) s->hold_work_until = e->t + HOLD_WORK; }
+    else if (!strcmp(ev, "SubagentStop")) { set_state(s, ST_CHEER, e->t); s->burst_at = e->t; s->sub_done = e->t; if (e->msg) s->unread = 1; }
+}
+
+void room_apply(Room *r, const Event *e) {
+    const char *ev = e->ev;
+    if (e->aid[0] && strcmp(ev, "Notification")) { sub_apply(r, e); return; } /* (a permission prompt in a subagent asks you all the same: the session's) */
+    Session *s = find(r, e->sid);
+    if (!strcmp(ev, "SessionEnd")) {
+        if (s) drop(r, s);
+        for (int i = 0; i < r->n;) { if (r->s[i].sub && !strcmp(r->s[i].parent, e->sid)) drop(r, &r->s[i]); else i++; } /* and its subagents */
+        return;
+    }
+    if (!strncmp(ev, "Subagent", 8)) return; /* (from an older hook: no agent id) */
     /* Claude Code also notifies when a prompt has sat idle; that is not a request for approval */
     if (!strcmp(ev, "Notification") && !strcmp(e->ntype, "idle_prompt")) return;
     if (!s) {
@@ -327,13 +362,17 @@ static void carried(Session *s, double now, float dt) {
 
 void room_tick(Room *r, const Shape *sh, double now, float dt) {
     for (int i = 0; i < r->n;) {
-        if (now - r->s[i].last > DROP_AFTER) drop(r, &r->s[i]);
+        Session *s = &r->s[i];
+        int gone = now - s->last > DROP_AFTER;
+        if (s->sub && s->sub_done > 0) /* a finished subagent: once its reply has been seen and the pointer has left it */
+            gone = gone || (SUB_UNTIL_SEEN ? s->sub_seen && s->hover_to <= 0 && s->hover < .05f : now - s->sub_done > SUB_KEEP);
+        if (gone) drop(r, s);
         else i++;
     }
     float k = 1.0f - expf(-dt * 4.0f);
     for (int i = 0; i < r->n; i++) {
         Session *s = &r->s[i];
-        const Look *L = &LOOKS[session_shown(s, now)];
+        const Look *L = &LOOKS[s->mo.closing ? s->mo.routine : session_shown(s, now)]; /* (the old state's look while its routine winds down) */
         Look *c = &s->cur;
         ease(&c->rot, L->rot, k); ease(&c->core, L->core, k); ease(&c->hz, L->hz, k); ease(&c->depth, L->depth, k);
         ease(&c->edge, L->edge, k); ease(&c->flow, L->flow, k); ease(&c->hr, L->hr, k); ease(&c->glitch, L->glitch, k);
@@ -343,14 +382,21 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
         float kh = 1.0f - expf(-dt * HOVER.ease);
         ease(&s->hover, s->hover_to, kh);
         whims(s, session_shown(s, now), now, dt);
-        ease(&s->look_x, s->look_x_to * s->hover_to + s->w_lx, kh);
-        ease(&s->look_y, s->look_y_to * s->hover_to + s->w_ly, kh);
         carried(s, now, dt);
         motion_tick(s, sh, session_shown(s, now), now, dt);
+        /* the gaze, after the routine: READY's gazes at the pointer as it winds up (w_lx, w_ly) */
+        ease(&s->look_x, s->look_x_to * s->hover_to + s->w_lx, kh);
+        ease(&s->look_y, s->look_y_to * s->hover_to + s->w_ly, kh);
         float spin = c->rot * s->mo.rate * (1 - HOVER.slow * s->hover), fade = expf(-dt * TOUCH.coast);
+        if (s->sdir_tx != 0 || s->sdir_ty != 0) { /* scrolled: its own spin turns, eased, to the way it was sent */
+            if (s->sdir_x == 0 && s->sdir_y == 0) { s->sdir_x = 0.37f; s->sdir_y = 1; }
+            float kd = 1.0f - expf(-dt * 3.0f);
+            s->sdir_x += (s->sdir_tx - s->sdir_x) * kd; s->sdir_y += (s->sdir_ty - s->sdir_y) * kd;
+        }
+        float dx = s->sdir_x != 0 || s->sdir_y != 0 ? s->sdir_x : 0.37f, dy = s->sdir_x != 0 || s->sdir_y != 0 ? s->sdir_y : 1;
         if (!s->held) { /* while dragged the panel turns it; after that a fling fades back into its own spin */
-            s->ay += (spin + s->spin_y) * dt;
-            s->ax += (spin * 0.37f + s->spin_x) * dt;
+            s->ay += (spin * dy + s->spin_y) * dt;
+            s->ax += (spin * dx + s->spin_x) * dt;
             s->spin_x *= fade;
             s->spin_y *= fade;
         }
@@ -372,7 +418,7 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
 }
 
 const char *STATE_TEXT[ST_N] = {"Idle", "Thinking", "Working", "Needs approval", "Done", "Sleeping",
-                               "Speaking", "Listening", "Transcribing", "Standby", "Error"};
+                               "Speaking", "Listening", "Transcribing", "Standby", "Error", "Ready"};
 
 /* The mouse is doing something to it (pointed at, scrolled, held, carried, shaken): it answers at once. */
 static int mouse_busy(const Session *s, double now) {
@@ -387,7 +433,7 @@ static int mouse_busy(const Session *s, double now) {
  * A state change gets the full rate for a moment so the colours ease smoothly. */
 double session_rate(const Session *s, double now, int fps) {
     static const double RATE[ST_N] = {[ST_IDLE] = 10, [ST_THINK] = 15, [ST_WORK] = 20, [ST_WAIT] = 20, [ST_CHEER] = 20, [ST_SLEEP] = 4,
-                                      [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20};
+                                      [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20, [ST_READY] = 20};
     int busy = mouse_busy(s, now) || s->whim || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
     if (s->mo.hole > 0.01f && r < 10) r = 10; /* the black hole's dust keeps turning */

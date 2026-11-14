@@ -14,9 +14,34 @@ typedef struct { int x0, y0, x1, y1; } Clip; /* half-open */
 
 void canvas_resize(Canvas *c, int w, int h) {
     if (w == c->w && h == c->h && c->p) return;
-    free(c->p);
+    free(c->p); free(c->dk);
     c->w = w; c->h = h;
-    c->p = malloc(sizeof(float) * 3 * (size_t)w * (size_t)h);
+    c->p = calloc(3 * (size_t)w * (size_t)h, sizeof(float));
+    c->dk = calloc((size_t)w * (size_t)h, sizeof(float));
+    c->bx0 = c->by0 = 0; c->bx1 = w; c->by1 = h; /* all new: whoever shows it takes all of it once */
+}
+static void canvas_clear(Canvas *c) {
+    memset(c->p, 0, sizeof(float) * 3 * (size_t)c->w * (size_t)c->h);
+    if (c->dk) memset(c->dk, 0, sizeof(float) * (size_t)c->w * (size_t)c->h);
+    c->bx0 = c->by0 = c->bx1 = c->by1 = 0;
+}
+/* only what was drawn since the last clear (the rest is still clear) */
+static void canvas_clear_box(Canvas *c) {
+    if (c->bx1 > c->bx0 && c->by1 > c->by0)
+        for (int y = c->by0; y < c->by1; y++) {
+            memset(c->p + 3 * ((size_t)y * c->w + c->bx0), 0, sizeof(float) * 3 * (size_t)(c->bx1 - c->bx0));
+            if (c->dk) memset(c->dk + (size_t)y * c->w + c->bx0, 0, sizeof(float) * (size_t)(c->bx1 - c->bx0));
+        }
+    c->bx0 = c->by0 = c->bx1 = c->by1 = 0;
+}
+/* a primitive is about to draw into x0..x1, y0..y1 (already clipped): the canvas's drawn box grows to take it in */
+static inline void touch(Canvas *c, int x0, int y0, int x1, int y1) {
+    if (x1 <= x0 || y1 <= y0) return;
+    if (c->bx1 <= c->bx0 || c->by1 <= c->by0) { c->bx0 = x0; c->by0 = y0; c->bx1 = x1; c->by1 = y1; return; }
+    if (x0 < c->bx0) c->bx0 = x0;
+    if (y0 < c->by0) c->by0 = y0;
+    if (x1 > c->bx1) c->bx1 = x1;
+    if (y1 > c->by1) c->by1 = y1;
 }
 
 /* the light is laid over the terminal's background colour (a screen blend), so the picture has no black box around it */
@@ -24,7 +49,8 @@ void canvas_bytes(const Canvas *c, uint8_t *rgb, Col bg) {
     size_t n = (size_t)c->w * (size_t)c->h * 3;
     float b[3] = {bg.r, bg.g, bg.b};
     for (size_t i = 0; i < n; i++) {
-        float p = c->p[i] > 1 ? 1 : c->p[i], v = 1 - (1 - b[i % 3]) * (1 - p);
+        float p = c->p[i] > 1 ? 1 : c->p[i], d = c->dk ? c->dk[i / 3] : 0, sc = i % 3 == 0 ? SHADE_COL.r : i % 3 == 1 ? SHADE_COL.g : SHADE_COL.b;
+        float v = 1 - (1 - (b[i % 3] * (1 - d) + sc * d)) * (1 - p); /* the shade lies over the background first */
         rgb[i] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255.0f + 0.5f);
     }
 }
@@ -34,13 +60,20 @@ void canvas_bytes(const Canvas *c, uint8_t *rgb, Col bg) {
  * The faint outer glow spans only a few of the 256 steps, so plain rounding draws it as rings; a 4×4 ordered
  * dither (the same offset for all three channels, so alpha stays the brightest of them) turns the steps into
  * a smooth fall-off. */
-void canvas_rgba(const Canvas *c, uint8_t *rgba) {
+void canvas_rgba(const Canvas *c, uint8_t *rgba) { canvas_rgba_box(c, rgba, 0, 0, c->w, c->h); }
+void canvas_rgba_box(const Canvas *c, uint8_t *rgba, int x0, int y0, int x1, int y1) {
     static const float BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
-    for (int y = 0; y < c->h; y++) {
-        const float *p = c->p + (size_t)y * c->w * 3;
-        uint8_t *o = rgba + (size_t)y * c->w * 4;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > c->w) x1 = c->w;
+    if (y1 > c->h) y1 = c->h;
+    for (int y = y0; y < y1; y++) {
+        const float *p = c->p + ((size_t)y * c->w + x0) * 3;
+        uint8_t *o = rgba + ((size_t)y * c->w + x0) * 4;
         const float *row = BAYER + (y & 3) * 4;
-        for (int x = 0; x < c->w; x++, p += 3, o += 4) {
+        const float *dk = c->dk ? c->dk + (size_t)y * c->w : NULL;
+        for (int x = x0; x < x1; x++, p += 3, o += 4) {
+            if (p[0] <= 0 && p[1] <= 0 && p[2] <= 0 && (!dk || dk[x] <= 0)) { o[0] = o[1] = o[2] = o[3] = 0; continue; } /* nothing here (most of READY's layer): no dither, no shade */
             float d = (row[x & 3] + 0.5f) / 16.0f, v[3];
             for (int k = 0; k < 3; k++) {
                 float q = p[k] * 255.0f + d;
@@ -49,6 +82,12 @@ void canvas_rgba(const Canvas *c, uint8_t *rgba) {
             uint8_t r = (uint8_t)v[0], g = (uint8_t)v[1], b = (uint8_t)v[2];
             o[0] = r; o[1] = g; o[2] = b;
             o[3] = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            if (c->dk && c->dk[(size_t)y * c->w + x] > 0) { /* shade: a dark layer (SHADE_COL) under the light, so the light lies on it over a light desktop */
+                float dk = c->dk[(size_t)y * c->w + x], add = (255 - o[3]) * (dk > 1 ? 1 : dk), a = o[3] + add;
+                float sc[3] = {SHADE_COL.r, SHADE_COL.g, SHADE_COL.b};
+                for (int k = 0; k < 3; k++) { float v = o[k] + sc[k] * add; o[k] = (uint8_t)(v > 255 ? 255 : v); }
+                o[3] = (uint8_t)(a > 255 ? 255 : a);
+            }
         }
     }
 }
@@ -62,7 +101,21 @@ static inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 static inline Col mix(Col a, Col b, float t) { return (Col){a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t}; }
 static const Col WHITE = {1, 1, 1};
 
-/* a thin line with a halo: `line` at full strength within half a pixel, then `halo` falling off to `pad` */
+/* the halo's fall-off, (0.20 f^8 + 0.05 f^2) with f = 1 - d / pad, by u = d^2 / pad^2 (no square root per pixel) */
+#define GLOW_N 1024
+static float GLOW_LUT[GLOW_N + 2];
+static void glow_lut(void) {
+    if (GLOW_LUT[0] > 0) return;
+    for (int i = 0; i <= GLOW_N + 1; i++) {
+        float u = (float)i / GLOW_N, f = u < 1 ? 1.0f - sqrtf(u) : 0, f2 = f * f, f8 = f2 * f2 * f2 * f2;
+        GLOW_LUT[i] = 0.20f * f8 + 0.05f * f2;
+    }
+}
+
+/* a thin line with a halo: `line` at full strength within half a pixel, then `halo` falling off to `pad`. Each row
+ * walks only its stretch of the capsule round the line (not the whole bounding box: READY's bold lines are mostly
+ * halo, and that box was most of a frame's time). Alongside the line the distance needs no root; round its ends the
+ * halo comes from GLOW_LUT, worked out exactly only near the line, where the table's steps would show */
 static void glow_line(Canvas *c, Clip cl, float x0, float y0, float x1, float y1, Col line, float a_line, Col halo, float a_halo, float k) {
     float hw = k > 1 ? 0.5f * k : 0.5f, pad = 11.0f * (k > 0.4f ? k : 0.4f);
     int bx0 = (int)floorf(fminf(x0, x1) - pad), bx1 = (int)ceilf(fmaxf(x0, x1) + pad) + 1;
@@ -71,33 +124,101 @@ static void glow_line(Canvas *c, Clip cl, float x0, float y0, float x1, float y1
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
-    float dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
-    if (len2 < 1e-6f) len2 = 1e-6f;
-    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
-        float px = x + 0.5f - x0, py = y + 0.5f - y0;
-        float t = clamp01((px * dx + py * dy) / len2);
-        float ex = px - dx * t, ey = py - dy * t, d2 = ex * ex + ey * ey;
-        if (d2 >= pad * pad) continue;
-        float d = sqrtf(d2), f = 1.0f - d / pad, f2 = f * f, f8 = f2 * f2 * f2 * f2;
-        float core = clamp01(hw + 0.5f - d);
-        float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
-        float h = (0.20f * f8 + 0.05f * f2) * a_halo, l = core * a_line;
-        p[0] += line.r * l + halo.r * h; p[1] += line.g * l + halo.g * h; p[2] += line.b * l + halo.b * h;
+    touch(c, bx0, by0, bx1, by1);
+    glow_lut();
+    float dx = x1 - x0, dy = y1 - y0, rl2 = dx * dx + dy * dy, len2 = rl2 < 1e-6f ? 1e-6f : rl2, len = sqrtf(rl2);
+    int band = rl2 > 1e-6f; /* (a line of no length is only its round ends) */
+    float pad2 = pad * pad, ipad2 = GLOW_N / pad2, ipad = 1 / pad, ilen2 = 1 / len2, ilen = band ? 1 / len : 0, cr = hw + 0.5f, near2 = fmaxf(cr * cr, pad2 / 64);
+    for (int y = by0; y < by1; y++) {
+        float py = y + 0.5f - y0, lo = 1e30f, hi = -1e30f; /* the row's stretch of the capsule, in px (x + 0.5 - x0) */
+        if (fabsf(py) < pad) { float r = sqrtf(pad2 - py * py); lo = fminf(lo, -r); hi = fmaxf(hi, r); }
+        if (fabsf(py - dy) < pad) { float r = sqrtf(pad2 - (py - dy) * (py - dy)); lo = fminf(lo, dx - r); hi = fmaxf(hi, dx + r); }
+        if (band) { /* the band: 0 <= px dx + py dy <= len^2 and |px dy - py dx| < pad len */
+            float a = -1e30f, b = 1e30f;
+            if (fabsf(dx) > 1e-6f) { float u0 = -py * dy / dx, u1 = (rl2 - py * dy) / dx; a = fmaxf(a, fminf(u0, u1)); b = fminf(b, fmaxf(u0, u1)); }
+            else if (py * dy < 0 || py * dy > rl2) b = -1e30f;
+            if (fabsf(dy) > 1e-6f) { float u0 = (py * dx - pad * len) / dy, u1 = (py * dx + pad * len) / dy; a = fmaxf(a, fminf(u0, u1)); b = fminf(b, fmaxf(u0, u1)); }
+            else if (fabsf(py * dx) >= pad * len) b = -1e30f;
+            if (a < b) { lo = fminf(lo, a); hi = fmaxf(hi, b); }
+        }
+        if (lo > hi) continue;
+        int xa = (int)floorf(lo + x0 - 0.5f), xb = (int)ceilf(hi + x0 - 0.5f) + 1; /* (a pixel to spare each side: the test below decides) */
+        if (xa < bx0) xa = bx0;
+        if (xb > bx1) xb = bx1;
+        float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)xa);
+        for (int x = xa; x < xb; x++, p += 3) {
+            float px = x + 0.5f - x0, h, l = 0;
+            float t = (px * dx + py * dy) * ilen2;
+            if (band && t > 0 && t < 1) { /* alongside the line: the distance is plain (no root), and so is the fall-off */
+                float d = fabsf(px * dy - py * dx) * ilen;
+                if (d >= pad) continue;
+                float f = 1.0f - d * ipad, f2 = f * f, f4 = f2 * f2;
+                h = 0.20f * f4 * f4 + 0.05f * f2;
+                if (d < cr) l = clamp01(cr - d) * a_line;
+            } else { /* round an end */
+                float ex = t <= 0 ? px : px - dx, ey = t <= 0 ? py : py - dy, d2 = ex * ex + ey * ey;
+                if (d2 >= pad2) continue;
+                if (d2 < near2) { /* near the line: exact */
+                    float d = sqrtf(d2), f = 1.0f - d / pad, f2 = f * f, f8 = f2 * f2 * f2 * f2;
+                    h = 0.20f * f8 + 0.05f * f2;
+                    l = clamp01(cr - d) * a_line;
+                } else {
+                    float u = d2 * ipad2;
+                    int i = (int)u;
+                    h = GLOW_LUT[i] + (GLOW_LUT[i + 1] - GLOW_LUT[i]) * (u - i);
+                }
+            }
+            h *= a_halo;
+            p[0] += line.r * l + halo.r * h; p[1] += line.g * l + halo.g * h; p[2] += line.b * l + halo.b * h;
+        }
     }
 }
 
-/* a small round light: `in` at the centre, `out` at `mid` of the radius, nothing at the edge */
+/* a small round light: `in` at the centre, `out` at `mid` of the radius, nothing at the edge. Each row walks only its
+ * chord of the circle; a big one (a hit's flash: hundreds of pixels across) reads its light from a table by (r / rad)²
+ * built for it, so no root per pixel, worked out exactly only near the centre where the table's steps would show */
+#define BLOB_N 512
 static void blob(Canvas *c, Clip cl, float cx, float cy, float rad, Col in, float a_in, Col out, float a_out, float mid) {
+    if (!(rad > 0)) return;
     int bx0 = (int)floorf(cx - rad), bx1 = (int)ceilf(cx + rad) + 1, by0 = (int)floorf(cy - rad), by1 = (int)ceilf(cy + rad) + 1;
     if (bx0 < cl.x0) bx0 = cl.x0;
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
-    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
-        float dx = x + 0.5f - cx, dy = y + 0.5f - cy, u = sqrtf(dx * dx + dy * dy) / rad;
-        if (u >= 1) continue;
-        if (u < mid) { float t = u / mid; add(c, x, y, mix(in, out, t), a_in + (a_out - a_in) * t); }
-        else add(c, x, y, out, a_out * (1 - (u - mid) / (1 - mid)));
+    touch(c, bx0, by0, bx1, by1);
+    if (bx0 >= bx1 || by0 >= by1) return;
+    float ir2 = 1 / (rad * rad), rad2 = rad * rad, tab[BLOB_N + 2][3];
+    int big = rad > 24;
+    if (big) /* the light (colour × strength) at (r / rad)² = i / BLOB_N */
+        for (int i = 0; i <= BLOB_N + 1; i++) {
+            float u = i < BLOB_N ? sqrtf((float)i / BLOB_N) : 1;
+            Col col; float a;
+            if (u < mid) { float t = u / mid; col = mix(in, out, t); a = a_in + (a_out - a_in) * t; }
+            else { col = out; a = a_out * (1 - (u - mid) / (1 - mid)); }
+            tab[i][0] = col.r * a; tab[i][1] = col.g * a; tab[i][2] = col.b * a;
+        }
+    for (int y = by0; y < by1; y++) {
+        float dy = y + 0.5f - cy, h2 = rad2 - dy * dy;
+        if (h2 <= 0) continue;
+        float hw = sqrtf(h2);
+        int xa = (int)floorf(cx - hw - 0.5f), xb = (int)ceilf(cx + hw - 0.5f) + 1; /* (a pixel to spare: the test below decides) */
+        if (xa < bx0) xa = bx0;
+        if (xb > bx1) xb = bx1;
+        for (int x = xa; x < xb; x++) {
+            float dx = x + 0.5f - cx, u2 = (dx * dx + dy * dy) * ir2;
+            if (u2 >= 1) continue;
+            if (big && u2 >= 1.0f / 256) {
+                float q = u2 * BLOB_N, w;
+                int i = (int)q;
+                w = q - i;
+                float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
+                p[0] += tab[i][0] + (tab[i + 1][0] - tab[i][0]) * w; p[1] += tab[i][1] + (tab[i + 1][1] - tab[i][1]) * w; p[2] += tab[i][2] + (tab[i + 1][2] - tab[i][2]) * w;
+                continue;
+            }
+            float u = sqrtf(u2);
+            if (u < mid) { float t = u / mid; add(c, x, y, mix(in, out, t), a_in + (a_out - a_in) * t); }
+            else add(c, x, y, out, a_out * (1 - (u - mid) / (1 - mid)));
+        }
     }
 }
 
@@ -107,11 +228,13 @@ static void disc(Canvas *c, Clip cl, float cx, float cy, float rad, Col col, flo
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
+    touch(c, bx0, by0, bx1, by1);
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
         float dx = x + 0.5f - cx, dy = y + 0.5f - cy, cov = clamp01(rad + 0.5f - sqrtf(dx * dx + dy * dy));
         if (cov > 0) add(c, x, y, col, a * cov);
     }
 }
+
 
 /* faulty-lamp flicker: mostly on with a little jitter, broken up by dropouts and bursts of stutter */
 static double hash1(double n) { double x = sin(n * 127.1) * 43758.5453; return x - floor(x); }
@@ -164,6 +287,7 @@ static void draw_core(Canvas *c, Clip cl, float ox, float oy, float rc, const Lo
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
+    touch(c, bx0, by0, bx1, by1);
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
         float ax = x + 0.5f - au->ox, ay = y + 0.5f - au->oy, a2 = ax * ax + ay * ay;
         if (a2 < au->r2max && a2 > au->in2) add(c, x, y, au->col, au->lut[(int)(a2 / au->r2max * (AURA_N - 1))]);
@@ -189,6 +313,7 @@ static void ring_col(Canvas *c, Clip cl, float ox, float oy, float rad, float wi
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
+    touch(c, bx0, by0, bx1, by1);
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
         float dx = x + 0.5f - ox, dy = y + 0.5f - oy, cov = clamp01(width * 0.5f + 0.5f - fabsf(sqrtf(dx * dx + dy * dy) - rad));
         if (cov > 0) add(c, x, y, col, a * cov);
@@ -200,6 +325,7 @@ static void ring(Canvas *c, Clip cl, float ox, float oy, float rad, float width,
     if (by0 < cl.y0) by0 = cl.y0;
     if (bx1 > cl.x1) bx1 = cl.x1;
     if (by1 > cl.y1) by1 = cl.y1;
+    touch(c, bx0, by0, bx1, by1);
     for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
         float dx = x + 0.5f - ox, dy = y + 0.5f - oy, cov = clamp01(width * 0.5f + 0.5f - fabsf(sqrtf(dx * dx + dy * dy) - rad));
         if (cov > 0) add(c, x, y, WHITE, a * cov);
@@ -238,18 +364,18 @@ static void text(Canvas *c, Clip cl, float cx, int y, const char *s, int fs, Col
             if (g[gy * 3 + gx] != '1') continue;
             for (int yy = 0; yy < fs; yy++) for (int xx = 0; xx < fs; xx++) {
                 int X = x + gx * fs + xx, Y = y + gy * fs + yy;
-                if (X >= cl.x0 && X < cl.x1 && Y >= cl.y0 && Y < cl.y1) add(c, X, Y, col, a);
+                if (X >= cl.x0 && X < cl.x1 && Y >= cl.y0 && Y < cl.y1) { touch(c, X, Y, X + 1, Y + 1); add(c, X, Y, col, a); }
             }
         }
     }
 }
 
 /* ---- the shell, as the motion system has moved it --------------------------------------------- */
-typedef struct { float M[9], T[9], ox, oy, unit, tall, st, ux, uy; } Proj;
+typedef struct { float M[9], T[9], ox, oy, unit, tall, st, ux, uy, cam; } Proj;
 static void project(const Proj *P, const float *p, float *out) {
     float w[3];
     m3_app(w, P->M, p);
-    float pp = CAM / (CAM - w[2]);
+    float pp = P->cam / (P->cam - w[2]);
     float dx = w[0] * P->unit * pp * (1 - 0.5f * P->tall), dy = w[1] * P->unit * pp * (1 + P->tall);
     float par = (dx * P->ux + dy * P->uy) * (1 + P->st), per = (-dx * P->uy + dy * P->ux) * (1 - P->st * 0.5f);
     out[0] = P->ox + par * P->ux - per * P->uy; out[1] = P->oy + par * P->uy + per * P->ux; out[2] = w[2];
@@ -260,7 +386,23 @@ static void project_view(const Proj *P, const float *p, float *out) {
     memcpy(Q.M, P->T, sizeof Q.M);
     project(&Q, p, out);
 }
-static float alpha_of(const Motion *mo, int t) { return mo->ta_on ? mo->talpha[t] : 1; }
+int RENDER_PART; /* see vigil.h */
+static const float I3_R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+/* (per thread: bands of one picture may be drawn at the same time, see render_band) */
+#if defined(__wasm__)
+#define VIGIL_TLS
+#else
+#define VIGIL_TLS _Thread_local
+#endif
+static VIGIL_TLS Proj g_stage; /* the stage's own frame, for READY's loose pieces and sparks: the core window's centre, the core's
+                      * plain size, none of its offset, size, stretch or tilt (the Bestiary's projFree) */
+Col SHADE_COL;   /* see vigil.h */
+static VIGIL_TLS int g_part;  /* RENDER_PART for the session being drawn: 0 when it has no pieces out */
+static float alpha_of(const Motion *mo, int t) {
+    float a = mo->ta_on ? mo->talpha[t] : 1;
+    if (g_part && (g_part == 2) != (mo->loose[t] != 0)) return 0; /* the core's window leaves its loose pieces to the layer, and the layer draws only them */
+    return a;
+}
 static int carried_off(const Motion *mo, int t) { return mo->tt_on && (mo->tt[t][0] != 0 || mo->tt[t][1] != 0 || mo->tt[t][2] != 0); }
 static int moved(const Motion *mo, int t) {
     return fabsf(mo->off[t]) > 0.002f || mo->ang[t] != 0 || mo->tmi[t] || carried_off(mo, t) || alpha_of(mo, t) != 1 || (mo->sharp_on && mo->sharp_k[t] > 0.001f);
@@ -283,6 +425,26 @@ static const float *layer_rot(RotCache *rc, const Motion *mo, float a) {
  * its layer or by its own matrix, then carried off whole */
 static void at_tri(const Proj *P, const Motion *mo, const Shape *sh, float base[][3], int v, int t, RotCache *rc, float *out) {
     float p[3], bv[3] = {base[v][0], base[v][1], base[v][2]};
+    if (mo->loose[t] && mo->tmi[t]) { /* READY's piece: the shell's shape (a spike's cone stays a cone) or, once loose, its own */
+        const int *tv = sh->t[t];        /* plain one; drawn out into a dart, turned into view space about its centre, at its place on the stage */
+        const float (*src)[3] = mo->loose[t] == 2 ? (const float (*)[3])sh->v : (const float (*)[3])base;
+        float c0[3], d[3];
+        for (int i = 0; i < 3; i++) { c0[i] = (sh->v[tv[0]][i] + sh->v[tv[1]][i] + sh->v[tv[2]][i]) / 3; d[i] = src[v][i] - c0[i]; }
+        if (mo->sharp_on && mo->sharp_k[t] > 0.001f && mo->sharp_v[t] >= 0) {
+            float k = mo->sharp_k[t], ax[3];
+            for (int i = 0; i < 3; i++) ax[i] = sh->v[mo->sharp_v[t]][i] - c0[i];
+            float l = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+            if (l > 1e-6f) {
+                for (int i = 0; i < 3; i++) ax[i] /= l;
+                float al = d[0] * ax[0] + d[1] * ax[1] + d[2] * ax[2], fa = v == mo->sharp_v[t] ? 1 + 0.75f * k : 1, fp = 1 - 0.3f * k;
+                for (int i = 0; i < 3; i++) d[i] = ax[i] * al * fa + (d[i] - ax[i] * al) * fp;
+            }
+        }
+        m3_app(p, mo->tmx[mo->tmi[t] - 1], d);
+        for (int i = 0; i < 3; i++) p[i] += mo->tt[t][i];
+        project(&g_stage, p, out);
+        return;
+    }
     if (mo->sharp_on && mo->sharp_k[t] > 0.001f && mo->sharp_v[t] >= 0) {
         float k = mo->sharp_k[t], c0[3], ax[3], d[3];
         const int *tv = sh->t[t];
@@ -310,13 +472,14 @@ static void draw_sparks(Canvas *c, Clip cl, const Proj *P, const Motion *mo, con
         const Spark *q = &mo->spark[i];
         if (q->life <= 0) continue;
         float a = clamp01(q->life / q->max), age = 1 - a, h[3];
-        project_view(P, q->p, h);
+        const Proj *Pq = q->stage ? &g_stage : P;
+        if (q->stage) project(Pq, q->p, h); else project_view(P, q->p, h);
         Col c0 = q->own ? L->halo : q->col, col = c0;
         if (q->hot) col = age < 0.18f ? mix((Col){1, 0.98f, 0.925f}, c0, age / 0.18f) : mix(c0, (Col){0.43f, 0.11f, 0.03f}, clamp01((age - 0.18f) / 0.82f) * 0.75f);
         if (q->kind == SK_STREAK) { /* a short motion-blurred line with a white-hot head */
             float sp = sqrtf(q->v[0] * q->v[0] + q->v[1] * q->v[1] + q->v[2] * q->v[2]) / CIRCUM, tl = fminf(0.09f, 0.025f + sp * 0.022f), tp[3], mp[3];
             float tail[3] = {q->p[0] - q->v[0] * tl, q->p[1] - q->v[1] * tl, q->p[2] - q->v[2] * tl};
-            project_view(P, tail, tp);
+            if (q->stage) project(Pq, tail, tp); else project_view(P, tail, tp);
             mp[0] = (tp[0] + h[0]) / 2; mp[1] = (tp[1] + h[1]) / 2;
             float kk = ks * q->size * 0.35f;
             glow_line(c, cl, tp[0], tp[1], mp[0], mp[1], col, 0.3f * a, col, 0.25f * a, kk);
@@ -377,6 +540,7 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
     float ex = rs * eout + 2, ey = rs * 2.1f + 2;
     int bx0 = (int)fmaxf(cl.x0, floorf(ox - ex)), bx1 = (int)fminf(cl.x1, ceilf(ox + ex) + 1);
     int by0 = (int)fmaxf(cl.y0, floorf(oy - ey)), by1 = (int)fminf(cl.y1, ceilf(oy + ey) + 1);
+    touch(c, bx0, by0, bx1, by1);
     /* three hot spots riding the inner disc, each at its own orbital speed */
     float spot_e[3] = {1.6f, 2.05f, 2.6f}, spot_a[3];
     for (int k = 0; k < 3; k++) spot_a[k] = fl * 0.9f / powf(spot_e[k], 1.5f) + k * 2.1f;
@@ -459,6 +623,63 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
         disc(c, cl, ox + x, oy + y, st[2] * 0.8f * ks, (Col){1, 0.93f, 0.85f}, hb * (0.4f + 0.1f * sinf(tf * 0.4f + st[3])) * 0.55f);
     }
 }
+/* Settings > Look > Backdrop, over a light app: a thin soft dark band along each line and round each node that is drawn
+ * (Canvas.dk), like the outline that keeps subtitles readable on any picture. It follows whatever shape the lines are
+ * in (a piece drawn into a needle, a cone, the broken shell), which a round halo never did. r: its reach in pixels,
+ * solid for its inner part, then a soft edge; strongest on the near side, none on the far side (its lines would lay a
+ * dark mesh across the shell) */
+float BACKDROP_W = 1, BACKDROP_A = 1;
+int BACKDROP_CORE;
+static void shade_seg(Canvas *c, Clip cl, const float *a, const float *b, float r, float amt) {
+    float zf = clamp01(((a[2] + b[2]) * 0.5f / CIRCUM + 0.35f) / 0.45f); /* near: 1; past the middle toward the back: 0 */
+    amt *= zf * zf * (3 - 2 * zf);
+    if (!c->dk || amt <= 0.003f || r < 0.5f) return;
+    int x0 = (int)floorf(fminf(a[0], b[0]) - r), x1 = (int)ceilf(fmaxf(a[0], b[0]) + r) + 1, y0 = (int)floorf(fminf(a[1], b[1]) - r), y1 = (int)ceilf(fmaxf(a[1], b[1]) + r) + 1;
+    if (x0 < cl.x0) x0 = cl.x0;
+    if (y0 < cl.y0) y0 = cl.y0;
+    if (x1 > cl.x1) x1 = cl.x1;
+    if (y1 > cl.y1) y1 = cl.y1;
+    if (x1 <= x0 || y1 <= y0) return;
+    touch(c, x0, y0, x1, y1);
+    float dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy, ir = 1 / r;
+    for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+        float px = x + 0.5f - a[0], py = y + 0.5f - a[1], u = l2 > 1e-6f ? clamp01((px * dx + py * dy) / l2) : 0;
+        float ex = px - dx * u, ey = py - dy * u, d = sqrtf(ex * ex + ey * ey) * ir;
+        if (d >= 1) continue;
+        float e = clamp01((1 - d) / 0.8f), sd = e * e * (3 - 2 * e) * amt, *k = c->dk + (size_t)y * c->w + x;
+        if (sd > *k) *k = sd;
+    }
+}
+
+/* READY's marks at the pointer (Bestiary): the lock-on closing round it while pieces turn and fly, and the burst of each
+ * blow, impact lines thrown out, a shock ring, a white flash. (cx, cy): the stage's centre; U: pixels per stage unit */
+static void pointer_fx(Canvas *c, Clip cl, const Session *s, float cx, float cy, float U, double now) {
+    const Motion *mo = &s->mo;
+    float k = U / 120.0f;
+    if (mo->lock_on > 0.01f && s->aim_on) {
+        float lmin = fmaxf(18 * k, s->aim_hit * U + 4 * k); /* closing down round the whole mouse (aim_x / aim_y: its middle; aim_hit reaches past it) */
+        float px = cx + s->aim_x * U, py = cy + s->aim_y * U, lr = lmin + 22 * k * powf(1 - mo->lock_on, 3), la = (float)fmod(now * 1.6, 6.2831853), al = 0.75f * mo->lock_on;
+        Col red = {1, 0.47f, 0.43f};
+        for (int i = 0; i < 4; i++) {
+            float g0 = la + i * 1.5707963f;
+            for (int j = 0; j < 4; j++) { float a0 = g0 - 0.32f + 0.16f * j, a1 = a0 + 0.16f; glow_line(c, cl, px + cosf(a0) * lr, py + sinf(a0) * lr, px + cosf(a1) * lr, py + sinf(a1) * lr, red, al, red, 0.4f * al, 1.6f * k); }
+            glow_line(c, cl, px + cosf(g0) * lr, py + sinf(g0) * lr, px + cosf(g0) * (lr - 7 * k), py + sinf(g0) * (lr - 7 * k), red, al, red, 0.4f * al, 1.6f * k);
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        float u = (float)(now - mo->imp[i].at) / 0.3f;
+        if (mo->imp[i].at <= 0 || u < 0 || u >= 1) continue;
+        float a = 1 - u, sc = mo->imp[i].size / 40, px = cx + mo->imp[i].x * U, py = cy + mo->imp[i].y * U, o3 = 1 - (1 - u) * (1 - u) * (1 - u), d = atan2f(mo->imp[i].dy, mo->imp[i].dx);
+        Col col = mo->imp[i].col;
+        for (int j = 0; j < 8; j++) { /* impact lines thrown out */
+            float g0 = j * 0.7853982f + d + 0.2f, r0 = (8 + 26 * o3) * k * sc, r1 = r0 + (10 + 14 * (1 - u)) * k * sc;
+            glow_line(c, cl, px + cosf(g0) * r0, py + sinf(g0) * r0, px + cosf(g0) * r1, py + sinf(g0) * r1, col, 0.9f * a, col, 0.4f * a, 1.6f * k * (1 + sc * 0.5f));
+        }
+        if (mo->imp[i].ring > 0) ring_col(c, cl, px, py, (6 + 60 * mo->imp[i].ring * o3) * k, (1 + 3 * a) * k, col, 0.7f * a * mo->imp[i].ring); /* the shock ring */
+        float fl = 1 - (float)(now - mo->imp[i].at) * 2.5f; /* the pointer flashes */
+        if (fl > 0.01f) ring_col(c, cl, px, py, (8 + 22 * (1 - fl)) * k, 2 * k, WHITE, 0.6f * fl);
+    }
+}
 static void draw_edge(Canvas *c, Clip cl, const float *a, const float *b, const Look *L, float edge, float thin, float halo, float gg, float k) {
     float depth = 0.3f + 0.7f * ((a[2] + b[2]) * 0.5f + CIRCUM) / (2 * CIRCUM); /* far edges are fainter */
     float al = depth * edge * (1 + gg);
@@ -491,7 +712,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     lit_look.edge *= 0.4f + 0.6f * mb;
     lit_look.hr *= 1 + lit_look.lh * s->level * 0.15f; /* the glow grows with the microphone level */
     float flash = 0, thick = 1;
-    if (s->unread && !s->overlay) { /* an unread reply: a slow, soft flash, as if waiting for leave to report */
+    if (s->unread && !s->overlay && session_shown(s, now) != ST_READY) { /* an unread reply: a slow, soft flash, as if waiting for leave to report (READY has its own ways) */
         flash = TOUCH.unread_amp * (0.5f - 0.5f * (float)cos(t * TOUCH.unread_hz * 6.283185));
         lit_look.edge *= 1 + flash * 0.5f;
     }
@@ -501,12 +722,27 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         lit_look.halo = mix(lit_look.halo, s->aura, s->aura_a);
         lit_look.col = mix(lit_look.col, s->aura, s->aura_a * 0.45f);
     }
+    if (s->mo.rage > 0.01f) { /* READY winding up: toward NEEDS YOU's orange */
+        const Look *W = &LOOKS[ST_WAIT];
+        float r = fminf(1, s->mo.rage);
+        lit_look.col = mix(lit_look.col, W->col, r); lit_look.halo = mix(lit_look.halo, W->halo, r); /* (all of it, core and glow too, as the Bestiary) */
+        lit_look.line = mix(lit_look.line, W->line, r); lit_look.eh = mix(lit_look.eh, W->eh, r);
+        lit_look.core += (W->core - lit_look.core) * r; lit_look.hr += (W->hr - lit_look.hr) * r;
+    }
+    g_part = s->mo.loose_on ? RENDER_PART : 0;
+    if (RENDER_PART == 2 && !g_part) return; /* the layer: nothing of this one is out */
     const Look *L = &lit_look;
     int tw = cl.x1 - cl.x0, th = cl.y1 - cl.y0;
+    int lay_y1 = cl.y1; /* (the label's place: cl may be cut to a band of rows below) */
     int fs = tw / 120 < 1 ? 1 : tw / 120, label_h = fs * 16;
     if (!label || th - label_h < 12) label_h = 0;
     float m = fminf((float)tw, (float)(th - label_h));
     float unit = m * SHELL_FRAC / CIRCUM * ws, k = m / 600.0f;
+    /* READY as the Core Bestiary draws it: there the stage zooms out to 30% for READY while line widths, node dots and
+     * sparks stay the stage's size (k = side / 520), so against the core they are 4.6 times what the other states use
+     * (sparks 3.3 times): the core and the pieces it throws read as bold dots and lines on visible smoke */
+    int ready_look = session_shown(s, now) == ST_READY;
+    if (ready_look) k *= SHELL_FRAC * 600.0f / 47.0f;
     float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit + c->sx, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit + c->sy;
 
     /* the core */
@@ -529,13 +765,16 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         float half = fminf((float)tw, (float)(th - label_h)) * 0.5f - 1, R = CIRCUM * unit * (s->mo.scale > 0 ? s->mo.scale : 1);
         aura_make(&au, ox, oy, R, fminf(R * 1.36f, half), L->eh, 0.07f * L->edge * strobe * crowd * glow);
     }
-    draw_core(c, cl, gx, gy, rc, L, inten, &au);
+    if (g_part == 2) cl = (Clip){0, 0, c->w, c->h}; /* the layer: the core's place from the clip, its pieces anywhere */
+    if (c->ry1 > c->ry0) { if (cl.y0 < c->ry0) cl.y0 = c->ry0; if (cl.y1 > c->ry1) cl.y1 = c->ry1; } /* a band of rows: every primitive keeps to cl */
+    if (g_part != 2) draw_core(c, cl, gx, gy, rc, L, inten, &au);
+    if (g_part == 2) burst = 0;
     if (burst > 0) ring(c, cl, ox, oy, rc + (1 - burst) * m * 0.6f, (1 + burst * 3) * (k > 0.5f ? k : 0.5f) * 2, burst * 0.6f);
     float wave = (float)(1 - (now - s->ring_at) / TOUCH.ring_for); /* double click: one shockwave ring, no flare */
-    if (wave > 0 && wave <= 1) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
+    if (wave > 0 && wave <= 1 && g_part != 2) ring(c, cl, ox, oy, rc + (1 - wave) * m * 0.55f, (1 + wave * 2) * (k > 0.5f ? k : 0.5f) * 2, wave * 0.55f);
     for (int i = 0; i < MAX_RING; i++) { /* the pulses a routine sends out (a click, a blow, a beacon facing you): thin, */
         const MRing *r = &s->mo.ring[i];  /* from the shell's edge outward, fading as they go, so none stays round the core like a frame */
-        if (r->a <= 0) continue;
+        if (r->a <= 0 || g_part == 2) continue;
         float u = clamp01((float)(now - r->at) / 1.1f), e = 1 - (1 - u) * (1 - u) * (1 - u), sr = CIRCUM * unit * s->mo.scale;
         float rad = sr * 1.02f + e * fmaxf(0, m * 0.5f - sr * 1.02f);
         ring_col(c, cl, ox, oy, rad, (0.6f + 0.8f * (1 - u)) * (k > 0.5f ? k : 0.5f) * 2, L->halo, (1 - u) * (1 - u) * 0.45f * r->a);
@@ -558,6 +797,11 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     P.st = lm / CARRY.lean_max * CARRY.stretch;
     P.ux = lm > 1e-4f ? s->lean_x / lm : 1; P.uy = lm > 1e-4f ? s->lean_y / lm : 0;
     P.ox = ox; P.oy = oy; P.unit = unit * (mo->scale > 0 ? mo->scale : 1); P.tall = s->w_tall;
+    P.cam = mo->cam > 0 ? mo->cam : CAM; /* (READY: the Bestiary's gentler camera, Motion.cam) */
+    g_stage = P; /* READY's loose pieces and sparks: see g_stage */
+    memcpy(g_stage.M, I3_R, sizeof g_stage.M); memcpy(g_stage.T, I3_R, sizeof g_stage.T);
+    g_stage.ox = ox - s->w_off_x * CIRCUM * unit; g_stage.oy = oy - s->w_off_y * CIRCUM * unit;
+    g_stage.unit = unit / ws; g_stage.tall = 0; g_stage.st = 0; g_stage.ux = 1; g_stage.uy = 0;
     /* each node, pushed out or in by a spike */
     float base[MAX_V][3], q[MAX_V][3];
     for (int i = 0; i < sh->nv; i++) {
@@ -573,22 +817,27 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     int any = 0;
     for (int t = 0; t < sh->nt && !any; t++) any = moved(mo, t);
     float edge = L->edge * strobe * crowd, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
-    float Rpx = CIRCUM * P.unit, ks = Rpx / 156.0f; /* the mock's pixel sizes, for a shell of this size */
-    draw_trail(c, cl, &P, mo, k);
-    draw_sparks(c, cl, &P, mo, L, ks);
+    float Rpx = CIRCUM * P.unit, ks = Rpx / (ready_look ? 47.0f : 156.0f); /* the mock's pixel sizes, for a shell of this size (READY: see above) */
+    float bd = s->backdrop > 0.01f ? 0.75f * s->backdrop * BACKDROP_A : 0, br = fmaxf(1.6f, 0.055f * Rpx) * BACKDROP_W; /* the backdrop's band along the lines (shade_seg): how dark, how far it reaches */
+    if (bd > 0 && BACKDROP_CORE && g_part != 2) { float cc[3] = {ox, oy, CIRCUM}; shade_seg(c, cl, cc, cc, 0.55f * Rpx, 0.7f * bd); } /* and behind the bright centre, a small soft disc */
+    if (g_part != 1) draw_trail(c, cl, &P, mo, k); /* (while pieces are out the layer draws it: it may reach far, as constellation's line does) */
+    if (g_part != 1) draw_sparks(c, cl, &P, mo, L, ks); /* (while pieces are out the layer draws the sparks: they fly far) */
     RotCache rc_ = {0};
+    /* READY's thrown pieces are drawn in the edge loop below with the rest, and get the backdrop's band the same way */
     for (int i = 0; i < sh->ne; i++) {
         int a = sh->e[i][0], b = sh->e[i][1], t1 = sh->et[i][0], t2 = sh->et[i][1];
         float gg = (mo->glow[a] + mo->glow[b]) * 0.5f, pa[3], pb[3];
-        if (!any || t1 < 0) { draw_edge(c, cl, q[a], q[b], L, edge, thin, glow * sh->df, gg, k); continue; }
+        if (!any || t1 < 0) { if (g_part == 2) continue; if (bd > 0) shade_seg(c, cl, q[a], q[b], br, bd); draw_edge(c, cl, q[a], q[b], L, edge, thin, glow * sh->df, gg, k); continue; }
         /* an edge between two triangles that moved apart is drawn on each of them */
         float a1 = alpha_of(mo, t1);
         if (a1 > 0.01f) {
             at_tri(&P, mo, sh, base, a, t1, &rc_, pa); at_tri(&P, mo, sh, base, b, t1, &rc_, pb);
+            if (bd > 0) shade_seg(c, cl, pa, pb, br, bd * a1);
             draw_edge(c, cl, pa, pb, L, edge * a1, thin, glow * sh->df, gg, k);
         }
         if (t2 >= 0 && !same_tri(mo, t1, t2) && alpha_of(mo, t2) > 0.01f) {
             at_tri(&P, mo, sh, base, a, t2, &rc_, pa); at_tri(&P, mo, sh, base, b, t2, &rc_, pb);
+            if (bd > 0) shade_seg(c, cl, pa, pb, br, bd * alpha_of(mo, t2));
             draw_edge(c, cl, pa, pb, L, edge * alpha_of(mo, t2), thin, glow * sh->df, gg, k);
         }
     }
@@ -596,7 +845,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         int seen[MAX_DEG], ns = 0, nt = any ? sh->nvt[i] : 0;
         for (int j = 0; j <= nt; j++) {
             float p[3], al = 1;
-            if (!nt) { if (j) break; memcpy(p, q[i], sizeof p); }
+            if (!nt) { if (j || g_part == 2) break; memcpy(p, q[i], sizeof p); }
             else {
                 if (j == nt) break;
                 int tt = sh->vt[i][j], dup = 0;
@@ -608,10 +857,13 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
                 if (al < 0.01f) continue;
             }
             float d = 0.3f + 0.7f * (p[2] + CIRCUM) / (2 * CIRCUM), gg = mo->glow[i];
+            if (bd > 0) shade_seg(c, cl, p, p, br * 1.25f, bd * al); /* (a node: a soft dot of the band) */
             if (k > 0.3f) blob(c, cl, p[0], p[1], 5 * k * (1 + gg), L->eh, (0.3f * d * edge * glow * sh->df) * (1 + 2 * gg) * al, L->eh, 0.1f * d * edge * glow * sh->df * al, 0.5f);
             disc(c, cl, p[0], p[1], (k * 1.5f > 0.6f ? k * 1.5f : 0.6f) * (1 + gg), mix(L->line, WHITE, gg), clamp01(0.95f * d * edge * (k > 0.3f ? 1 : 0.5f) + gg) * al);
         }
     }
+    if (g_part != 1) pointer_fx(c, cl, s, ox - s->w_off_x * CIRCUM * unit, oy - s->w_off_y * CIRCUM * unit, CIRCUM * unit / ws, now);
+    if (g_part == 2) return; /* the layer: only the pieces and the sparks */
     if (mo->inner > 0.01f) { /* the inner shell: a small icosahedron turning against the outer one */
         float R[9], M2[9], ax[3] = {0.28f, 0.94f, 0.19f}, pts[12][3];
         m3_rot(R, ax, mo->inner_ang);
@@ -647,7 +899,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     /* the label: folder name, then state (and tool) */
     if (label_h) {
         char line[80];
-        int st = session_shown(s, now), y = cl.y1 - label_h + fs * 2;
+        int st = session_shown(s, now), y = lay_y1 - label_h + fs * 2;
         text(c, cl, ox, y, s->name[0] ? s->name : "CLAUDE", fs, WHITE, 0.8f);
         if (st == ST_WORK && s->tool[0]) snprintf(line, sizeof line, "%s %s", STATE_NAME[st], s->tool);
         else snprintf(line, sizeof line, "%s", STATE_NAME[st]);
@@ -656,7 +908,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
 }
 
 void render_room(Canvas *c, const Room *r, const Shape *sh, double now, float glow, float core_frac) {
-    memset(c->p, 0, sizeof(float) * 3 * (size_t)c->w * (size_t)c->h);
+    canvas_clear(c);
     int n = r->n;
     if (n < 1) return;
     /* the grid whose tiles come out largest */
@@ -676,8 +928,25 @@ void render_room(Canvas *c, const Room *r, const Shape *sh, double now, float gl
     }
 }
 
+/* one session laid out in the box x0..x1, y0..y1 of the canvas (READY's layer: RENDER_PART 2 draws its pieces anywhere).
+ * It clears only the canvas's drawn box, so draw nothing else into a canvas it is given. */
+void render_part(Canvas *c, const Session *s, const Shape *sh, double now, float glow, float core_frac, int x0, int y0, int x1, int y1) {
+    render_prep(c, 0); /* (the layer is mostly empty: clearing all of it each frame cost more than drawing) */
+    draw_session(c, (Clip){x0, y0, x1, y1}, s, sh, now, glow, core_frac, 0);
+}
+
+void render_prep(Canvas *c, int whole) {
+    glow_lut(); halo_lut(); icosa(); /* (built here, before any bands share them) */
+    if (whole) canvas_clear(c); else canvas_clear_box(c);
+}
+void render_band(Canvas *band, const Session *s, const Shape *sh, double now, float glow, float core_frac, int x0, int y0, int x1, int y1) {
+    band->bx0 = band->by0 = band->bx1 = band->by1 = 0;
+    if (band->ry1 > band->ry0) draw_session(band, (Clip){x0, y0, x1, y1}, s, sh, now, glow, core_frac, 0);
+}
+void canvas_box_merge(Canvas *c, const Canvas *band) { touch(c, band->bx0, band->by0, band->bx1, band->by1); }
+
 /* one session filling the whole canvas, without the drawn label (the list layout writes real text instead) */
 void render_one(Canvas *c, const Session *s, const Shape *sh, double now, float glow, float core_frac) {
-    memset(c->p, 0, sizeof(float) * 3 * (size_t)c->w * (size_t)c->h);
+    render_prep(c, 1);
     draw_session(c, (Clip){0, 0, c->w, c->h}, s, sh, now, glow, core_frac, 0);
 }

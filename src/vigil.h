@@ -17,7 +17,7 @@
 typedef struct { float r, g, b; } Col;
 
 /* ---- events.c: follow the JSONL file the hook appends to ------------------------------------ */
-typedef struct { double t; char sid[72], ev[24], cwd[40], tool[40], ntype[32]; int msg; } Event; /* msg: a new reply is in the msg file (DODECA_RICH) */
+typedef struct { double t; char sid[72], ev[24], cwd[40], tool[40], ntype[32], aid[72], atype[40]; int msg; } Event; /* msg: a new reply is in the msg file (DODECA_RICH); aid, atype: fired in (or for) a subagent */
 typedef struct { char path[1024]; long pos; char *buf; size_t buflen; } Tail;
 void tail_init(Tail *t, const char *path);
 int tail_history(Tail *t, double since, Event *out, int max); /* events newer than `since` already in the file */
@@ -46,6 +46,7 @@ int shape_make(Shape *s, const char *name); /* "dodeca" "bucky" "geo2" "geo3"; 0
 enum {
     ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP,  /* from the events */
     ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR, /* overlays only the panel sets (Session.overlay) */
+    ST_READY,                                                 /* a reply nobody has seen: it throws pieces at the pointer (panel) */
     ST_N
 };
 extern const char *STATE_NAME[ST_N];
@@ -131,6 +132,7 @@ enum {
     RT_UNLOCK, RT_BLOOM, RT_ZIP,                         /* DONE */
     RT_DORMANT, RT_HOLE,                                 /* SLEEP */
     RT_BROADCAST, RT_RECEIVER, RT_DECODING, RT_LOCKED, RT_CRAZY, /* the panel's states */
+    RT_RESTLESS,                                         /* READY (panel) */
     RT_N
 };
 struct RCtx; /* what a routine gets each frame (motion.c) */
@@ -169,9 +171,10 @@ typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /
 typedef struct { int v; float len, up, hd, dn; double at; } Spike;         /* len < 0: pulled in toward the centre */
 typedef struct { int from, to, ntrail, trail[10]; double at, trail_at[10]; } Fish;
 typedef struct { double at; int kind; } MEvent;                             /* something a routine asked to happen later */
-/* a particle, in view space (before the pointer tilt), shell units: gravity falls down the screen */
+/* a particle, in view space (before the pointer tilt), shell units: gravity falls down the screen. stage: READY's, in
+ * the stage's own frame (shell units from the core window's centre), so the core hopping, leaning or growing never moves it */
 enum { SK_STREAK, SK_EMBER, SK_FLARE, SK_MOTE };
-typedef struct { float p[3], v[3], life, max, drag, g, size, seed; Col col; unsigned char kind, hot, own; } Spark;
+typedef struct { float p[3], v[3], life, max, drag, g, size, seed; Col col; unsigned char kind, hot, own, stage; } Spark;
 typedef struct { double at; float a; } MRing;                              /* a ring going out from the core */
 
 /* Each routine's own working state: Motion.rs holds the running routine's, cleared to zero as it starts. */
@@ -198,11 +201,27 @@ typedef struct { float r, a, s; } Dust;
 enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_RIPPLE, HA_PRECESS, HA_N }; /* the black hole's own actions */
 typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow, act_p, flow; int banged, beat_ring, moving, act; double act_at, act_next, press_seen, defend_seen; } HoleRS; /* flow: the disc's turn (faster while pointed at) */ /* act: playing now (HA_*), from act_at; act_p its random lean */ /* grow: 0..1, the void after it has swallowed the shell */
 typedef struct { double next; } DecodingRS;
+/* READY: a piece of the shell thrown at the pointer. Positions are on the stage: shell radii from the core window's
+ * centre as if the core were at its usual size, y down (the panel's aim_x / aim_y are in the same units). */
+enum { RP_MORPH = 1, RP_FLY, RP_COAST, RP_FLOAT, RP_BACK, RP_HOME, RP_BROKE }; /* (RP_BROKE: blown into the shell's shards) */
+/* fr: knocked loose, so it keeps the shell's turn from that moment (M0) and its size, whatever the core does after */
+/* flat: how far it has turned to face you at the shell's mean triangle size (after a hit, see R_FLAT in motion.c) */
+typedef struct { int ti, tip, st, i, dodged, landed, fr, whip, nmiss; float t0, pos[3], dir[3], vel[3], k, s, slim, spin, out[3], dmin, ang, w, drag, k0, s0, slim0, base[3], fpos[3], fdir[3], fk, fs, farc, flat, M0[9]; } RPiece;
+#define RP_MAX 12
+/* a shard: one triangle of the shell blown out (by a missile crashing into it), floating, then home in turn */
+typedef struct { int ti, i, home, ctl_set, has_ax; float wait, drag, bob, base[3], vel[3], ang, w, k0, ax[3], d0[3], s0, ph, from[3], ctl[3], a0, M0[9]; } RShard;
+#define RS_MAX 32
+enum { RF_LUNGE = 1, RF_CHEER, RF_RECOIL }; /* how the core feels about what it did: a lunge after a throw, a cheer on a hit, a recoil on a blow */
+typedef struct { int kind; float at, dir[3], amt; } RFeel;
+#define RF_MAX 8
+/* t: the attack's clock, rt: the same in real time (kept apart so an attack could hold its own clock); own: the attack's own working state (each attack's
+ * struct, checked against its size where it is defined) */
+typedef struct { RPiece p[RP_MAX]; RShard sh[RS_MAX]; RFeel fx[RF_MAX]; int atk, n, nsh, has_last; float t, rt, pv[2], last[2], charge; double next; union { double d[512]; unsigned char b[4096]; } own; } ReadyRS;
 typedef struct { int flinched; } CrazyRS;
 typedef union {
     OracleRS oracle; ThinkRS think; BladesRS blades; EngineRS engine; AxesRS axes; TypewriterRS typewriter;
     ForgeRS forge; LoomRS loom; ConveyorRS conveyor; CompressorRS compressor; SwimRS swim; BeaconRS beacon;
-    KnockRS knock; UnlockRS unlock; BloomRS bloom; ZipRS zip; HoleRS hole; DecodingRS decoding; CrazyRS crazy;
+    KnockRS knock; UnlockRS unlock; BloomRS bloom; ZipRS zip; HoleRS hole; DecodingRS decoding; CrazyRS crazy; ReadyRS ready;
 } RoutineState;
 /* the action playing now: its own state, never shared with a routine */
 typedef struct { double started; float dir[3], step_ax[3]; int g, v, n; unsigned char order[MAX_T], path[6]; } WhimState;
@@ -248,9 +267,34 @@ typedef struct {
     float bright;                        /* core and threads brighter by this factor (1 = as usual) */
     float hole;                          /* the black hole's void, 0..1 (its dust and stars: rs.hole) */
     int hole_want;                       /* a black-hole action asked for (hole_play), played once it has grown */
+    /* READY's attacks: the triangles flying loose (the panel draws them, and the sparks, on a layer over the screen),
+     * how angry it is (toward NEEDS YOU's colours), when a piece last hit the pointer, an attack under way. A loose
+     * triangle lives in the stage's own frame: tmx[tmi - 1] turns its plain shape (model, about its centre) into view
+     * space and tt is its centre (shell units from the core window's centre), drawn with none of the core's offset,
+     * size, stretch or tilt, so the core hopping or leaning never drags or bends it (the Bestiary's projFree) */
+    unsigned char loose[MAX_T];
+    int loose_on, atk_busy, atk_want;   /* atk_want: an attack asked for (ready_play) */
+    float rage;
+    double hit_at;
     float trail[MAX_TRAIL][3]; int ntrail; Col trail_col; /* a light trail over the shell, model space */
+    /* READY: the bursts of blows on the pointer (stage units, as aim_x / aim_y) and the lock-on closing round it, 0..1 */
+    struct { double at; float x, y, dx, dy, size, ring; Col col; } imp[4];
+    float lock_on;
+    /* READY: the core's offset, lean and stretch as drawn, following what the routine asks (Session.w_*) on the
+     * Bestiary's curves: the offset on a critically damped spring, the lean and stretch eased */
+    float sm_x, sm_y, sm_vx, sm_vy, sm_lx, sm_ly, sm_tall;
+    int sm_on;
+    /* the camera's distance (shell units; 0 = the renderer's own, 7): READY eases to the Bestiary's, twice as far, so a
+     * piece thrown toward you is not blown up and bent by the perspective */
+    float cam;
     Spark spark[MAX_SPARK];
     MRing ring[MAX_RING];
+    /* a state change: the old routine's last frame (what it had out) eases back home before the new state's colour and
+     * routine begin (motion_tick); meanwhile `routine` is still the old state, and session.c keeps its look */
+    int closing;
+    double close_at;
+    struct { unsigned char tmi[MAX_T]; float tmx[MAX_T + 1][9], tt[MAX_T][3], talpha[MAX_T], sharp_k[MAX_T];
+             signed char sharp_v[MAX_T]; int ntm, tt_on, ta_on, sharp_on; float squash, sq_ax[3], hole, inner, scan_h, scan_a; } cl;
 } Motion;
 
 typedef struct {
@@ -266,6 +310,12 @@ typedef struct {
     float hover_to, look_x_to, look_y_to; /* 1 while pointed at; cursor offset from the centre, -1..1, y down */
     float hover, look_x, look_y;
     int unread; /* a reply arrived since the last prompt (only with DODECA_RICH; the panel reads the text) */
+    /* a subagent (its sid: its session's, a dash, its agent id; named for its type), shown as a core of its own while it
+     * works; once it has finished it goes when its reply has been seen (the panel: pointed at, then left; sub_seen),
+     * or SUB_KEEP seconds after (the terminal) */
+    char parent[72];
+    int sub, sub_seen;
+    double sub_done;
     /* set by the panel only */
     int overlay;           /* a panel state (ST_SPEAK, ...) shown instead of the event state; 0 = none */
     float level;           /* 0..1 speech or microphone level, see Look.lc / Look.lh */
@@ -273,6 +323,8 @@ typedef struct {
     float vol;             /* speech volume 0..1 */
     int muted, held;       /* never speaks on its own / being dragged by the mouse */
     float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */
+    float sdir_x, sdir_y, sdir_tx, sdir_ty; /* its own spin's way round (rate about x, about y), eased to the last way it was
+                                              * scrolled (panel: the wheel or a touchpad swipe); 0, 0 until then: the usual */
     Col aura;              /* single-core mode: this session's colour, which tints its core */
     float aura_a;          /* how much, 0 = none */
     int carried;           /* riding on the mouse (see CARRY) */
@@ -295,6 +347,12 @@ typedef struct {
     double defend_at, press_at;
     float defend_x, defend_y;      /* where the rush came from, view space, y down */
     float press_x, press_y;        /* where the press landed, like look_x / look_y */
+    /* READY: where the pointer is (the middle of the mouse's picture, not its tip), in shell radii from the core
+     * window's centre as if the core were at its usual size (y down); how close a piece must come to hit it, same
+     * units, reaching past the whole mouse; aim_on 0 when the pointer is elsewhere */
+    float aim_x, aim_y, aim_hit;
+    int aim_on;
+    float backdrop;        /* panel only: a soft dark halo behind the core and its thrown pieces, 0..1, so they show over a light app */
     Motion mo;
 } Session;
 
@@ -303,6 +361,9 @@ typedef struct { Session s[MAX_SESS]; int n; } Room;
 void room_apply(Room *r, const Event *e);
 void room_move(Room *r, int from, int to); /* reorder: the session at from goes to position to (panel only) */
 void room_tick(Room *r, const Shape *sh, double now, float dt);
+extern float BACKDROP_W, BACKDROP_A; /* the backdrop's outline (render.c): its width and strength, 1 = as designed (Settings > Look) */
+extern int BACKDROP_CORE;            /* and a small soft disc behind the bright centre too */
+extern int SUB_UNTIL_SEEN; /* the panel: a finished subagent stays until its reply has been seen (else SUB_KEEP s) */
 int session_shown(const Session *s, double now);
 void session_init(Session *s, const char *sid, double t, const Shape *sh);
 extern const char *STATE_TEXT[ST_N];                          /* "Idle", "Thinking", ... for text labels */
@@ -326,6 +387,15 @@ void whim_play(Session *s, int w, double now);            /* play action w now, 
 extern uint32_t HOLE_ACTS;
 extern const char *HOLE_ACT_NAME[HA_N], *HOLE_ACT_ABOUT[HA_N];
 void hole_play(Session *s, int a);
+/* READY's attacks (RA_*), like the black hole's actions: which it may throw (READY_ATKS), names, what they do, play one now */
+enum { RA_NONE, RA_MISSILES, RA_FORGE, RA_SLINGSHOT, RA_SPIKES, RA_N };
+extern uint32_t READY_ATKS;
+extern const char *READY_ATK_NAME[RA_N], *READY_ATK_ABOUT[RA_N];
+void ready_play(Session *s, int a);
+/* the renderer: 0 draws everything; 1 leaves out the loose triangles and the sparks while an attack has pieces out (the
+ * core's own window); 2 draws only those, at the core's place given by the clip, anywhere on the canvas (the layer) */
+extern int RENDER_PART;
+extern Col SHADE_COL; /* the colour of the shade (Canvas.dk) under the light: black unless the panel picks one (Settings > Look > Darkness) */
 /* small 3x3 matrix helpers, row-major (shared with render.c) */
 void m3_mul(float *r, const float *a, const float *b);    /* r = a * b (r may be a or b) */
 void m3_rot(float *r, const float *axis, float angle);    /* about a unit axis */
@@ -340,11 +410,23 @@ void demo_run(Demo *d, Room *room, double now);
 /* ---- render.c: software renderer into a float RGB canvas -------------------------------------- */
 /* sx, sy: render_one draws the core that many pixels right and down (a part-pixel place); ss: the canvas is ss times
  * the size it will be shown at (supersampled; 0 or 1 = not), so sizes that depend on the shown size stay right */
-typedef struct { int w, h; float *p; float sx, sy; int ss; } Canvas;
+/* bx0..by1: the box drawn into since the last clear (half-open, empty when bx1 <= bx0), so READY's layer clears, converts
+ * and hands Windows only that, not the whole stretch from the core to the pointer */
+/* ry0..ry1: draw only these rows (both 0: all). Bands of one canvas may be drawn at the same time on several threads,
+ * each through its own copy of the Canvas (render_band), then their drawn boxes merged (canvas_box_merge) */
+typedef struct { int w, h; float *p; float sx, sy; int ss; float *dk; int bx0, by0, bx1, by1, ry0, ry1; } Canvas; /* dk: shade, how opaque a dark under the light is (READY's pieces' rim) */
 void canvas_resize(Canvas *c, int w, int h);
 void render_room(Canvas *c, const Room *r, const Shape *sh, double now, float glow, float core_frac);
 void render_one(Canvas *c, const Session *s, const Shape *sh, double now, float glow, float core_frac);
+void render_part(Canvas *c, const Session *s, const Shape *sh, double now, float glow, float core_frac, int x0, int y0, int x1, int y1);
+/* the same in steps, so the drawing can be shared out: render_prep clears (all of it, or only what was drawn since the
+ * last clear) and readies the tables; then render_band draws the session laid out in x0..x1, y0..y1 into the rows of
+ * band (a copy of the canvas with its own ry0, ry1; it clears nothing), and canvas_box_merge adds the band's drawn box */
+void render_prep(Canvas *c, int whole);
+void render_band(Canvas *band, const Session *s, const Shape *sh, double now, float glow, float core_frac, int x0, int y0, int x1, int y1);
+void canvas_box_merge(Canvas *c, const Canvas *band);
 void canvas_rgba(const Canvas *c, uint8_t *rgba);           /* premultiplied RGBA: the light alone, see-through where dark */
+void canvas_rgba_box(const Canvas *c, uint8_t *rgba, int x0, int y0, int x1, int y1); /* the same, only the box x0..x1, y0..y1 of a w*h*4 buffer */
 void canvas_bytes(const Canvas *c, uint8_t *rgb, Col bg); /* 8-bit RGB over the background colour, w*h*3 bytes */
 
 #endif
