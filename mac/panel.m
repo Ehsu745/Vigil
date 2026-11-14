@@ -39,7 +39,7 @@ static float g_glow = 1.0f, g_core = 0.35f;
 static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
 static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
 static float g_gravity = 2;                     // how hard the main core holds the small ones on their orbit (one of GRAVITIES)
-static double g_egg_chance = 0.12;              // the easter egg: the chance a round of Blades knocks into a small core (--egg: always)
+static double g_egg_chance = 0.12;              // the easter egg: the chance a round of Skein knocks into a small core (--egg: always)
 static int g_orbit3d = 1;                       // the orbit drawn tilted, swaying on its own; flat while the pointer is near
 static float g_orbit_tilt = 55;                 // the most it tilts, degrees (Settings > Look > Tilt)
 static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
@@ -537,7 +537,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     double _orbitClock;     // the small cores' own clock: it stops while the pointer is on a core, so one stays put
     NSString *_lastFocus;
     float _tilted;          // 0: the orbit seen from above (the pointer is near), 1: tilted as far as it sways
-    double _eggRound;       // the Blades round the easter egg was last decided for
+    double _eggRound;       // the Skein round the easter egg was last decided for
     BOOL _eggArmed;         // this round a blade will knock into the first small core it reaches
     NSMutableDictionary<NSString *, NSPanel *> *_sats; // a small core out of the cluster's window gets a window of its own
 }
@@ -970,14 +970,14 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     for (NSString *sid in _sats.allKeys) if (![shown containsObject:sid]) [_sats[sid] orderOut:nil];
 }
 
-// The easter egg: now and then (g_egg_chance of a round) the main core's Blades knock into a small core on its orbit:
+// The easter egg: now and then (g_egg_chance of a round) the main core's Skein blades knock into a small core on its orbit:
 // the small core falls apart and comes back together (the shatter action), or is knocked clean out of orbit and
-// flies off as if flung. The blades' places come from the routine (BladesRS.pos, in shell radii, y down).
+// flies off as if flung. The blades' places come from the routine (SkeinRS.pos, in shell radii, y down).
 - (void)bladesHit:(const Room *)room focus:(int)fi at:(const NSRect *)at depth:(const float *)depth now:(double)now {
     if (!room->n || !g_others) return;
     const Session *ms = &room->s[fi];
-    if (ms->mo.rt != RT_BLADES) return;
-    const BladesRS *B = &ms->mo.rs.blades;
+    if (ms->mo.rt != RT_SKEIN) return;
+    const SkeinRS *B = &ms->mo.rs.skein;
     if (B->at != _eggRound) { _eggRound = B->at; _eggArmed = arc4random_uniform(10000) < g_egg_chance * 10000; }
     if (!_eggArmed) return;
     NSRect mr = at[fi];
@@ -2282,7 +2282,7 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
-         "  --egg              the easter egg every round of Blades, not now and then (to see it)\n"
+         "  --egg              the easter egg every round of Skein, not now and then (to see it)\n"
          "  --settings [motions]  open the Settings window at start, on its Motions page if asked (also right-click > Settings...)\n"
          "  --settings-shot FILE  open the Settings window, save it as a PNG after 2 s and quit\n"
          "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"

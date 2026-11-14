@@ -254,11 +254,12 @@ static void project_view(const Proj *P, const float *p, float *out) {
 static float alpha_of(const Motion *mo, int t) { return mo->ta_on ? mo->talpha[t] : 1; }
 static int carried_off(const Motion *mo, int t) { return mo->tt_on && (mo->tt[t][0] != 0 || mo->tt[t][1] != 0 || mo->tt[t][2] != 0); }
 static int moved(const Motion *mo, int t) {
-    return fabsf(mo->off[t]) > 0.002f || mo->ang[t] != 0 || mo->tmi[t] || carried_off(mo, t) || alpha_of(mo, t) != 1;
+    return fabsf(mo->off[t]) > 0.002f || mo->ang[t] != 0 || mo->tmi[t] || carried_off(mo, t) || alpha_of(mo, t) != 1 || (mo->sharp_on && mo->sharp_k[t] > 0.001f);
 }
 static int same_tri(const Motion *mo, int a, int b) {
     if (mo->ang[a] != mo->ang[b] || mo->tmi[a] != mo->tmi[b] || alpha_of(mo, a) != alpha_of(mo, b)) return 0;
     if (mo->tt_on && (mo->tt[a][0] != mo->tt[b][0] || mo->tt[a][1] != mo->tt[b][1] || mo->tt[a][2] != mo->tt[b][2])) return 0;
+    if (mo->sharp_on && (mo->sharp_k[a] > 0.001f || mo->sharp_k[b] > 0.001f)) return 0;
     if (fabsf(mo->off[a]) < 0.002f && fabsf(mo->off[b]) < 0.002f) return 1;
     return mo->grp[a] == mo->grp[b] && fabsf(mo->off[a] - mo->off[b]) < 0.002f;
 }
@@ -269,13 +270,25 @@ static const float *layer_rot(RotCache *rc, const Motion *mo, float a) {
     rc->ang[i] = a; m3_rot(rc->R[i], mo->lax, a);
     return rc->R[i];
 }
-/* where node v is drawn as part of triangle t: slid out with its patch, turned with
+/* where node v is drawn as part of triangle t: a blade's tip drawn out, slid out with its patch, turned with
  * its layer or by its own matrix, then carried off whole */
-static void at_tri(const Proj *P, const Motion *mo, float base[][3], int v, int t, RotCache *rc, float *out) {
-    float p[3];
+static void at_tri(const Proj *P, const Motion *mo, const Shape *sh, float base[][3], int v, int t, RotCache *rc, float *out) {
+    float p[3], bv[3] = {base[v][0], base[v][1], base[v][2]};
+    if (mo->sharp_on && mo->sharp_k[t] > 0.001f && mo->sharp_v[t] >= 0) {
+        float k = mo->sharp_k[t], c0[3], ax[3], d[3];
+        const int *tv = sh->t[t];
+        for (int i = 0; i < 3; i++) c0[i] = (base[tv[0]][i] + base[tv[1]][i] + base[tv[2]][i]) / 3;
+        for (int i = 0; i < 3; i++) { ax[i] = base[mo->sharp_v[t]][i] - c0[i]; d[i] = bv[i] - c0[i]; }
+        float l = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+        if (l > 1e-6f) {
+            for (int i = 0; i < 3; i++) ax[i] /= l;
+            float al = d[0] * ax[0] + d[1] * ax[1] + d[2] * ax[2], fa = v == mo->sharp_v[t] ? 1 + 0.75f * k : 1, fp = 1 - 0.3f * k;
+            for (int i = 0; i < 3; i++) bv[i] = c0[i] + ax[i] * al * fa + (d[i] - ax[i] * al) * fp;
+        }
+    }
     const float *n = mo->gn[mo->grp[t]];
     float o = mo->off[t] * CIRCUM;
-    p[0] = base[v][0] + n[0] * o; p[1] = base[v][1] + n[1] * o; p[2] = base[v][2] + n[2] * o;
+    p[0] = bv[0] + n[0] * o; p[1] = bv[1] + n[1] * o; p[2] = bv[2] + n[2] * o;
     if (mo->tmi[t]) m3_app(p, mo->tmx[mo->tmi[t] - 1], p);
     else if (mo->ang[t] != 0) m3_app(p, layer_rot(rc, mo, mo->ang[t]), p);
     if (mo->tt_on) { p[0] += mo->tt[t][0]; p[1] += mo->tt[t][1]; p[2] += mo->tt[t][2]; }
@@ -489,11 +502,11 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         /* an edge between two triangles that moved apart is drawn on each of them */
         float a1 = alpha_of(mo, t1);
         if (a1 > 0.01f) {
-            at_tri(&P, mo, base, a, t1, &rc_, pa); at_tri(&P, mo, base, b, t1, &rc_, pb);
+            at_tri(&P, mo, sh, base, a, t1, &rc_, pa); at_tri(&P, mo, sh, base, b, t1, &rc_, pb);
             draw_edge(c, cl, pa, pb, L, edge * a1, thin, glow * sh->df, gg, k);
         }
         if (t2 >= 0 && !same_tri(mo, t1, t2) && alpha_of(mo, t2) > 0.01f) {
-            at_tri(&P, mo, base, a, t2, &rc_, pa); at_tri(&P, mo, base, b, t2, &rc_, pb);
+            at_tri(&P, mo, sh, base, a, t2, &rc_, pa); at_tri(&P, mo, sh, base, b, t2, &rc_, pb);
             draw_edge(c, cl, pa, pb, L, edge * alpha_of(mo, t2), thin, glow * sh->df, gg, k);
         }
     }
@@ -503,7 +516,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
         int va = mo->edge_v[t][0], vb = mo->edge_v[t][1], vo = sh->t[t][0];
         for (int j = 0; j < 3; j++) if (sh->t[t][j] != va && sh->t[t][j] != vb) vo = sh->t[t][j];
         float pa[3], pb[3], po[3];
-        at_tri(&P, mo, base, va, t, &rc_, pa); at_tri(&P, mo, base, vb, t, &rc_, pb); at_tri(&P, mo, base, vo, t, &rc_, po);
+        at_tri(&P, mo, sh, base, va, t, &rc_, pa); at_tri(&P, mo, sh, base, vb, t, &rc_, pb); at_tri(&P, mo, sh, base, vo, t, &rc_, po);
         float d = 0.3f + 0.7f * ((pa[2] + pb[2] + po[2]) / 3 + CIRCUM) / (2 * CIRCUM); /* dimmer behind the core */
         edge_glow(c, cl, pa, pb, po, L->eh, 0.8f * ek * d * edge * alpha_of(mo, t));
     }
@@ -518,7 +531,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
                 for (int u = 0; u < ns; u++) if (same_tri(mo, seen[u], tt)) dup = 1;
                 if (dup) continue;
                 seen[ns++] = tt;
-                at_tri(&P, mo, base, i, tt, &rc_, p);
+                at_tri(&P, mo, sh, base, i, tt, &rc_, p);
                 al = alpha_of(mo, tt);
                 if (mo->edge_on) al *= 1 - mo->edge_k[tt]; /* a blade has no corner dots */
                 if (al < 0.01f) continue;
