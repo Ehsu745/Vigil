@@ -25,6 +25,7 @@
 #import "tip.h"
 #import "reply.h"
 #import "settings.h"
+#include "orbit.h"
 
 static Room g_room, g_ghost;
 static Shape g_shape;
@@ -37,6 +38,7 @@ static float g_glow = 1.0f, g_core = 0.35f;
 // Settings window (Look, Motion, Replies): how big the cores are, the small cores, the text box's look
 static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
 static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
+static float g_gravity = 2;                     // how hard the main core holds the small ones on their orbit (one of GRAVITIES)
 static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
 static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_COLS (5: the custom colour)
 static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
@@ -126,13 +128,13 @@ static void pointer_visible(BOOL on) {
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
 static struct {
     int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
-    float core, scale, tip_size; int others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin; unsigned tip_custom, text_custom;
+    float core, scale, tip_size, gravity; int others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin; unsigned tip_custom, text_custom;
 } g_launch;
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
-    g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
+    g_launch.gravity = g_gravity; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
     g_launch.tip_middle = g_tip_middle; g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
     g_launch.tip_custom = g_tip_custom; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
@@ -141,7 +143,7 @@ static void remember_launch(void) {
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
-    g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
+    g_gravity = g_launch.gravity; g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
     g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
     g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
     motion_map_default(MOTION_MAP); // the motion map has no launch option: back to its defaults
@@ -165,6 +167,7 @@ static void load_settings(void) {
     if ((n = j[@"scale"]) && n.floatValue >= 0.5f && n.floatValue <= 2.5f) g_scale = n.floatValue;
     if ((n = j[@"tipSize"]) && n.floatValue >= 0.5f && n.floatValue <= 2) g_tip_size = n.floatValue;
     if ((n = j[@"others"])) g_others = n.boolValue;
+    if ((n = j[@"gravity"]) && n.floatValue >= 0.5f && n.floatValue <= 8) g_gravity = n.floatValue;
     if ((n = j[@"tipMono"])) g_tip_mono = n.boolValue;
     if ((n = j[@"tipMiddle"])) g_tip_middle = n.boolValue;
     if ((n = j[@"tipColor"]) && n.intValue >= 0 && n.intValue < 6) g_tip_bg = n.intValue;
@@ -194,7 +197,7 @@ static void save_settings(void) {
     NSDictionary *j = @{@"mapRoutines": rt, @"mapActions": act, @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
                         @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
-                        @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0),
+                        @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0), @"gravity": @(g_gravity),
                         @"tipMono": @(g_tip_mono != 0), @"tipMiddle": @(g_tip_middle != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
                         @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin)};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
@@ -401,6 +404,34 @@ static NSString *saved_summary(const Session *s, NSString *reply) {
     return [msg_text(s, @"reply") isEqual:reply] ? msg_text(s, @"summary") : nil;
 }
 
+// ---- single-core mode: each small core's body on its orbit (orbit.h), kept by session, in screen points ----
+typedef struct { char sid[72]; Orbit o; } OrbitSlot;
+static OrbitSlot g_orb[MAX_SESS];
+static int g_orb_n;
+static Orbit *orbit_of(const char *sid) {
+    for (int i = 0; i < g_orb_n; i++) if (!strcmp(g_orb[i].sid, sid)) return &g_orb[i].o;
+    if (g_orb_n == MAX_SESS) g_orb_n = 0;
+    OrbitSlot *o = &g_orb[g_orb_n++];
+    memset(o, 0, sizeof *o);
+    snprintf(o->sid, sizeof o->sid, "%s", sid);
+    return &o->o;
+}
+static BOOL on_screen(CGFloat x, CGFloat y) {
+    for (NSScreen *s in [NSScreen screens]) if (NSPointInRect(NSMakePoint(x, y), s.visibleFrame)) return YES;
+    return NO;
+}
+// a loose small core bounces off the edges of the screen it is on, not where another screen goes on
+static void orbit_bounce(Orbit *ob) {
+    NSScreen *on = nil;
+    for (NSScreen *s in [NSScreen screens]) if (NSPointInRect(NSMakePoint(ob->px, ob->py), s.frame)) on = s;
+    NSRect v = (on ?: [NSScreen mainScreen]).visibleFrame;
+    float hs = ob->w / 2 + 2;
+    if (ob->px < NSMinX(v) + hs && !on_screen(NSMinX(v) - 1, ob->py)) { ob->px = (float)NSMinX(v) + hs; ob->vx = fabsf(ob->vx) * ORBIT_BOUNCE; }
+    if (ob->px > NSMaxX(v) - hs && !on_screen(NSMaxX(v) + 1, ob->py)) { ob->px = (float)NSMaxX(v) - hs; ob->vx = -fabsf(ob->vx) * ORBIT_BOUNCE; }
+    if (ob->py < NSMinY(v) + hs && !on_screen(ob->px, NSMinY(v) - 1)) { ob->py = (float)NSMinY(v) + hs; ob->vy = fabsf(ob->vy) * ORBIT_BOUNCE; }
+    if (ob->py > NSMaxY(v) - hs && !on_screen(ob->px, NSMaxY(v) + 1)) { ob->py = (float)NSMaxY(v) - hs; ob->vy = -fabsf(ob->vy) * ORBIT_BOUNCE; }
+}
+
 // ---- the view: for each session two lines of text, then its polyhedron ----------------------------------
 // what the panel does when a core is clicked, held, ... (AppDelegate)
 @protocol CoreActions
@@ -418,6 +449,47 @@ static const double PRESS_AFTER = 0.35; // seconds: a press held longer is push-
 static const CGFloat DRAG_AFTER = 4;    // points the mouse moves before a press becomes a drag
 static const float DRAG_TURN = 0.012f;  // radians per point dragged
 
+// a small core flung out of the cluster: its own small window; clicks, double-clicks and the menu work as on the panel
+@interface SatView : NSView
+@property(copy) NSString *sid;
+@property(weak) id<CoreActions> actions;
+@property CGFloat margin;
+@property double now;
+- (void)setImage:(CGImageRef)img;
+@end
+@implementation SatView {
+    CGImageRef _img;
+    NSTimer *_click;
+}
+- (BOOL)isOpaque { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; }
+- (void)setImage:(CGImageRef)img { if (img == _img) return; if (_img) CGImageRelease(_img); _img = img ? CGImageRetain(img) : NULL; }
+- (void)dealloc { if (_img) CGImageRelease(_img); }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    if (!_img) return;
+    NSRect r = NSInsetRect(self.bounds, self.margin, self.margin);
+    CGContextRef ctx = [NSGraphicsContext currentContext].CGContext;
+    CGContextDrawImage(ctx, NSRectToCGRect(r), _img);
+    const Session *s = session_by_sid(self.sid);
+    if (s) focus_frame(ctx, r, s, self.now);
+}
+- (void)mouseDown:(NSEvent *)e {
+    [self.actions coreTouched:self.sid];
+    if (e.clickCount >= 2) { [_click invalidate]; _click = nil; [self.actions coreDoubleClicked:self.sid]; return; }
+    __weak SatView *me = self;
+    _click = [NSTimer scheduledTimerWithTimeInterval:[NSEvent doubleClickInterval] repeats:NO block:^(NSTimer *t) {
+        (void)t;
+        SatView *v = me;
+        if (v) [v.actions coreClicked:v.sid];
+    }];
+}
+- (void)rightMouseDown:(NSEvent *)e {
+    NSMenu *m = [self.actions menuForCore:self.sid];
+    if (m) [NSMenu popUpContextMenu:m withEvent:e forView:self];
+}
+@end
+
 @interface PanelView : NSView
 @property(weak) id<CoreActions> actions;
 @property(readonly) BOOL busy;   // in the middle of a press or drag: keep taking mouse events
@@ -425,6 +497,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (BOOL)anythingDue:(double)now;
 - (int)coreAt:(NSPoint)p look:(NSPoint *)look center:(NSPoint *)center;
 - (void)cancelPress;
+- (void)hideSats;
+- (void)satsTakeMouse:(NSString *)sid;
 - (NSRect)coreRect:(int)i;
 - (void)relayout;
 @end
@@ -454,6 +528,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     double _lastMouseT;
     CGFloat _mvx, _mvy;         // points per second, smoothed
     double _lastDraw;
+    double _orbitClock;     // the small cores' own clock: it stops while the pointer is on a core, so one stays put
+    NSString *_lastFocus;
+    NSMutableDictionary<NSString *, NSPanel *> *_sats; // a small core out of the cluster's window gets a window of its own
 }
 
 - (BOOL)isOpaque { return NO; }
@@ -565,17 +642,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         if (_carrying || hypot(m.x - _moveMouse.x, m.y - _moveMouse.y) >= DRAG_AFTER) pointer_visible(NO); // the core is the pointer
         NSPoint was = self.window.frame.origin, to = NSMakePoint(_moveOrigin.x + m.x - _moveMouse.x, _moveOrigin.y + m.y - _moveMouse.y);
         if (to.x == was.x && to.y == was.y) return;
-        [self.window setFrameOrigin:to];
-        // the small cores stay where they were on the screen for a moment and then catch up: they trail behind
-        NSString *focus = room->n ? sid_of(&room->s[[self focusIndex]]) : nil;
-        NSSize b = self.bounds.size;
-        for (NSString *sid in _place.allKeys) {
-            if ([sid isEqualToString:focus]) continue;
-            NSRect r = _place[sid].rectValue;
-            r.origin.x = fmax(0, fmin(b.width - r.size.width, r.origin.x - (to.x - was.x)));
-            r.origin.y = fmax(0, fmin(b.height - r.size.height, r.origin.y - (to.y - was.y)));
-            _place[sid] = [NSValue valueWithRect:r];
-        }
+        [self.window setFrameOrigin:to]; // the small cores stay where they are on the screen: gravity pulls them after it
         [self setNeedsDisplay:YES];
     } else if (_reordering) {
         NSPoint p = [self convertPoint:[self.window convertPointFromScreen:m] fromView:nil];
@@ -772,46 +839,87 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     return NO;
 }
 
-// Single-core mode: the session in focus large near the top, the others small, floating around it on an
-// ellipse. Every core eases toward its spot, so when the focus changes the two swap places smoothly.
+// Single-core mode: the session in focus large in the middle, the others small on an orbit round it. The main
+// core eases to its spot; each small core is a body (orbit.h) held to the orbit by gravity and drawn along it to its
+// place, in screen points, so when the cluster is carried they slide round to the trailing side, and a fast carry
+// flings them off. A small core outside the cluster's window (flung, or on its way back) is shown in a window of
+// its own (SatView) until it is back inside.
 - (void)drawSingle:(const Room *)room now:(double)now width:(CGFloat)W height:(CGFloat)H scale:(CGFloat)scale {
     CGContextRef ctx = [NSGraphicsContext currentContext].CGContext;
-    int n = room->n, fi = 0;
-    for (int i = 0; i < n; i++) if (g_focus && [g_focus isEqualToString:sid_of(&room->s[i])]) fi = i;
+    int n = room->n, fi = [self focusIndex];
     if (room->n != _lastCount) { for (int i = 0; i <= MAX_SESS; i++) _due[i] = 0; _lastCount = room->n; }
     if (!_place) _place = [NSMutableDictionary dictionary];
-    float dt = (float)fmin(0.25, now - _lastDraw);
+    float dt = (float)fmin(0.1, now - _lastDraw);
     _lastDraw = now;
+    BOOL pointed = NO;
+    for (int i = 0; i < n; i++) if (room->s[i].hover_to > 0) pointed = YES;
+    if (!pointed) _orbitClock += dt;
     CGFloat big = W * 0.6, rx = W / 2 - 8, ry = rx * 1.15;
     CGFloat small = n > 1 && g_others ? fmin(W * 0.2, 2 * M_PI * rx / (n - 1) * 0.75) : 0;
     rx -= small / 2;
     ry -= small / 2;
     CGFloat cx = W / 2, cy = H / 2; // the window is just the cluster
+    NSPoint origin = self.window.frame.origin;
+    float mx = (float)(origin.x + cx), my = (float)(origin.y + cy); // the main core's centre on the screen
+    OrbitK ok = orbit_k(g_gravity, (float)rx, (float)small);
+    float kt = _moving ? 0 : ok.KT; // carried: only gravity holds them, so they slide round to the trailing side
     float ease = 1 - expf(-dt * 7);
-    NSRect at[MAX_SESS];
-    for (int i = 0, k = 0; i < n; i++) {
-        NSRect target;
-        if (i == fi) target = NSMakeRect(cx - big / 2, cy - big / 2, big, big);
-        else {
-            double a = M_PI / 2 + 2 * M_PI * k / (n - 1) + now * 0.10; // slowly around, starting at the top
-            CGFloat x = cx + rx * cos(a), y = cy + ry * sin(a) + 3 * sin(now * 0.8 + i * 1.7);
-            target = NSMakeRect(x - small / 2, y - small / 2, small, small);
-            k++;
+    NSString *focus = n ? sid_of(&room->s[fi]) : nil;
+    if (focus && _lastFocus && ![focus isEqualToString:_lastFocus]) { // the focus moved: the two swap places from where they are
+        Orbit *o = orbit_of(focus.UTF8String);
+        if (o->init) _place[focus] = [NSValue valueWithRect:NSMakeRect(o->px - origin.x - o->w / 2, o->py - origin.y - o->w / 2, o->w, o->w)];
+        NSValue *was = _place[_lastFocus];
+        Orbit *old = orbit_of(_lastFocus.UTF8String);
+        if (was) {
+            NSRect r = was.rectValue;
+            old->px = (float)(origin.x + NSMidX(r)); old->py = (float)(origin.y + NSMidY(r)); old->w = (float)r.size.width;
+            old->vx = old->vy = 0; old->free = 0; old->init = 1;
         }
-        NSString *sid = sid_of(&room->s[i]);
-        NSValue *was = _place[sid];
-        NSRect r = was ? was.rectValue : target;
-        r.origin.x += (target.origin.x - r.origin.x) * ease;
-        r.origin.y += (target.origin.y - r.origin.y) * ease;
-        r.size.width += (target.size.width - r.size.width) * ease;
-        r.size.height = r.size.width;
-        _place[sid] = [NSValue valueWithRect:r];
-        at[i] = r;
     }
+    _lastFocus = focus;
+    Orbit *ring[MAX_SESS];
+    int rn = 0;
+    for (int i = 0; i < n; i++) if (i != fi) { Orbit *o = orbit_of(room->s[i].sid); if (o->init && !o->free) ring[rn++] = o; }
+    NSRect at[MAX_SESS];
+    BOOL own[MAX_SESS] = {0};
+    for (int i = 0, k = 0; i < n; i++) {
+        NSString *sid = sid_of(&room->s[i]);
+        if (i == fi) {
+            NSRect target = NSMakeRect(cx - big / 2, cy - big / 2, big, big);
+            NSValue *was = _place[sid];
+            NSRect r = was ? was.rectValue : target;
+            r.origin.x += (target.origin.x - r.origin.x) * ease;
+            r.origin.y += (target.origin.y - r.origin.y) * ease;
+            r.size.width += (target.size.width - r.size.width) * ease;
+            r.size.height = r.size.width;
+            _place[sid] = [NSValue valueWithRect:r];
+            at[i] = r;
+            continue;
+        }
+        double a = M_PI / 2 + 2 * M_PI * k / (n - 1) + _orbitClock * 0.10; // its place: slowly around, starting at the top
+        float bob = (float)(3 * sin(_orbitClock * 0.8 + i * 1.7));
+        float tx = mx + (float)(rx * cos(a)), ty = my + (float)(ry * sin(a)) + bob;
+        k++;
+        Orbit *ob = orbit_of(room->s[i].sid);
+        if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = (float)small; ob->init = 1; ob->free = 0; }
+        ob->w += ((float)small - ob->w) * ease;
+        if (small <= 0) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->free = 0; at[i] = NSZeroRect; continue; }
+        if (ob->free) { // out of orbit: it flies on, slowing a little and bouncing off the screen's edges, until the main core comes close
+            fly_step(ob, dt);
+            orbit_bounce(ob);
+            if (hypotf(ob->px - mx, ob->py - my) < ok.CATCH) ob->free = 0; // caught: gravity takes it home
+        } else if (bead_step(ob, mx, my + bob, tx, ty, a, (float)rx, (float)ry, (float)small, kt, &ok, ring, rn, dt) > ok.BREAK) {
+            ob->free = 1; // pulled too far: it lets go, and flies on with the speed it had
+            ob->rest = 0;
+        }
+        at[i] = NSMakeRect(ob->px - origin.x - ob->w / 2, ob->py - origin.y - ob->w / 2, ob->w, ob->w);
+        own[i] = ob->free || !NSContainsRect(self.bounds, at[i]);
+    }
+    NSMutableSet *shown = [NSMutableSet set];
     for (int pass = 0; pass < 2; pass++) // the small ones first, the one in focus on top
         for (int i = 0; i < n; i++) {
             if ((i == fi) != (pass == 1)) continue;
-            if (i != fi && !g_others) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
+            if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
             const Session *s = &room->s[i];
             int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
             if (px < 32) px = 32;
@@ -822,11 +930,49 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
                 _due[i] = now + 1.0 / rate - 0.01;
             }
             _core[i] = at[i];
+            if (own[i]) { [self showSat:sid_of(s) image:_img[i] rect:at[i] now:now]; [shown addObject:sid_of(s)]; continue; }
             CGContextDrawImage(ctx, NSRectToCGRect(at[i]), _img[i]);
             focus_frame(ctx, at[i], s, now);
         }
     _coreN = n;
+    for (NSString *sid in _sats.allKeys) if (![shown containsObject:sid]) [_sats[sid] orderOut:nil];
 }
+
+// a small core in a window of its own, at its place on the screen (rect in this view's coordinates)
+- (void)showSat:(NSString *)sid image:(CGImageRef)img rect:(NSRect)r now:(double)now {
+    if (!_sats) _sats = [NSMutableDictionary dictionary];
+    NSPanel *w = _sats[sid];
+    if (!w) {
+        w = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 10, 10) styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                         backing:NSBackingStoreBuffered defer:NO];
+        w.opaque = NO;
+        w.backgroundColor = [NSColor clearColor];
+        w.hasShadow = NO;
+        w.ignoresMouseEvents = YES;
+        w.hidesOnDeactivate = NO;
+        w.releasedWhenClosed = NO;
+        SatView *v = [[SatView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10)];
+        v.sid = sid;
+        v.actions = self.actions;
+        w.contentView = v;
+        _sats[sid] = w;
+    }
+    w.level = self.window.level;
+    w.collectionBehavior = self.window.collectionBehavior;
+    CGFloat m = ceil(r.size.width * 0.3) + 4; // room round it for the focus frame
+    NSPoint o = self.window.frame.origin;
+    NSRect f = NSInsetRect(NSOffsetRect(r, o.x, o.y), -m, -m);
+    SatView *v = (SatView *)w.contentView;
+    [v setImage:img];
+    v.margin = m;
+    v.now = now;
+    [w setFrame:f display:NO];
+    [v setNeedsDisplay:YES];
+    if (!w.visible) [w orderFrontRegardless];
+}
+- (void)hideSats { for (NSPanel *w in _sats.allValues) [w orderOut:nil]; }
+// the window of a small core takes the mouse only while the pointer is on it, like the panel
+- (void)satsTakeMouse:(NSString *)sid { for (NSString *k in _sats) _sats[k].ignoresMouseEvents = ![k isEqualToString:sid]; }
 
 // forget where things were: the next frame lays everything out again (mode switch, reorder)
 - (void)relayout { _lastCount = -1; [_place removeAllObjects]; [self setNeedsDisplay:YES]; }
@@ -857,6 +1003,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (H < 60) H = 60;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 2.0;
     if (g_single) { [self drawSingle:room now:now width:W height:self.bounds.size.height scale:scale]; return; }
+    [self hideSats];
     NSFont *font = [NSFont fontWithName:g_font_name size:g_font_size];
     if (!font) font = [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
     CGFloat lineH = ceil(font.ascender - font.descender) + 3, textH = g_labels_hover ? 0 : lineH * 2 + 4, gap = 10, left = 10;
@@ -999,7 +1146,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     NSString *front = [NSWorkspace sharedWorkspace].frontmostApplication.bundleIdentifier;
     if (g_always || [front isEqualToString:@"com.googlecode.iterm2"]) [self.panel orderFrontRegardless];
-    else [self.panel orderOut:nil];
+    else { [self.panel orderOut:nil]; [self.view hideSats]; }
 }
 
 - (void)appChanged:(NSNotification *)note { (void)note; [self updateVisibility]; }
@@ -1137,6 +1284,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         s->lock_to = i == hit && !self.view.moving && [sid_of(s) isEqualToString:self.hoverSid] && now - self.hoverSince > 2.0 ? 1 : 0;
     }
     [self watchForRush:now];
+    [self.view satsTakeMouse:hit >= 0 ? sid_of(&room->s[hit]) : nil];
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
     if (self.reply.open) { // while a reply is typed, the tooltip of its session stays up above it
@@ -1745,7 +1893,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
 // SettingsHost: what the window reads and changes
 - (id)setting:(NSString *)key {
     NSDictionary *d = @{@"shape": @(g_shape_name), @"glow": @(g_glow), @"scale": @(g_scale), @"core": @(g_core), @"frame": @(g_frame),
-                        @"others": @(g_others != 0), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
+                        @"others": @(g_others != 0), @"gravity": @(g_gravity), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
                         @"tipSize": @(g_tip_size), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
                         @"textCustom": @(g_text_custom), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
                         @"away": @(g_away_after), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0),
@@ -1774,6 +1922,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     else if ([key isEqualToString:@"frame"]) snprintf(g_frame, sizeof g_frame, "%s", [v UTF8String]);
     else if ([key isEqualToString:@"core"]) g_core = [v floatValue];
     else if ([key isEqualToString:@"others"]) g_others = [v boolValue];
+    else if ([key isEqualToString:@"gravity"]) g_gravity = [v floatValue];
     else if ([key isEqualToString:@"wheelSpin"]) g_wheel_spin = [v intValue];
     else if ([key isEqualToString:@"scale"]) { g_scale = [v floatValue]; [self place]; }
     else if ([key isEqualToString:@"tipMono"] || [key isEqualToString:@"tipSize"] || [key isEqualToString:@"tipMiddle"] || [key isEqualToString:@"tipColor"]
