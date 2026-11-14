@@ -39,6 +39,7 @@ static float g_glow = 1.0f, g_core = 0.35f;
 static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
 static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
 static float g_gravity = 2;                     // how hard the main core holds the small ones on their orbit (one of GRAVITIES)
+static double g_egg_chance = 0.12;              // the easter egg: the chance a round of Blades knocks into a small core (--egg: always)
 static int g_orbit3d = 1;                       // the orbit drawn tilted, swaying on its own; flat while the pointer is near
 static float g_orbit_tilt = 55;                 // the most it tilts, degrees (Settings > Look > Tilt)
 static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
@@ -536,6 +537,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     double _orbitClock;     // the small cores' own clock: it stops while the pointer is on a core, so one stays put
     NSString *_lastFocus;
     float _tilted;          // 0: the orbit seen from above (the pointer is near), 1: tilted as far as it sways
+    double _eggRound;       // the Blades round the easter egg was last decided for
+    BOOL _eggArmed;         // this round a blade will knock into the first small core it reaches
     NSMutableDictionary<NSString *, NSPanel *> *_sats; // a small core out of the cluster's window gets a window of its own
 }
 
@@ -921,7 +924,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         if (ob->free) { // out of orbit: it flies on, slowing a little and bouncing off the screen's edges, until the main core comes close
             fly_step(ob, dt);
             orbit_bounce(ob);
-            if (hypotf(ob->px - mx, ob->py - my) < ok.CATCH) ob->free = 0; // caught: gravity takes it home
+            if (ob->hold > 0) ob->hold -= dt; // knocked away: it gets clear before the main core can catch it
+            else if (hypotf(ob->px - mx, ob->py - my) < ok.CATCH) ob->free = 0; // caught: gravity takes it home
         } else if (bead_step(ob, mx, my + bob, tx, ty, a, (float)rx, (float)ry, (float)small, kt, &ok, ring, rn, dt) > ok.BREAK) {
             ob->free = 1; // pulled too far: it lets go, and flies on with the speed it had
             ob->rest = 0;
@@ -935,6 +939,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         }
         own[i] = ob->free || !NSContainsRect(self.bounds, at[i]);
     }
+    [self bladesHit:room focus:fi at:at depth:depth now:now];
     NSMutableSet *shown = [NSMutableSet set];
     for (int pass = 0; pass < 3; pass++) // the small ones behind it, the one in focus, the small ones in front
         for (int i = 0; i < n; i++) {
@@ -963,6 +968,44 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     _coreN = n;
     for (NSString *sid in _sats.allKeys) if (![shown containsObject:sid]) [_sats[sid] orderOut:nil];
+}
+
+// The easter egg: now and then (g_egg_chance of a round) the main core's Blades knock into a small core on its orbit:
+// the small core falls apart and comes back together (the shatter action), or is knocked clean out of orbit and
+// flies off as if flung. The blades' places come from the routine (BladesRS.pos, in shell radii, y down).
+- (void)bladesHit:(const Room *)room focus:(int)fi at:(const NSRect *)at depth:(const float *)depth now:(double)now {
+    if (!room->n || !g_others) return;
+    const Session *ms = &room->s[fi];
+    if (ms->mo.rt != RT_BLADES) return;
+    const BladesRS *B = &ms->mo.rs.blades;
+    if (B->at != _eggRound) { _eggRound = B->at; _eggArmed = arc4random_uniform(10000) < g_egg_chance * 10000; }
+    if (!_eggArmed) return;
+    NSRect mr = at[fi];
+    CGFloat R = mr.size.width * SHELL_FRAC, reach = R * 0.9; // a blade's length beyond its centre, and the rush of air it drives
+    for (int b = 0; b < B->n; b++) {
+        if (!B->smash[b]) continue;
+        const float *p = B->pos[b];
+        CGFloat bx = NSMidX(mr) + p[0] * R, by = NSMidY(mr) - p[1] * R;
+        for (int i = 0; i < room->n; i++) {
+            if (i == fi || at[i].size.width < 4) continue;
+            Orbit *ob = orbit_of(room->s[i].sid);
+            if (ob->free) continue;
+            if (depth[i] != 0 && (p[2] >= 0) != (depth[i] >= 0)) continue; // tilted: only a blade on the same side of the core
+            if (hypot(bx - NSMidX(at[i]), by - NSMidY(at[i])) > at[i].size.width * 0.5 + reach) continue;
+            _eggArmed = NO;
+            Session *sat = (Session *)&room->s[i];
+            if (arc4random_uniform(2)) whim_play(sat, W_SHATTER, now); // falls apart, comes back together
+            else { // knocked out of orbit: away from the main core, fast
+                float dx = (float)(NSMidX(at[i]) - NSMidX(mr)), dy = (float)(NSMidY(at[i]) - NSMidY(mr)), l = fmaxf(1, hypotf(dx, dy));
+                ob->free = 1; ob->rest = 0; ob->hold = 4; // out of gravity for a while, not caught again at once
+                ob->vx = dx / l * 2200; ob->vy = dy / l * 2200;
+                sat->ring_at = now;
+                whim_play(sat, W_TUMBLE, now); // it tumbles as it goes
+            }
+            DBG("easter egg: a blade hit %s", sat->sid);
+            return;
+        }
+    }
 }
 
 // a small core in a window of its own, at its place on the screen (rect in this view's coordinates)
@@ -2239,6 +2282,7 @@ static void usage(void) {
          "  --labels hover     no name / state lines: only the cores, the tooltip shows who is who (default: always)\n"
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
+         "  --egg              the easter egg every round of Blades, not now and then (to see it)\n"
          "  --settings [motions]  open the Settings window at start, on its Motions page if asked (also right-click > Settings...)\n"
          "  --settings-shot FILE  open the Settings window, save it as a PNG after 2 s and quit\n"
          "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"
@@ -2277,6 +2321,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--debug")) g_debug = 1;
             else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
             else if (!strcmp(a, "--settings-shot") && v) { g_settings_shot = v; i++; }
+            else if (!strcmp(a, "--egg")) g_egg_chance = 1;
             else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } }
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;

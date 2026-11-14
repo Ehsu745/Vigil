@@ -33,7 +33,6 @@ static float mrand(Session *s) {
     return (float)(s->rng >> 8) / 16777216.0f;
 }
 static float rnd(Session *s, float a, float b) { return a + (b - a) * mrand(s); }
-static float gauss(Session *s) { float u = fmaxf(1e-6f, mrand(s)), v = mrand(s); return sqrtf(-2 * logf(u)) * cosf(TAU * v); }
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static float io3(float u) { if (u <= 0) return 0; if (u >= 1) return 1; return u < .5f ? 4 * u * u * u : 1 - powf(-2 * u + 2, 3) / 2; }
 static float outx(float u) { return u <= 0 ? 0 : u >= 1 ? 1 : 1 - powf(2, -10 * u); }
@@ -102,28 +101,6 @@ static void m3_tr(float *r, const float *m) { float t[9] = {m[0], m[3], m[6], m[
 static void m3_tapp(float *out, const float *m, const float *v) { float t[9]; m3_tr(t, m); m3_app(out, t, v); } /* the inverse of a rotation */
 static void m3_scale(float *m, float k) { for (int i = 0; i < 9; i++) m[i] *= k; }
 static const float I3[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-/* the rotation taking unit vector a onto unit vector b the shortest way */
-static void turn_to(float *R, const float *a, const float *b) {
-    float ax[3]; cross3(ax, a, b);
-    float sn = len3(ax), cs = dot3(a, b);
-    if (sn < 1e-6f) {
-        if (cs > 0) { memcpy(R, I3, sizeof I3); return; }
-        float X[3] = {1, 0, 0}, Y[3] = {0, 1, 0};
-        cross3(ax, a, fabsf(a[0]) < .9f ? X : Y); norm3(ax);
-        m3_rot(R, ax, PI_F);
-        return;
-    }
-    for (int i = 0; i < 3; i++) ax[i] /= sn;
-    m3_rot(R, ax, atan2f(sn, cs));
-}
-static void slerp_dir(float *out, const float *a, const float *b, float u) {
-    float ax[3], R[9]; cross3(ax, a, b);
-    float sn = len3(ax), cs = dot3(a, b);
-    if (sn < 1e-6f) { float X[3] = {1, 0, 0}, Y[3] = {0, 1, 0}; cross3(ax, a, fabsf(a[0]) < .9f ? X : Y); norm3(ax); }
-    else for (int i = 0; i < 3; i++) ax[i] /= sn;
-    m3_rot(R, ax, atan2f(sn, cs) * u);
-    m3_app(out, R, a);
-}
 /* a unit vector square to a (for building a frame round an axis) */
 static void square_to(float *out, const float *a) { float X[3] = {1, 0, 0}, Y[3] = {0, 1, 0}; cross3(out, a, fabsf(a[1]) < .9f ? Y : X); norm3(out); }
 
@@ -369,7 +346,7 @@ static void crazy(Session *s, const Shape *sh, const float *M, float dur, double
  * A routine is a function of one RCtx, listed with its name and state in ROUTINES at the bottom. It reads the
  * session and the frame (c->s, c->m, c->sh, c->M the view, c->e the seconds since it started), keeps its own
  * working state in its member of c->m->rs (zero when it starts), and each frame asks for patch lifts, spin, size
- * and brightness in c->w and sets the per-frame effects in Motion (tmi/tmx, tt, talpha, sharp, squash, trail,
+ * and brightness in c->w and sets the per-frame effects in Motion (tmi/tmx, tt, talpha, squash, trail,
  * sparks, rings, glow) for the renderer. */
 typedef struct { float grp[MAX_T]; float push[MAX_V]; float scale, rate, bright; } Want;
 typedef struct RCtx {
@@ -481,189 +458,195 @@ static void r_long(Ctx *c) {
     set_rate(c, .14f);
 }
 
-/* Blades: 15 to 20 single triangles, spread evenly, float out to a slowly turning ring behind the core; then two
- * pairs of smashes, each one full turn across the front (long, short), from the left or the right at random. The
- * flock is a bell curve in place and in timing: a comet band, thin at the head and tail. Each blade keeps its own
- * orientation from frame to frame and points along the smash like an arrow; the core swings with the flock. */
-static float median(float *a, int n) {
-    for (int i = 1; i < n; i++) for (int j = i; j > 0 && a[j] < a[j - 1]; j--) { float t = a[j]; a[j] = a[j - 1]; a[j - 1] = t; }
-    return a[n / 2];
+/* Blades: five single triangles leave the shell and become long thin blades; they hover in a fan behind the core,
+ * sweep across the front in a V like a skein of geese, hover in a fan on the far side, sweep back the other way and
+ * go home. Each blade is its triangle mapped by its own matrix onto the blade's shape and place, worked out in view
+ * space (shell radii, x right, y down, z toward you), so nothing is carried from frame to frame but the core's spin. */
+#define BL_OUT .6f     /* leaving the shell, or going home: each blade's own time */
+#define BL_STAG .07f   /* how far behind the one before it each blade starts */
+#define BL_SWEEP .75f  /* one sweep across the front */
+#define BL_PAUSE .9f   /* the hover between the sweeps */
+#define BL_T1 (BL_OUT + 4 * BL_STAG + .25f)
+#define BL_T2 (BL_T1 + BL_SWEEP + BL_PAUSE)
+#define BL_TH (BL_T2 + BL_SWEEP + .2f)
+#define BL_END (BL_TH + BL_OUT + 4 * BL_STAG)
+static const float BL_LEN = .5f;  /* a blade's length, shell radii (of the core at its usual size) */
+static const float BL_SHRINK = .22f; /* the core draws in by this much while its blades are out, to give them room */
+/* a blade's corners in its own frame (along it to the tip, across it), times its length: the tip, a corner almost
+ * under it on a long straight edge, and the other a little out to the side and up, a thin sheared dagger */
+static const float BL_SHAPE[3][2] = {{.66f, 0}, {-.34f, -.03f}, {-.25f, .13f}};
+
+static void frame_cols(float *F, const float *a, const float *b, const float *c) { for (int r = 0; r < 3; r++) { F[r * 3] = a[r]; F[r * 3 + 1] = b[r]; F[r * 3 + 2] = c[r]; } }
+static void m3_to_q(const float *m, float *q) { /* a rotation as a unit quaternion (w, x, y, z) */
+    float tr = m[0] + m[4] + m[8];
+    if (tr > 0) { float s = sqrtf(tr + 1) * 2; q[0] = s / 4; q[1] = (m[7] - m[5]) / s; q[2] = (m[2] - m[6]) / s; q[3] = (m[3] - m[1]) / s; }
+    else if (m[0] > m[4] && m[0] > m[8]) { float s = sqrtf(1 + m[0] - m[4] - m[8]) * 2; q[0] = (m[7] - m[5]) / s; q[1] = s / 4; q[2] = (m[1] + m[3]) / s; q[3] = (m[2] + m[6]) / s; }
+    else if (m[4] > m[8]) { float s = sqrtf(1 + m[4] - m[0] - m[8]) * 2; q[0] = (m[2] - m[6]) / s; q[1] = (m[1] + m[3]) / s; q[2] = s / 4; q[3] = (m[5] + m[7]) / s; }
+    else { float s = sqrtf(1 + m[8] - m[0] - m[4]) * 2; q[0] = (m[3] - m[1]) / s; q[1] = (m[2] + m[6]) / s; q[2] = (m[5] + m[7]) / s; q[3] = s / 4; }
 }
-static float blade_pair(Blade *b, float from, float start, int pair) {
-    const float SW0 = .6f, SW1 = .2f;
-    float s1 = fmaxf(start + b->lag, from);
-    if (s1 > from && b->nseq < 9) b->seq[b->nseq++] = (BStep){1, 0, from, s1 - from}; /* waiting behind for its turn */
-    if (b->nseq < 8) { b->seq[b->nseq++] = (BStep){2, (unsigned char)(pair * 2), s1, SW0}; b->seq[b->nseq++] = (BStep){2, (unsigned char)(pair * 2 + 1), s1 + SW0, SW1}; }
-    return s1 + SW0 + SW1;
+static void q_to_m3(const float *q, float *m) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    float r[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+                  2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+                  2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)};
+    memcpy(m, r, sizeof r);
+}
+static void m3_slerp(float *out, const float *A, const float *B, float u) { /* the turn from A to B, part u of the way */
+    float a[4], b[4], q[4];
+    m3_to_q(A, a); m3_to_q(B, b);
+    float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (d < 0) { for (int i = 0; i < 4; i++) b[i] = -b[i]; d = -d; }
+    float ka = 1 - u, kb = u;
+    if (d < .9995f) { float th = acosf(fminf(1, d)), sn = sinf(th); ka = sinf((1 - u) * th) / sn; kb = sinf(u * th) / sn; }
+    float l = 0;
+    for (int i = 0; i < 4; i++) { q[i] = a[i] * ka + b[i] * kb; l += q[i] * q[i]; }
+    l = sqrtf(l);
+    for (int i = 0; i < 4; i++) q[i] /= l;
+    q_to_m3(q, out);
+}
+static float wrap_pi(float a) { return atan2f(sinf(a), cosf(a)); }
+/* blade i hovering in the fan behind the core, on the right (side > 0) or the left: they fan out from straight up to
+ * low on that side, each pointing away from the core */
+static void blade_fan(int i, float side, float clock, float *p, float *th) {
+    float deg = 95 - i * 18.75f, a = (side > 0 ? deg : 180 - deg) * PI_F / 180, r = 1.0f + .025f * sinf(clock * 2.2f + i * 1.3f);
+    set3(p, r * cosf(a), -r * sinf(a), -.55f);
+    *th = a;
+}
+/* blade i in the V, part u of a sweep in direction dir (+1: left to right); vel: the lead's speed (per second) */
+static void blade_vee(int i, float dir, float u, float *p, float *th, float *lead, float *vel) {
+    const float RX = 1.0f, Y0 = -.35f, YD = .3f, DROP = .7f, Z0 = -.55f, ZD = 1.55f, GB = .3f, GS = .15f; /* DROP: the line slopes down across */
+    float q = u - .75f * sinf(TAU * u) / TAU, dq = 1 - .75f * cosf(TAU * u); /* slow behind, fastest across the front */
+    float L[3] = {-dir * RX * cosf(PI_F * q), Y0 + YD * sinf(PI_F * q) + DROP * (q - .5f), Z0 + ZD * sinf(PI_F * q)};
+    float D[3] = {dir * RX * PI_F * sinf(PI_F * q), YD * PI_F * cosf(PI_F * q) + DROP, ZD * PI_F * cosf(PI_F * q)}, H[3];
+    if (lead) memcpy(lead, L, sizeof L);
+    if (vel) for (int k = 0; k < 3; k++) vel[k] = D[k] * dq / BL_SWEEP;
+    memcpy(H, D, sizeof H); norm3(H);
+    int k = i - 2; /* the lead in the middle; the others trail back on either wing */
+    for (int q2 = 0; q2 < 3; q2++) p[q2] = L[q2] - H[q2] * GB * abs(k);
+    p[1] += k * GS;
+    *th = atan2f(-D[1], fabsf(D[0]) > 1e-4f ? D[0] : dir * 1e-4f);
 }
 static void blades_new_round(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; BladesRS *B = &m->rs.blades;
-    const float LIFT = .35f, SHUFFLE = .3f, HOME = .7f, FOLD = .3f;
-    recut(s, sh, 1, 1); /* every triangle its own patch, all free to fly */
+    recut(s, sh, 1, 1); /* every triangle its own patch */
     for (int g = 0; g < m->ng; g++) m->gw[g] = 1;
-    int nwant = 15 + (int)(mrand(s) * 6), ok[MAX_BLADE], n = 1;
-    if (nwant > MAX_BLADE) nwant = MAX_BLADE;
-    ok[0] = (int)(mrand(s) * m->ng) % m->ng;
-    while (n < nwant && n < m->ng) { /* each next pick the one farthest from those picked */
+    int pick[MAX_BLADE], n = 1, want = sh->nt < MAX_BLADE ? sh->nt : MAX_BLADE;
+    pick[0] = (int)(mrand(s) * sh->nt) % sh->nt;
+    while (n < want) { /* each next one the farthest from those picked */
         int best = -1; float bd = -1;
-        for (int g = 0; g < m->ng; g++) {
+        for (int t = 0; t < sh->nt; t++) {
             int used = 0; float d = 9;
-            for (int k = 0; k < n; k++) { if (ok[k] == g) used = 1; d = fminf(d, 1 - dot3(m->gn[g], m->gn[ok[k]])); }
+            for (int k = 0; k < n; k++) { if (pick[k] == t) used = 1; d = fminf(d, 1 - dot3(sh->tn[t], sh->tn[pick[k]])); }
             if (used) continue;
             d += mrand(s) * .02f;
-            if (d > bd) { bd = d; best = g; }
+            if (d > bd) { bd = d; best = t; }
         }
-        ok[n++] = best;
+        pick[n++] = best;
     }
-    float zs[MAX_BLADE];
-    for (int i = 0; i < n; i++) zs[i] = clampf(gauss(s), -2.2f, 2.2f);
-    for (int i = 1; i < n; i++) for (int j = i; j > 0 && zs[j] < zs[j - 1]; j--) { float t = zs[j]; zs[j] = zs[j - 1]; zs[j - 1] = t; }
     for (int i = 0; i < n; i++) {
         Blade *b = &B->blade[i];
-        memset(b, 0, sizeof *b);
-        float side = clampf(gauss(s), -2.2f, 2.2f), e2 = zs[i] + .4f * (side < 0 ? -1 : 1), en = expf(-e2 * e2 / 2);
-        b->g = ok[i];
-        for (int t = 0; t < sh->nt; t++) if (m->grp[t] == b->g) { b->t = t; break; }
-        b->tip = sh->t[b->t][(int)(mrand(s) * 3) % 3];
-        b->slot = (float)i / n * TAU; b->lag = .11f * zs[i]; b->side = .3f * side * en; b->gd = rnd(s, .3f, .9f);
-        b->seq[b->nseq++] = (BStep){0, 0, LIFT, b->gd};
+        int t = pick[i], j = (int)(mrand(s) * 3) % 3;
+        b->t = t; b->tip = sh->t[t][j]; b->a = sh->t[t][(j + 1) % 3]; b->b = sh->t[t][(j + 2) % 3];
     }
     B->n = n;
-    /* each pair starts from the left (about 120°) or the right (about 60°) at random, the second from the other side */
-    for (int p = 0; p < 2; p++) {
-        int left = mrand(s) < .5f;
-        for (int k = 0; k < 2; k++) { float deg = ((left ^ k) ? 120 : 60) + rnd(s, -12, 12), a = deg * PI_F / 180; set3(B->dirs[p * 2 + k], -cosf(a), sinf(a), 0); }
-    }
-    float tmp[MAX_BLADE], ends1[MAX_BLADE], ends2[MAX_BLADE];
-    for (int i = 0; i < n; i++) tmp[i] = B->blade[i].gd;
-    float g1 = LIFT + median(tmp, n);
-    for (int i = 0; i < n; i++) ends1[i] = blade_pair(&B->blade[i], LIFT + B->blade[i].gd, g1, 0);
-    memcpy(tmp, ends1, sizeof(float) * n);
-    float g2 = median(tmp, n) + SHUFFLE, home_at = 0;
-    for (int i = 0; i < n; i++) { ends2[i] = blade_pair(&B->blade[i], ends1[i], g2, 1); home_at = fmaxf(home_at, ends2[i]); }
-    B->lead = 0;
-    for (int i = 0; i < n; i++) {
-        Blade *b = &B->blade[i];
-        if (home_at > ends2[i] && b->nseq < 9) b->seq[b->nseq++] = (BStep){1, 0, ends2[i], home_at - ends2[i]};
-        if (b->nseq < 9) b->seq[b->nseq++] = (BStep){3, 0, home_at, HOME};
-        if (fabsf(b->lag) < fabsf(B->blade[B->lead].lag)) B->lead = i; /* the middle of the flock: the core swings with it */
-    }
-    B->fold = home_at + HOME; B->end = B->fold + FOLD;
+    B->dir = mrand(s) < .5f ? 1 : -1;
     set3(B->core_v, 0, 0, 0);
     B->at = c->now;
 }
+/* blade b's triangle: its centre, and its own frame (to the tip, across, out) with the tip's and a corner's places in
+ * it; then the matrix that turns the triangle into the blade (in that frame) */
+static void blade_model(const Shape *sh, const Blade *b, float *cen, float *Fm, float *S2) {
+    float en[3], et[3], eb[3], vt[3], va[3], vb[3];
+    for (int q = 0; q < 3; q++) cen[q] = (sh->v[b->tip][q] + sh->v[b->a][q] + sh->v[b->b][q]) / 3;
+    for (int q = 0; q < 3; q++) { vt[q] = sh->v[b->tip][q] - cen[q]; va[q] = sh->v[b->a][q] - cen[q]; vb[q] = sh->v[b->b][q] - cen[q]; }
+    memcpy(en, sh->tn[b->t], sizeof en); norm3(en);
+    float k = dot3(vt, en);
+    for (int q = 0; q < 3; q++) et[q] = vt[q] - en[q] * k;
+    norm3(et); cross3(eb, en, et);
+    frame_cols(Fm, et, eb, en);
+    float ot[2] = {dot3(vt, et), dot3(vt, eb)}, oa[2] = {dot3(va, et), dot3(va, eb)}, ob[2] = {dot3(vb, et), dot3(vb, eb)};
+    if (oa[1] > ob[1]) memcpy(oa, ob, sizeof oa); /* the corner on the straight edge: the one on the -across side */
+    float cx = (BL_SHAPE[0][0] + BL_SHAPE[1][0] + BL_SHAPE[2][0]) / 3, cy = (BL_SHAPE[0][1] + BL_SHAPE[1][1] + BL_SHAPE[2][1]) / 3, Lm = BL_LEN * CIRCUM;
+    float tt[2] = {(BL_SHAPE[0][0] - cx) * Lm, (BL_SHAPE[0][1] - cy) * Lm}, ta[2] = {(BL_SHAPE[1][0] - cx) * Lm, (BL_SHAPE[1][1] - cy) * Lm};
+    float det = ot[0] * oa[1] - oa[0] * ot[1];
+    if (fabsf(det) < 1e-9f) { S2[0] = S2[3] = 1; S2[1] = S2[2] = 0; return; }
+    /* S [ot oa] = [tt ta]: S = [tt ta] [ot oa]^-1 */
+    float i00 = oa[1] / det, i01 = -oa[0] / det, i10 = -ot[1] / det, i11 = ot[0] / det;
+    S2[0] = tt[0] * i00 + ta[0] * i10; S2[1] = tt[0] * i01 + ta[0] * i11;
+    S2[2] = tt[1] * i00 + ta[1] * i10; S2[3] = tt[1] * i01 + ta[1] * i11;
+}
 static void r_blades(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M; BladesRS *B = &m->rs.blades;
-    const float LIFT = .35f, FOLD = .3f, CORE = .18f;
+    const float CORE = .18f;
     c->w->rate = 0; m->inner = .35f; m->inner_rate = -.5f;
     if (!sh->nt) return;
-    if (!B->n || c->now - B->at > B->end + .6f) blades_new_round(c);
-    float e = (float)(c->now - B->at), Mt[9], F[3] = {0, 0, 1};
+    if (!B->n || c->now - B->at > BL_END + .6f) blades_new_round(c);
+    float e = (float)(c->now - B->at), Mt[9], dtb = fminf(.05f, fmaxf(0, c->dt)), clock = (float)(c->now - s->created), want[3] = {0, 0, 0};
+    float d1 = (float)B->dir;
     m3_tr(Mt, M);
-    float lift = e < LIFT ? outx(e / LIFT) : e < B->fold ? 1 : fmaxf(0, 1 - in3((e - B->fold) / FOLD));
     int has_want = 0;
-    m->sharp_on = 1;
-    float dtb = fminf(.05f, fmaxf(0, c->dt)), clock = (float)(c->now - s->created);
+    /* the core draws in while the blades are out; they are placed and sized for the core at its usual size */
+    float drawn = e < BL_T1 ? io3(e / BL_OUT) : e >= BL_TH ? 1 - io3((e - BL_TH) / (BL_OUT + 4 * BL_STAG)) : 1;
+    c->w->scale *= 1 - BL_SHRINK * drawn;
+    float sc = m->scale > .2f ? m->scale : 1;
     for (int i = 0; i < B->n; i++) {
         Blade *b = &B->blade[i];
-        float home[3], d[3], vel[3] = {0, 0, 0};
-        m3_app(home, M, m->gn[b->g]); norm3(home);
-        float ringa = b->slot + clock * .12f, rr = .62f * (1 + .04f * sinf(clock * 1.4f));
-        float back1[3] = {cosf(ringa) * rr, sinf(ringa) * rr, -1}; norm3(back1);
-        float loose = 0, home_u = 0; int has_vel = 0;
-        const BStep *st = NULL;
-        for (int k = 0; k < b->nseq; k++) if (e >= b->seq[k].s && e < b->seq[k].s + b->seq[k].d) { st = &b->seq[k]; break; }
-        if (!st && b->nseq && e >= b->seq[b->nseq - 1].s) st = &b->seq[b->nseq - 1];
-        memcpy(d, home, sizeof d);
-        if (st) {
-            float u = clampf((e - st->s) / st->d, 0, 1);
-            if (st->k == 0) { slerp_dir(d, home, back1, io3(u)); loose = io3(u); }
-            else if (st->k == 1) { memcpy(d, back1, sizeof d); loose = 1; }
-            else if (st->k == 3) { slerp_dir(d, back1, home, io3(u)); loose = 1 - io3(u); home_u = smooth01((u - .55f) / .45f); } /* heading first; it settles into its own orientation only on the last stretch */
-            else { /* one full turn about the axis square to the smash: slow behind, fastest across the front */
-                const float *D = B->dirs[st->dir];
-                float A[3], R[9], front = bump(u), a = TAU * (u - .75f * sinf(TAU * u) / TAU);
-                cross3(A, F, D); norm3(A);
-                if (i == B->lead) { float sp = TAU * (1 - .75f * cosf(TAU * u)) / st->d; for (int q = 0; q < 3; q++) B->want[q] = A[q] * CORE * sp; has_want = 1; }
-                float tight = 1 - .88f * front, bk[3] = {cosf(ringa) * rr * tight, sinf(ringa) * rr * tight, -1};
-                norm3(bk);
-                m3_rot(R, A, a); m3_app(d, R, bk);
-                loose = tight;
-                float sd = tanf(b->side * front); /* the band: each blade off to the side by its own amount */
-                for (int q = 0; q < 3; q++) d[q] += A[q] * sd;
-                norm3(d);
-                cross3(vel, A, d); norm3(vel); has_vel = 1;
+        float cen[3], Fm[9], S2[4], P[3], th, k = 1, out = 0; /* k: how far it has become a blade (0: at home in the shell) */
+        int smash = 0;
+        blade_model(sh, b, cen, Fm, S2);
+        if (e < BL_T1 || e >= BL_TH) { /* leaving the shell into the fan on the side the first sweep starts from, or home from there */
+            float u = e < BL_T1 ? clampf((e - i * BL_STAG) / BL_OUT, 0, 1) : clampf((e - BL_TH - (4 - i) * BL_STAG) / BL_OUT, 0, 1);
+            k = e < BL_T1 ? io3(u) : 1 - io3(u);
+            out = bump(u);
+            blade_fan(i, -d1, clock, P, &th);
+        } else if (e < BL_T1 + BL_SWEEP || (e >= BL_T2 && e < BL_T2 + BL_SWEEP)) { /* a sweep: out of the fan into the V, across, into the fan on the far side */
+            int second = e >= BL_T2;
+            float dir = second ? -d1 : d1, u = (e - (second ? BL_T2 : BL_T1)) / BL_SWEEP, fp[3], fth, vp[3], vth, lead[3], vel[3];
+            float w = smooth01(u / .22f) * smooth01((1 - u) / .22f);
+            blade_fan(i, u < .5f ? -dir : dir, clock, fp, &fth);
+            blade_vee(i, dir, u, vp, &vth, lead, vel);
+            for (int q = 0; q < 3; q++) P[q] = fp[q] + (vp[q] - fp[q]) * w;
+            th = fth + wrap_pi(vth - fth) * w;
+            smash = w > .5f && P[2] > -.2f;
+            if (i == 2) { /* the core turns with the lead */
+                float ll = dot3(lead, lead), om[3];
+                cross3(om, lead, vel);
+                for (int q = 0; q < 3; q++) want[q] = om[q] / fmaxf(ll, .2f) * CORE * w;
+                has_want = 1;
             }
-        }
-        /* the blade's own orientation (W: model to view), carried along by small turns, never rebuilt as the
-         * shortest turn from home (which flips when a blade passes the far side of the core) */
-        float mv[3] = {0, 0, 0}; int has_mv = 0;
-        if (!b->init || !st) { memcpy(b->W, M, sizeof b->W); memcpy(b->dp, home, sizeof b->dp); b->al = 0; b->init = 1; }
-        else {
-            float dd[3] = {d[0] - b->dp[0], d[1] - b->dp[1], d[2] - b->dp[2]}, R[9];
-            if (dtb > 0 && len3(dd) / dtb > .25f) { memcpy(mv, dd, sizeof mv); has_mv = 1; }
-            turn_to(R, b->dp, d); m3_mul(b->W, R, b->W); m3_ortho(b->W);
-            memcpy(b->dp, d, sizeof b->dp);
-        }
-        float tipm[3], tipw[3], tipFree[3];
-        unit_v(sh, b->tip, tipm);
-        m3_app(tipw, b->W, tipm);
-        #define TANG(out, p) do { float k_ = dot3(p, d); for (int q_ = 0; q_ < 3; q_++) out[q_] = p[q_] - d[q_] * k_; } while (0)
-        TANG(tipFree, tipw); norm3(tipFree);
-        float th;
-        float facing = smooth01((dot3(home, d) + .92f) / .45f); /* the blend is unstable from almost opposite home: it fades in past that */
-        if (home_u > 0 && facing > 0) { /* going home: blend exactly onto the orientation it left with */
-            float R[9], RM[9], hw[3], ht[3], cr[3];
-            turn_to(R, home, d); m3_mul(RM, R, M); m3_app(hw, RM, tipm);
-            TANG(ht, hw); norm3(ht);
-            cross3(cr, tipFree, ht);
-            float raw = atan2f(dot3(cr, d), dot3(tipFree, ht));
-            if (!b->has_ht) { b->ht = b->al + atan2f(sinf(raw - b->al), cosf(raw - b->al)); b->has_ht = 1; }
-            else b->ht += atan2f(sinf(raw - b->ht), cosf(raw - b->ht));
-            th = b->al + (b->ht - b->al) * home_u * facing;
-            if (home_u >= 1) b->al = th;
-        } else if (home_u > 0) {
-            b->has_ht = 0;
-            float whole = roundf(b->al / TAU) * TAU;
-            b->al = whole + (b->al - whole) * expf(-dtb * 5);
-            th = b->al;
-        } else {
-            b->has_ht = 0;
-            /* all the blades point the same way: along the smash they are in or about to make */
-            const BStep *sm = NULL;
-            if (st && st->k != 3) { if (st->k == 2) sm = st; else for (int k = 0; k < b->nseq; k++) if (b->seq[k].k == 2 && b->seq[k].s >= st->s) { sm = &b->seq[k]; break; } }
-            float hd[3]; int has_hd = 0;
-            if (st && st->k == 2 && has_vel) { memcpy(hd, vel, sizeof hd); has_hd = 1; }
-            else if (sm) {
-                float A[3], v0[3]; cross3(A, F, B->dirs[sm->dir]); cross3(v0, A, d); norm3(v0);
-                TANG(hd, v0);
-                if (len3(hd) > .3f) { norm3(hd); has_hd = 1; }
-            } else if (has_mv) { TANG(hd, mv); if (len3(hd) > 1e-5f) { norm3(hd); has_hd = 1; } }
-            if (has_hd) { /* quickly, but never more than about 0.23 rad a frame, so re-aiming cannot jump */
-                float cr[3]; cross3(cr, tipFree, hd);
-                float raw = atan2f(dot3(cr, d), dot3(tipFree, hd)), tgt = b->al + atan2f(sinf(raw - b->al), cosf(raw - b->al)), was = b->al;
-                b->al += clampf((tgt - b->al) * (1 - expf(-dtb * 25)), -14 * dtb, 14 * dtb);
-                if (st && st->k == 2) b->al += (tgt - b->al) * smooth01((d[2] - .1f) / .4f); /* across the visible front, locked onto its line of flight */
-                float most = 20 * dtb;
-                b->al = was + clampf(b->al - was, -most, most);
-            }
-            th = b->al;
-        }
-        #undef TANG
-        float R[9], X[9];
-        m3_rot(R, d, th);
-        m3_mul(X, R, b->W);
-        m3_mul(X, Mt, X);
+            if (P[2] > 0) for (int v = 0; v < 3; v++) { int nv = sh->t[b->t][v]; m->glow[nv] = fmaxf(m->glow[nv], .25f * w); }
+        } else blade_fan(i, (e < BL_T2 ? d1 : -d1), clock, P, &th); /* hovering in the fan */
+        B->pos[i][0] = P[0]; B->pos[i][1] = P[1]; B->pos[i][2] = P[2];
+        B->smash[i] = (unsigned char)smash;
+        if (k <= 0) continue; /* at home: drawn as part of the shell */
+        for (int q = 0; q < 3; q++) P[q] /= sc;
+        for (int v = 0; v < 3; v++) { int nv = sh->t[b->t][v]; m->glow[nv] = fmaxf(m->glow[nv], .3f * k); }
+        /* the blade's frame in view space: along it to the tip, across, and its face toward you */
+        float T[3] = {cosf(th), -sinf(th), 0}, N[3] = {0, 0, 1}, Bx[3], Fv[9], Rb[9], Rk[9], FmT[9], S3[9], Lin[9], X[9], tmp[9];
+        cross3(Bx, N, T);
+        frame_cols(Fv, T, Bx, N);
+        m3_tr(FmT, Fm);
+        m3_mul(Rb, Fv, FmT);
+        if (k < 1) {
+            float hp[3], hn[3];
+            m3_slerp(Rk, M, Rb, k);
+            m3_app(hp, M, cen); m3_app(hn, M, sh->tn[b->t]); norm3(hn);
+            for (int q = 0; q < 3; q++) P[q] = hp[q] / CIRCUM + (P[q] - hp[q] / CIRCUM) * k + hn[q] * .3f * out; /* up off the shell first */
+        } else memcpy(Rk, Rb, sizeof Rk);
+        float g = 1 + (1 / sc - 1) * k, S[4] = {(1 + (S2[0] - 1) * k) * g, S2[1] * k * g, S2[2] * k * g, (1 + (S2[3] - 1) * k) * g};
+        float S3v[9] = {S[0], S[1], 0, S[2], S[3], 0, 0, 0, 1};
+        memcpy(S3, S3v, sizeof S3);
+        m3_mul(tmp, Fm, S3); m3_mul(tmp, tmp, FmT); m3_mul(Lin, Rk, tmp);
+        m3_mul(X, Mt, Lin);
+        float xc[3], pv[3], tv[3];
+        m3_app(xc, X, cen); m3_app(pv, Mt, P);
+        for (int q = 0; q < 3; q++) tv[q] = pv[q] - xc[q] / CIRCUM;
         m->tmi[b->t] = (unsigned char)tm_add(m, X);
-        m->sharp_v[b->t] = (signed char)(b->tip < 128 ? b->tip : -1);
-        m->sharp_k[b->t] = has_vel ? 1 - loose : 0; /* drawn out into a dart by its speed */
-        float sheen = .22f * (1 - loose) / .88f;
-        if (sheen > .02f) for (int k = 0; k < 3; k++) m->glow[sh->t[b->t][k]] = fmaxf(m->glow[sh->t[b->t][k]], sheen);
-        c->w->grp[b->g] += (.18f + .14f * loose) * lift; /* a layer well out from the core, further when loose */
+        tt_set(m, b->t, tv, 1);
     }
-    /* the core carries momentum: its spin chases what the smash wants and coasts down after */
-    float k = 1 - expf(-dtb * (has_want ? 4 : 3.5f));
-    for (int q = 0; q < 3; q++) B->core_v[q] += ((has_want ? B->want[q] : 0) - B->core_v[q]) * k;
+    /* the core carries momentum: its spin chases what the sweep wants and coasts down after */
+    float kk = 1 - expf(-dtb * (has_want ? 4 : 3.5f));
+    for (int q = 0; q < 3; q++) B->core_v[q] += (want[q] - B->core_v[q]) * kk;
     float cw = len3(B->core_v);
     if (cw > 1e-4f) { float ax[3] = {B->core_v[0] / cw, B->core_v[1] / cw, B->core_v[2] / cw}, a[3], R[9]; to_turn_space(s, ax, a); m3_rot(R, a, cw * dtb); m3_mul(m->q, R, m->q); m3_ortho(m->q); }
 }
@@ -1360,7 +1343,7 @@ const Routine ROUTINES[RT_N] = {
     [RT_PUZZLE] = {"Puzzle", ST_THINK, 0, 0, r_puzzle, NULL, "One layer rises in separate pieces; both turn like a cube being solved: two quick turns, a halt, three times."},
     [RT_SMOOTH] = {"Smooth puzzle", ST_THINK, 0, 0, r_smooth, NULL, "The puzzle with eased turns that flow into each other; only the halt is still."},
     [RT_LONG] = {"Long spin", ST_THINK, 0, 0, r_long, NULL, "One layer spins three full turns, then the other spins back, while the shell turns slowly."},
-    [RT_BLADES] = {"Blades", ST_THINK, 0, 0, r_blades, NULL, "Single triangles float out behind the core and smash across the front in pairs, like a volley of arrows."},
+    [RT_BLADES] = {"Blades", ST_THINK, 0, 0, r_blades, NULL, "Five triangles leave the shell as long thin blades, hover in a fan behind the core, sweep across the front in a V like a skein of geese, hover on the far side, sweep back and go home."},
     [RT_ENGINE] = {"Engine", ST_WORK, 0, 0, r_engine, NULL, "A turbine belt runs round the middle while the patches on the caps fire in order like pistons."},
     [RT_GYRO] = {"Gyro", ST_WORK, 0, 0, r_gyro, axes_enter, "Two belts at right angles run against each other like the rings of a gyroscope."},
     [RT_HELIX] = {"Helix", ST_WORK, 0, 0, r_helix, axes_enter, "The shell turns while a spiral of lifted patches climbs it, like a screw being driven."},
@@ -1510,12 +1493,71 @@ static void w_constellation(Ctx *c, float u, float k, int start) { /* a short ch
     }
     for (int i = 0; i < W->n && i < 6; i++) { float e = u - i * .1f; if (e > 0 && e < .55f && W->path[i] < sh->nv) m->glow[W->path[i]] = fmaxf(m->glow[W->path[i]], .95f * k); }
 }
+/* Shatter: the shell breaks into a few big shards (each a patch of neighbouring triangles) that burst apart, drift
+ * and tumble, a couple of them flung well out, then fly back together and lock in place. The shards, their
+ * directions, distances and spins come from a hash of the action's seed, so nothing needs keeping. While apart the
+ * whole thing is drawn smaller, so even the far shards stay inside the tile. */
+#define SHARDS 6
+static float hash01(unsigned x) { x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16; return (x & 0xffffff) / 16777216.0f; }
+static void w_shatter(Ctx *c, float u, float k, int start) {
+    (void)k;
+    Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M;
+    if (!sh->nt) return;
+    if (start) { /* the blow: a ring, a flash of sparks */
+        m->ws.g = (int)(mrand(s) * 1e6f);
+        ring(m, c->now, .7f); flash(m, sh->nv, .9f);
+        float z[3] = {0, 0, 0};
+        spark_at(s, M, z, .5f, 32, RGB255(255, 236, 200));
+    }
+    const float BURST = .06f, BACK = .74f; /* fractions of the action */
+    float far = u < BURST ? outx(u / BURST) : u < BACK ? 1 + .2f * (u - BURST) / (BACK - BURST) : 1.2f * (1 - io3((u - BACK) / (1 - BACK)));
+    float spin = u < BACK ? u / BACK : 1 - io3((u - BACK) / (1 - BACK)); /* turned the most just before they come back */
+    float apart = fminf(1, far), shrink = 1 - .35f * apart;                /* drawn smaller while apart */
+    unsigned seed = (unsigned)m->ws.g;
+    /* the shards: SHARDS seed directions, each triangle going with the nearest */
+    float sd[SHARDS][3], sc[SHARDS][3] = {{0}}; int cnt[SHARDS] = {0}, of[MAX_T];
+    for (int j = 0; j < SHARDS; j++) {
+        float z = 2 * hash01(seed + 101u * j) - 1, a = TAU * hash01(seed + 101u * j + 7), r = sqrtf(fmaxf(0, 1 - z * z));
+        set3(sd[j], r * cosf(a), r * sinf(a), z);
+    }
+    for (int t = 0; t < sh->nt; t++) {
+        int best = 0; float bd = -9;
+        for (int j = 0; j < SHARDS; j++) { float d = dot3(sh->tn[t], sd[j]); if (d > bd) { bd = d; best = j; } }
+        of[t] = best; cnt[best]++;
+        for (int v = 0; v < 3; v++) for (int q = 0; q < 3; q++) sc[best][q] += sh->v[sh->t[t][v]][q] / 3;
+    }
+    int ti[SHARDS] = {0}, nfar = 0;
+    float tr[SHARDS][3];
+    for (int j = 0; j < SHARDS; j++) {
+        if (!cnt[j]) continue;
+        float cen[3], dir[3], ax[3], R[9], rc[3];
+        for (int q = 0; q < 3; q++) cen[q] = sc[j][q] / cnt[j];
+        float h1 = hash01(seed + j * 4u + 1), h2 = hash01(seed + j * 4u + 2), h3 = hash01(seed + j * 4u + 3), h4 = hash01(seed * 7u + j);
+        memcpy(dir, cen, sizeof dir); norm3(dir);
+        float jit[3] = {h1 - .5f, h2 - .5f, h3 - .5f};
+        for (int q = 0; q < 3; q++) dir[q] += .5f * jit[q];
+        norm3(dir);
+        set3(ax, h2 - .5f, h3 - .5f, h1 - .5f); norm3(ax);
+        m3_rot(R, ax, (1.2f + 2.8f * h4) * (h1 < .5f ? -1 : 1) * spin);
+        m3_scale(R, shrink);
+        m3_app(rc, R, cen); /* turned about the shard's centre, which is drawn in a little: R p + (k c - R c) */
+        int flung = h4 > .62f && nfar < 2; /* one or two go much further */
+        nfar += flung;
+        float dist = (flung ? .36f + .1f * h2 : .13f + .12f * h3) * far;
+        for (int q = 0; q < 3; q++) tr[j][q] = dir[q] * dist + (cen[q] * shrink - rc[q]) / CIRCUM;
+        ti[j] = tm_add(m, R);
+    }
+    for (int t = 0; t < sh->nt; t++) { m->tmi[t] = (unsigned char)ti[of[t]]; tt_set(m, t, tr[of[t]], 1); }
+    c->w->rate = 0;
+    c->w->bright *= 1 + .6f * expf(-u * 30);
+}
 static void w_tumble(Ctx *c, float u, float k, int start) { (void)u; (void)k; if (start) { float a[3]; rand_dir(c->s, a); turn(c->s, a, PI_F, 1.3f, 0, c->now); } c->w->rate = 0; }
 
 /* the geometric actions, by W_ name (the soft ones have none: session.c plays them) */
 static const WhimFn WHIM_RUN[W_N] = {
     [W_ALIGN] = w_align, [W_STEP] = w_step, [W_UNFOLD] = w_unfold, [W_SCAN] = w_scan, [W_SPIKE] = w_spike, [W_CRAZY] = w_crazy,
     [W_RIPPLE] = w_ripple, [W_ORBIT] = w_orbit, [W_PETAL] = w_petal, [W_CONSTELLATION] = w_constellation, [W_TUMBLE] = w_tumble,
+    [W_SHATTER] = w_shatter,
 };
 static void whim(Ctx *c) {
     Session *s = c->s; Motion *m = c->m;
@@ -1543,8 +1585,8 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     m->ang_on = 0; m->scan_a = 0; m->inner = 0;
     /* what a routine sets afresh every frame */
     memset(m->tmi, 0, sizeof m->tmi);
-    m->ntm = 0; m->tt_on = m->ta_on = m->sharp_on = m->trail_on = 0; m->squash = 0; m->hole = 0;
-    memset(m->tt, 0, sizeof m->tt); memset(m->sharp_k, 0, sizeof m->sharp_k);
+    m->ntm = 0; m->tt_on = m->ta_on = m->trail_on = 0; m->squash = 0; m->hole = 0;
+    memset(m->tt, 0, sizeof m->tt);
 
     /* particles and rings age */
     for (int i = 0; i < MAX_SPARK; i++) {
