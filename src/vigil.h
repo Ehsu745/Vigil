@@ -98,6 +98,7 @@ extern const Carry CARRY;
 enum { W_NONE, W_LOOK, W_PEEK, W_TWIRL, W_SHIVER, W_BLINK,
        W_ALIGN, W_STEP, W_UNFOLD, W_SCAN, W_SPIKE, W_CRAZY, /* geometric ones, played by motion.c */
        W_RIPPLE, W_ORBIT, W_PETAL, W_CONSTELLATION, W_TUMBLE,
+       W_SHATTER,   /* falls apart and comes back together (never picked on its own: the panel's easter egg, or Settings) */
        W_N };
 typedef struct {
     const char *name;
@@ -162,7 +163,7 @@ void motion_map_init(void);               /* sets MOTION_MAP to the defaults onc
 #define MAX_SPARK 192
 #define MAX_RING 6
 #define MAX_TRAIL 20
-#define MAX_BLADE 20
+#define MAX_BLADE 5
 #define NDUST 140
 #define NSTAR 22
 typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /* kind: 0 in-out, 1 speeds up and stops dead, 2 jerks out and back */
@@ -177,9 +178,12 @@ typedef struct { double at; float a; } MRing;                              /* a 
 /* Each routine's own working state: Motion.rs holds the running routine's, cleared to zero as it starts. */
 typedef struct { float stir[3]; double next; } OracleRS;                    /* IDLE: where the pointer stirs it */
 typedef struct { signed char layer[MAX_T]; float gap[MAX_T], seq_s[6], seq_d[6], ax[3], end, dir; int flags; double at; } ThinkRS;
-typedef struct { unsigned char k, dir; float s, d; } BStep;                 /* k: 0 gather, 1 shuffle, 2 smash, 3 home */
-typedef struct { int g, t, tip, init, nseq, has_ht; float slot, lag, side, gd, W[9], dp[3], al, ht; BStep seq[9]; } Blade;
-typedef struct { Blade blade[MAX_BLADE]; int n, lead; float dirs[4][3], fold, end, core_v[3], want[3]; double at; } BladesRS;
+typedef struct { int t, tip, a, b; float lt[2], la[2]; } Blade; /* its triangle, tip node and the other two; their places in its own frame */
+typedef struct {
+    Blade blade[MAX_BLADE]; int n, dir; float core_v[3]; double at;
+    float pos[MAX_BLADE][3];         /* each blade in view space, in shell radii (x right, y down as drawn, z toward you) */
+    unsigned char smash[MAX_BLADE];  /* 1 while it sweeps round the side and front (what the panel's easter egg hits with) */
+} BladesRS;
 typedef struct { unsigned char belt[MAX_T], order[MAX_T]; int n, built; } EngineRS; /* built: the cut it was made for */
 typedef struct { float ax[3], ax2[3]; } AxesRS;                             /* Gyro, Helix */
 typedef struct { float ax[3], row_at; unsigned char order[MAX_T]; int start[6], row, built; } TypewriterRS;
@@ -238,11 +242,9 @@ typedef struct {
     /* set by a routine (or action) every frame, zero otherwise; read by the renderer */
     unsigned char tmi[MAX_T];            /* each triangle's own matrix: tmx[tmi - 1] (0 = none), applied after it slid out */
     float tmx[MAX_T + 1][9];
-    int ntm, tt_on, ta_on, sharp_on, trail_on;
+    int ntm, tt_on, ta_on, trail_on;
     float tt[MAX_T][3];                  /* each triangle carried off whole, shell units */
     float talpha[MAX_T];                 /* how see-through each triangle is (1 = as usual), when ta_on */
-    signed char sharp_v[MAX_T];          /* a blade: its tip node, stretched out by sharp_k */
-    float sharp_k[MAX_T];
     float squash, sq_ax[3];              /* the shell pressed flat along sq_ax (Compressor) */
     float bright;                        /* core and threads brighter by this factor (1 = as usual) */
     float hole;                          /* the black hole's void, 0..1 (its dust and stars: rs.hole) */

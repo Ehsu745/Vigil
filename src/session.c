@@ -71,6 +71,7 @@ const Whim WHIMS[W_N] = {
     [W_PETAL] = {"petal", 2.2f, 1, 0, "The patches round one node open like a flower, ring by ring, and close."},
     [W_CONSTELLATION] = {"constellation", 2.4f, 1, 0, "A short chain of neighbouring nodes lights up one by one, then fades."},
     [W_TUMBLE] = {"tumble", 1.6f, 1, 0, "A slow half turn about a random axis that settles exactly."},
+    [W_SHATTER] = {"shatter", 4.2f, 0, 0, "Breaks into a few big shards that burst apart, a couple flung well out, tumble, then fly back together."},
 };
 
 /* The motion map's defaults, worked out from the tables: each state may run the routines made for it, and play

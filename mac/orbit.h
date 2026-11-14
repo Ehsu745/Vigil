@@ -9,7 +9,7 @@
 #define VIGIL_ORBIT_H
 #include <math.h>
 
-typedef struct { float px, py, vx, vy, w, rest; int free, init; } Orbit;
+typedef struct { float px, py, vx, vy, w, rest, hold; int free, init; } Orbit; // hold: seconds a loose one cannot be caught yet
 typedef struct { float K, C, KT, CT, BREAK, CATCH; } OrbitK;
 static const float GRAVITIES[4] = {1, 2, 4, 8}; // Floaty .. Firm: the orbit spring's strength, times the lightest
 static const float ORBIT_BOUNCE = 0.7f;         // how much speed a bounce off a screen edge keeps
