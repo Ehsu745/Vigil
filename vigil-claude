@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Starts Claude Code so the Vigil panel can type a reply into it without bringing its window to the front.
+
+    vigil-claude [claude's own arguments...]
+
+It runs `claude` in a pseudo-terminal of its own and passes everything through unchanged (keys, output, window
+size), so it looks and behaves exactly as `claude` does. Besides, it listens on a pipe of its own,
+~/.dodeca-core/inbox/<its pid> (mode 600, next to the events file, or $DODECA_EVENTS's folder): what the panel
+writes there, ended by a NUL, is pasted into Claude Code as typed text and Enter is pressed after it, while the
+terminal stays where it is. The hook notes the pid at SessionStart (DODECA_INBOX, with DODECA_RICH=1), which is
+how the panel finds the pipe. Alias it: alias claude=vigil-claude.
+
+Only the standard library. Without a terminal (stdin not a tty) it simply runs claude.
+"""
+import errno
+import fcntl
+import os
+import pty
+import select
+import signal
+import sys
+import termios
+import time
+import tty
+
+PASTE_ON, PASTE_OFF = b"\x1b[?2004h", b"\x1b[?2004l"   # the app asking for bracketed paste, and dropping it
+
+
+def inbox_dir():
+    ev = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events.jsonl"))
+    return os.path.join(os.path.dirname(ev), "inbox")
+
+
+def winsize(fd):
+    try:
+        return fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+    except OSError:
+        return None
+
+
+def main():
+    cmd = ["claude"] + sys.argv[1:]
+    if not os.isatty(0):
+        os.execvp(cmd[0], cmd)
+    d = inbox_dir()
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fifo = os.path.join(d, str(os.getpid()))
+    try:
+        os.unlink(fifo)
+    except FileNotFoundError:
+        pass
+    os.mkfifo(fifo, 0o600)
+    os.environ["DODECA_INBOX"] = str(os.getpid())
+
+    pid, master = pty.fork()
+    if pid == 0:
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as e:
+            sys.stderr.write("vigil-claude: cannot start %s: %s\n" % (cmd[0], e.strerror))
+            os._exit(127)
+
+    ws = winsize(0)
+    if ws:
+        fcntl.ioctl(master, termios.TIOCSWINSZ, ws)
+    def resized(*_):
+        w = winsize(0)
+        if w:
+            fcntl.ioctl(master, termios.TIOCSWINSZ, w)
+    signal.signal(signal.SIGWINCH, resized)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda n, _f: os.kill(pid, n))
+
+    # the pipe: read end non-blocking, and a write end of our own kept open so it never reads as closed
+    rd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    keep = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    saved = termios.tcgetattr(0)
+    tty.setraw(0)
+    paste = False        # bracketed paste on (the app asked for it)
+    tail = b""           # the end of the last output, so a mode switch split across reads is still seen
+    buf = b""            # from the pipe, up to its NUL
+    enter_at = None      # when to press Enter after a pasted reply
+    stdin_open = True
+    status = 0
+    try:
+        while True:
+            fds = [master, rd] + ([0] if stdin_open else [])
+            wait = None if enter_at is None else max(0.0, enter_at - time.monotonic())
+            try:
+                r, _, _ = select.select(fds, [], [], wait)
+            except InterruptedError:
+                continue
+            if enter_at is not None and time.monotonic() >= enter_at:
+                os.write(master, b"\r")
+                enter_at = None
+            if master in r:
+                try:
+                    data = os.read(master, 65536)
+                except OSError as e:
+                    if e.errno != errno.EIO:
+                        raise
+                    data = b""
+                if not data:
+                    break
+                os.write(1, data)
+                seen = tail + data
+                on, off = seen.rfind(PASTE_ON), seen.rfind(PASTE_OFF)
+                if on >= 0 or off >= 0:
+                    paste = on > off
+                tail = seen[-16:]
+            if 0 in r:
+                data = os.read(0, 65536)
+                if data:
+                    os.write(master, data)
+                else:
+                    stdin_open = False
+            if rd in r:
+                try:
+                    buf += os.read(rd, 65536)
+                except BlockingIOError:
+                    pass
+                while b"\0" in buf:
+                    msg, buf = buf.split(b"\0", 1)
+                    msg = msg.replace(b"\r\n", b"\n").strip(b"\r\n")
+                    if not msg:
+                        continue
+                    if paste:
+                        os.write(master, b"\x1b[200~" + msg.replace(b"\n", b"\r") + b"\x1b[201~")
+                    else:  # no bracketed paste: one line, or the first newline would send it early
+                        os.write(master, msg.replace(b"\n", b" "))
+                    enter_at = time.monotonic() + 0.2  # Return on its own, a moment later
+    finally:
+        termios.tcsetattr(0, termios.TCSAFLUSH, saved)
+        for fd in (rd, keep):
+            os.close(fd)
+        try:
+            os.unlink(fifo)
+        except OSError:
+            pass
+        try:
+            _, st = os.waitpid(pid, 0)
+            status = os.waitstatus_to_exitcode(st)
+        except ChildProcessError:
+            pass
+    sys.exit(status if status >= 0 else 128 - status)
+
+
+if __name__ == "__main__":
+    main()
