@@ -50,8 +50,8 @@ static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, 
 
 enum { K_PICK, K_SLIDE, K_TOGGLE, K_CYCLE, K_STATE, K_RESET, K_CLOSE, K_TAB, K_MSTATE, K_MTOG, K_MPLAY };
 // the Motions page: Claude Code's states, then the panel's own
-static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR};
-static NSString *const MOT_STATE_NAMES[ST_N] = {@"Idle", @"Thinking", @"Working", @"Needs you", @"Done", @"Asleep",
+static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP, ST_READY, ST_SPEAK, ST_LISTEN, ST_TRANSCRIBE, ST_STANDBY, ST_ERROR};
+static NSString *const MOT_STATE_NAMES[ST_N] = {@"Idle", @"Thinking", @"Working", @"Needs you", @"Done", @"Asleep", @"Ready",
                                               @"Speaking", @"Listening", @"Transcribing", @"Away", @"Error"};
 static NSString *state_name(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return @"?"; }
 static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
@@ -652,7 +652,7 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     for (int rw = 0; rw < 2; rw++) {
         CGFloat y = y0 + 42 + rw * 32;
         tx(l, y, l + 86, y + 26, rowname[rw], small, S_MUTED, 0, NO);
-        int n = rw ? 5 : 6, first = rw ? 6 : 0;
+        int n = 6, first = rw ? 6 : 0;
         CGFloat cw = (r - (l + 88) - 5 * 6) / 6;
         for (int i = 0; i < n; i++) {
             int sti = MOT_STATES[first + i];

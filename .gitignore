@@ -7,3 +7,5 @@ Vigil.app/
 vigil-panel.exe
 /vigil-win
 .obsidian/
+web/vigil.wasm
+web/vigil-wasm.js

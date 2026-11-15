@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vigil: READY projectile mock</title>
+<style>
+  body { margin: 0; background: #17171a; color: #ddd; font: 14px/1.4 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 18px; font-weight: 600; margin: 18px 24px 4px; }
+  p.lead { margin: 0 24px 14px; color: #999; }
+  .grid { display: grid; grid-template-columns: 150px repeat(3, 1fr); gap: 10px; padding: 0 24px 24px; }
+  .hd { font-weight: 600; padding: 6px 2px; }
+  .hd small { display: block; font-weight: 400; color: #999; }
+  .rowlab { color: #999; align-self: center; }
+  canvas { width: 100%; aspect-ratio: 16 / 10; border-radius: 10px; display: block; }
+  .ctl { padding: 0 24px 10px; color: #999; }
+  .ctl label { margin-right: 18px; }
+</style>
+</head>
+<body>
+<h1>READY projectiles: a small triangle, highlighted</h1>
+<p class="lead">Three ways to keep the thrown piece a little triangle but make it readable on any desktop. The pointer (the ring) moves on its own; the core throws, the piece flies, misses and comes home.</p>
+<div class="ctl">
+  <label><input type="checkbox" id="slow"> slow motion</label>
+  <label><input type="checkbox" id="big"> 2× zoom</label>
+</div>
+<div class="grid" id="grid">
+  <div></div>
+  <div class="hd">A. Lit sticker<small>white-hot triangle, a thin dark keyline, a warm glow round it</small></div>
+  <div class="hd">B. Lock-on brackets<small>bright outlined triangle inside four corner brackets that pulse</small></div>
+  <div class="hd">C. Double stroke + glint<small>core-coloured fill, white then dark outline, a glint sweeping across, short streak</small></div>
+</div>
+<script>
+const BGS = [
+  { name: 'Dark desktop', draw: (g, w, h) => { g.fillStyle = '#111214'; g.fillRect(0, 0, w, h); } },
+  { name: 'Light page', draw: (g, w, h) => { g.fillStyle = '#f3f3f3'; g.fillRect(0, 0, w, h); } },
+  { name: 'Busy window', draw: (g, w, h) => {
+      g.fillStyle = '#fafafa'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#2d6cdf'; g.fillRect(0, 0, w, 26);
+      const cols = ['#c9c9c9', '#9aa4b2', '#e0b16b', '#7fb07f'];
+      for (let y = 40, i = 0; y < h; y += 14, i++) for (let x = 14; x < w - 20; x += 30 + ((i * 7 + x) % 40)) {
+        g.fillStyle = cols[(i + x) % 4]; g.fillRect(x, y, 18 + ((x * 3 + i) % 26), 6);
+      }
+      g.fillStyle = '#4a4a4a'; g.fillRect(w * 0.62, h * 0.52, w * 0.3, h * 0.36);
+    } },
+];
+const STYLES = ['A', 'B', 'C'];
+const grid = document.getElementById('grid');
+const cells = [];
+for (const bg of BGS) {
+  const lab = document.createElement('div'); lab.className = 'rowlab'; lab.textContent = bg.name; grid.appendChild(lab);
+  for (const st of STYLES) { const c = document.createElement('canvas'); grid.appendChild(c); cells.push({ c, bg, st }); }
+}
+
+// --- the scene: one core, three pieces thrown in turn at a moving pointer -------------------------------
+const CORE = '#69a0ff', CORE_HOT = '#ffb070';
+function pointerAt(t, w, h) { return [w * 0.5 + Math.cos(t * 0.7) * w * 0.3, h * 0.55 + Math.sin(t * 1.1) * h * 0.25]; }
+function ease(u) { return u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u); }
+// a piece's cycle (3.2 s): pop out and spin (0-0.8), aim (0.8-1.1), fly (1.1-2.0), drift back (2.0-3.2)
+function pieceAt(k, t, w, h, cx, cy, R) {
+  const T = 3.2, u = ((t + k * 1.07) % T + T) % T;
+  const home = k * 2.1 + 0.4, hx = cx + Math.cos(home) * R * 0.9, hy = cy + Math.sin(home) * R * 0.9;
+  const ox = cx + Math.cos(home) * R * 1.45, oy = cy + Math.sin(home) * R * 1.45;
+  const start = t - (u - 1.1); const [px, py] = pointerAt(start, w, h); // aimed where the pointer was at launch
+  let x, y, ang, phase, out = 1;
+  if (u < 0.8) { const e = ease(u / 0.8); x = hx + (ox - hx) * e; y = hy + (oy - hy) * e; ang = u * 14; phase = 'spin'; out = e; }
+  else if (u < 1.1) { x = ox; y = oy; ang = Math.atan2(py - oy, px - ox); phase = 'aim'; }
+  else if (u < 2.0) { const e = (u - 1.1) / 0.9, f = e * e; x = ox + (px - ox) * f * 1.25; y = oy + (py - oy) * f * 1.25; ang = Math.atan2(py - oy, px - ox); phase = 'fly'; }
+  else { const e = ease((u - 2.0) / 1.2), fx = ox + (px - ox) * 1.25, fy = oy + (py - oy) * 1.25; x = fx + (hx - fx) * e; y = fy + (hy - fy) * e; ang = Math.atan2(py - oy, px - ox) + e * 3; phase = 'back'; out = 1 - e; }
+  return { x, y, ang, phase, u, out };
+}
+function triPath(g, x, y, ang, s) { // a slim triangle pointing along ang
+  g.beginPath();
+  g.moveTo(x + Math.cos(ang) * s * 1.3, y + Math.sin(ang) * s * 1.3);
+  g.lineTo(x + Math.cos(ang + 2.5) * s, y + Math.sin(ang + 2.5) * s);
+  g.lineTo(x + Math.cos(ang - 2.5) * s, y + Math.sin(ang - 2.5) * s);
+  g.closePath();
+}
+function drawCore(g, cx, cy, R, t) { // a stand-in for the wireframe shell
+  g.save(); g.globalCompositeOperation = 'lighter';
+  const grd = g.createRadialGradient(cx, cy, 0, cx, cy, R * 1.6); grd.addColorStop(0, 'rgba(105,160,255,.35)'); grd.addColorStop(1, 'rgba(105,160,255,0)');
+  g.fillStyle = grd; g.beginPath(); g.arc(cx, cy, R * 1.6, 0, 7); g.fill(); g.restore();
+  g.strokeStyle = 'rgba(200,220,255,.85)'; g.lineWidth = 1;
+  const pts = []; for (let i = 0; i < 12; i++) { const a = i / 12 * 6.283 + t * 0.3, b = (i % 3) * 0.9 - 0.9; pts.push([cx + Math.cos(a) * R * Math.cos(b * 0.6), cy + Math.sin(b) * R * 0.85 + Math.sin(a) * R * 0.25]); }
+  g.beginPath(); for (let i = 0; i < 12; i++) for (const j of [1, 3, 4]) { const p = pts[i], q = pts[(i + j) % 12]; g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); } g.stroke();
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(cx, cy, R * 0.18, 0, 7); g.fill();
+}
+function drawPointer(g, x, y, light) {
+  g.strokeStyle = light ? 'rgba(0,0,0,.55)' : 'rgba(255,255,255,.6)'; g.lineWidth = 1.5;
+  g.beginPath(); g.arc(x, y, 9, 0, 7); g.stroke();
+  g.beginPath(); g.moveTo(x - 14, y); g.lineTo(x - 5, y); g.moveTo(x + 5, y); g.lineTo(x + 14, y); g.moveTo(x, y - 14); g.lineTo(x, y - 5); g.moveTo(x, y + 5); g.lineTo(x, y + 14); g.stroke();
+}
+function glow(g, x, y, r, col, a) {
+  const grd = g.createRadialGradient(x, y, 0, x, y, r);
+  grd.addColorStop(0, col.replace('A', a)); grd.addColorStop(1, col.replace('A', 0));
+  g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+}
+
+// --- the three treatments ---------------------------------------------------------------------------------
+function styleA(g, p, s, t) { // lit sticker
+  g.save();
+  g.globalCompositeOperation = 'source-over';
+  glow(g, p.x, p.y, s * 3.2, 'rgba(255,150,60,A)', 0.55 * p.out);           // warm glow
+  triPath(g, p.x, p.y, p.ang, s);
+  g.lineJoin = 'round'; g.lineWidth = 3; g.strokeStyle = `rgba(20,12,8,${0.85 * p.out})`; g.stroke(); // dark keyline
+  g.fillStyle = `rgba(255,246,228,${p.out})`; g.fill();                       // white-hot body
+  g.lineWidth = 1.2; g.strokeStyle = `rgba(255,170,90,${p.out})`; g.stroke(); // warm rim
+  g.restore();
+}
+function styleB(g, p, s, t) { // lock-on brackets
+  g.save();
+  const pulse = 0.5 + 0.5 * Math.sin(t * 9), live = p.phase === 'aim' || p.phase === 'fly';
+  triPath(g, p.x, p.y, p.ang, s);
+  g.lineJoin = 'round'; g.lineWidth = 3.2; g.strokeStyle = `rgba(0,0,0,${0.7 * p.out})`; g.stroke();
+  g.lineWidth = 1.6; g.strokeStyle = `rgba(255,255,255,${p.out})`; g.stroke();
+  g.fillStyle = `rgba(105,160,255,${0.55 * p.out})`; g.fill();
+  if (live) { // four corner brackets round it, tightening in time with the pulse
+    const b = s * (2.1 + 0.5 * pulse), L = s * 0.8, col = p.phase === 'fly' ? '255,90,70' : '255,210,90';
+    for (const pass of [0, 1]) {
+      g.lineWidth = pass ? 1.6 : 3.6; g.strokeStyle = pass ? `rgba(${col},1)` : 'rgba(0,0,0,.55)';
+      g.beginPath();
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const x = p.x + sx * b, y = p.y + sy * b;
+        g.moveTo(x - sx * L, y); g.lineTo(x, y); g.lineTo(x, y - sy * L);
+      }
+      g.stroke();
+    }
+  }
+  g.restore();
+}
+function styleC(g, p, s, t, prev) { // double stroke + glint + streak
+  g.save();
+  if (p.phase === 'fly' && prev) { // a short streak behind it
+    const dx = p.x - prev.x, dy = p.y - prev.y, l = Math.hypot(dx, dy) || 1, len = Math.min(s * 5, l * 6);
+    const gx = p.x - dx / l * len, gy = p.y - dy / l * len;
+    const lg = g.createLinearGradient(gx, gy, p.x, p.y); lg.addColorStop(0, 'rgba(255,180,110,0)'); lg.addColorStop(1, 'rgba(255,180,110,.9)');
+    g.lineCap = 'round'; g.lineWidth = s * 0.9; g.strokeStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.moveTo(gx, gy); g.lineTo(p.x, p.y); g.stroke();
+    g.lineWidth = s * 0.55; g.strokeStyle = lg; g.stroke();
+  }
+  triPath(g, p.x, p.y, p.ang, s * 1.05);
+  g.lineJoin = 'round';
+  g.lineWidth = 5; g.strokeStyle = `rgba(0,0,0,${0.75 * p.out})`; g.stroke();      // outer dark
+  g.lineWidth = 2.6; g.strokeStyle = `rgba(255,255,255,${p.out})`; g.stroke();    // inner white
+  const hot = p.phase === 'aim' || p.phase === 'fly';
+  g.fillStyle = hot ? `rgba(255,150,80,${p.out})` : `rgba(105,160,255,${p.out})`; g.fill();
+  g.save(); triPath(g, p.x, p.y, p.ang, s * 1.05); g.clip();                         // a glint sweeping across
+  const gpos = ((t * 1.6) % 1) * s * 4 - s * 2, ca = Math.cos(p.ang + 0.8), sa = Math.sin(p.ang + 0.8);
+  const lg2 = g.createLinearGradient(p.x + ca * (gpos - s * 0.5), p.y + sa * (gpos - s * 0.5), p.x + ca * (gpos + s * 0.5), p.y + sa * (gpos + s * 0.5));
+  lg2.addColorStop(0, 'rgba(255,255,255,0)'); lg2.addColorStop(0.5, `rgba(255,255,255,${0.9 * p.out})`); lg2.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = lg2; g.fillRect(p.x - s * 3, p.y - s * 3, s * 6, s * 6); g.restore();
+  g.restore();
+}
+
+let t0 = performance.now(), simT = 0, last = t0;
+const prevs = new Map();
+function frame(now) {
+  const dt = (now - last) / 1000; last = now;
+  simT += dt * (document.getElementById('slow').checked ? 0.25 : 1);
+  const zoom = document.getElementById('big').checked ? 2 : 1;
+  for (const cell of cells) {
+    const c = cell.c, r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = r.width, h = r.height;
+    cell.bg.draw(g, w, h);
+    g.save(); g.translate(w / 2, h / 2); g.scale(zoom, zoom); g.translate(-w / 2, -h / 2);
+    const cx = w * 0.5, cy = h * 0.45, R = Math.min(w, h) * 0.13, s = 5.5;
+    drawCore(g, cx, cy, R, simT);
+    const [mx, my] = pointerAt(simT, w, h);
+    for (let k = 0; k < 3; k++) {
+      const p = pieceAt(k, simT, w, h, cx, cy, R), key = cell.st + cell.bg.name + k;
+      if (cell.st === 'A') styleA(g, p, s, simT);
+      else if (cell.st === 'B') styleB(g, p, s, simT);
+      else styleC(g, p, s, simT, prevs.get(key));
+      prevs.set(key, { x: p.x, y: p.y });
+    }
+    drawPointer(g, mx, my, cell.bg.name !== 'Dark desktop');
+    g.restore();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
