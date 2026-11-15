@@ -23,7 +23,7 @@ COMMAND = "python3 " + shlex.quote(HOOK_FILE)
 RICH_COMMAND = "DODECA_RICH=1 " + COMMAND
 PANE_COMMAND = "sh " + shlex.quote(os.path.join(os.path.dirname(HOOK_FILE), "open_pane.sh"))
 EVENTS = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
-          "PostToolUse", "Notification", "Stop"]
+          "PostToolUse", "Notification", "Stop", "SubagentStart", "SubagentStop"]
 TOOL_EVENTS = {"PreToolUse", "PostToolUse"}
 
 
