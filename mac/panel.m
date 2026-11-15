@@ -141,12 +141,15 @@ static void pointer_visible(BOOL on) {
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
 static struct {
     int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
-    float core, scale, tip_size, gravity, orbit_tilt; int orbit3d, others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin, smooth; unsigned tip_custom, text_custom;
+    float core, scale, tip_size, gravity, orbit_tilt; int orbit3d, others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin, smooth, all_spaces, always; unsigned tip_custom, text_custom;
 } g_launch;
+// Settings > Follow me: 0 stays in its Space, 1 every Space while iTerm2 is in front (--all-spaces), 2 every Space over any app (--always too)
+static int follow_mode(void) { return g_all_spaces ? (g_always ? 2 : 1) : 0; }
 static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.smooth = g_smooth;
+    g_launch.all_spaces = g_all_spaces; g_launch.always = g_always;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
     g_launch.gravity = g_gravity; g_launch.orbit3d = g_orbit3d; g_launch.orbit_tilt = g_orbit_tilt; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
     g_launch.tip_middle = g_tip_middle; g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
@@ -157,6 +160,7 @@ static void remember_launch(void) {
 static void restore_launch(void) {
     g_voice = g_launch.voice; g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize; g_confirm_send = g_launch.confirm_send;
     g_smooth = g_launch.smooth;
+    g_all_spaces = g_launch.all_spaces; g_always = g_launch.always;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
     g_gravity = g_launch.gravity; g_orbit3d = g_launch.orbit3d; g_orbit_tilt = g_launch.orbit_tilt; g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
     g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
@@ -193,6 +197,7 @@ static void load_settings(void) {
     if ((n = j[@"tipCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_tip_custom = n.unsignedIntValue;
     if ((n = j[@"textCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_text_custom = n.unsignedIntValue;
     if ((n = j[@"wheelSpin"]) && n.intValue >= 0 && n.intValue < 5) g_wheel_spin = n.intValue;
+    if ((n = j[@"follow"]) && n.intValue >= 0 && n.intValue <= 2) { g_all_spaces = n.intValue > 0; g_always = n.intValue == 2; } // Settings > Follow me
     if ((n = j[@"readyAttacks"])) READY_ATKS = n.unsignedIntValue & ((1u << RA_N) - 2); // READY's attacks (Settings > Motions)
     NSArray *rt = j[@"mapRoutines"], *act = j[@"mapActions"]; // Settings > Motions, as the Windows panel keeps it
     motion_map_init();
@@ -222,7 +227,7 @@ static void save_settings(void) {
                         @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0), @"gravity": @(g_gravity),
                         @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt),
                         @"tipMono": @(g_tip_mono != 0), @"tipMiddle": @(g_tip_middle != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
-                        @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin),
+                        @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin), @"follow": @(follow_mode()),
                         @"smooth": @(SMOOTH_NAME[g_smooth])};
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
@@ -1256,6 +1261,13 @@ static BOOL app_fills_screen_at(NSPoint p, double now) {
     return fills;
 }
 
+// the panel's windows: may sit in a full-screen Space; with Follow me, in every Space
+static NSWindowCollectionBehavior follow_behavior(void) {
+    NSWindowCollectionBehavior b = NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
+    if (g_all_spaces) b |= NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
+    return b;
+}
+
 @implementation AppDelegate
 
 // The right edge of the screen, a sixth of its width unless --width says otherwise. With --fit-pane (what
@@ -1302,6 +1314,15 @@ static BOOL app_fills_screen_at(NSPoint p, double now) {
     else { [self.panel orderOut:nil]; [self.view hideSats]; }
 }
 
+// Follow me changed (Settings, or a reset): every window of the panel joins every Space, or only this one
+- (void)applyFollow {
+    NSWindowCollectionBehavior b = follow_behavior();
+    self.panel.collectionBehavior = b;
+    self.reply.behavior = b;
+    self.tip.collectionBehavior = b;
+    self.preview.collectionBehavior = b;
+    [self updateVisibility];
+}
 - (void)appChanged:(NSNotification *)note { (void)note; [self updateVisibility]; }
 - (void)screenChanged:(NSNotification *)note { (void)note; [self place]; }
 
@@ -1326,8 +1347,7 @@ static BOOL app_fills_screen_at(NSPoint p, double now) {
     p.ignoresMouseEvents = YES;  // clicks go to whatever is underneath
     p.hidesOnDeactivate = NO;
     p.releasedWhenClosed = NO;
-    p.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle; // may sit in a full-screen Space
-    if (g_all_spaces) p.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
+    p.collectionBehavior = follow_behavior();
     self.view = [[PanelView alloc] initWithFrame:NSMakeRect(0, 0, 290, 600)];
     self.view.actions = self;
     [self.view registerForDraggedTypes:[ReplyBox dragTypes]];
@@ -2081,7 +2101,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     NSDictionary *d = @{@"shape": @(g_shape_name), @"glow": @(g_glow), @"scale": @(g_scale), @"core": @(g_core), @"frame": @(g_frame),
                         @"others": @(g_others != 0), @"gravity": @(g_gravity), @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
                         @"tipSize": @(g_tip_size), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
-                        @"textCustom": @(g_text_custom), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
+                        @"textCustom": @(g_text_custom), @"follow": @(follow_mode()), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
                         @"away": @(g_away_after), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0),
                         @"summarize": @(g_summarize_claude != 0), @"confirmSend": @(g_confirm_send != 0), @"fontName": g_font_name};
     return d[key];
@@ -2105,6 +2125,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     else if ([key isEqualToString:@"confirmSend"]) g_confirm_send = [v boolValue];
     else if ([key isEqualToString:@"glow"]) g_glow = [v floatValue];
     else if ([key isEqualToString:@"smooth"]) g_smooth = [v intValue]; // the clock follows at the next tick
+    else if ([key isEqualToString:@"follow"]) { g_all_spaces = [v intValue] > 0; g_always = [v intValue] == 2; [self applyFollow]; }
     else if ([key isEqualToString:@"away"]) g_away_after = [v doubleValue];
     else if ([key isEqualToString:@"frame"]) snprintf(g_frame, sizeof g_frame, "%s", [v UTF8String]);
     else if ([key isEqualToString:@"core"]) g_core = [v floatValue];
@@ -2148,6 +2169,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     g_voice = !voice; [self setVoice:voice];
     g_auto_speak = g_launch.auto_speak; g_summarize_claude = g_launch.summarize && g_claude;
     [self styleTips];
+    [self applyFollow];
     [self place];
     [self.view relayout];
     [self.settings changed];
@@ -2387,7 +2409,7 @@ static void usage(void) {
          "  --inset POINTS     empty space above the first session, inside the panel (default 30)\n"
          "  --font NAME        text font (default Monaco)        --font-size N   (default 12)\n"
          "  --bg RRGGBB        solid background colour instead of see-through\n"
-         "  --all-spaces       follow you to every Space instead of staying in the one it was opened in\n"
+         "  --all-spaces       follow you to every Space instead of staying in the one it was opened in (also Settings > Follow me)\n"
          "  --always           with --all-spaces: stay visible when iTerm2 is not the app in front\n"
          "  --glow X  --core X  --events PATH   as in vigil\n"
          "  --smooth NAME      how often cores are redrawn: saver | balanced (default) | smooth | max\n"

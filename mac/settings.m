@@ -42,6 +42,7 @@ static NSDictionary<NSString *, NSArray *> *choices(void) {
         @"tipMiddle": @[@NO, @YES],
         @"labelsHover": @[@YES, @NO],
         @"away": @[@60, @120, @300, @0],
+        @"follow": @[@0, @1, @2],
     };
     return d;
 }
@@ -664,6 +665,14 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     tx(92, 859, 184, 885, aw >= 0 ? AWAY_TEXT[aw] : @"custom", label, S_TEXT, 1, NO);
     [self hit:92 :859 :184 :885 kind:K_CYCLE key:@"away" val:0];
     tx(192, 856, 420, 888, aw == 3 ? @"(cores never rest)" : @"away: cores show STANDBY", label, S_MUTED, 0, NO);
+    // Follow me: which Spaces the panel is in (as --all-spaces, and --always)
+    static NSString *const FOLLOW_TEXT[3] = {@"Off", @"With iTerm2", @"Everywhere"};
+    int fm = [self current:@"follow"];
+    tx(420, 856, 492, 888, @"Follow me", label, S_MUTED, 0, NO);
+    BOOL hf = [self isHot:K_CYCLE key:@"follow" val:0];
+    box(492, 859, 600, 885, 13, hf ? S_CHIP_HOT : S_CHIP, fm > 0 ? S_OR : 0, fm > 0 ? 1.5 : 0);
+    tx(492, 859, 600, 885, FOLLOW_TEXT[fm < 0 ? 0 : fm], label, S_TEXT, 1, NO);
+    [self hit:492 :859 :600 :885 kind:K_CYCLE key:@"follow" val:0];
     BOOL can = [self.host settingsSaved], hr = [self isHot:K_RESET key:nil val:0];
     tx(640, 856, 856, 888, @"Reset to defaults", label, can ? (hr ? 0xFFB877 : S_OR) : 0x55555E, 2, NO);
     if (can) [self hit:740 :860 :856 :884 kind:K_RESET key:nil val:0];
@@ -823,7 +832,7 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         return;
     }
     case K_TOGGLE: [self choose:h.key value:@(![[self value:h.key] boolValue])]; return;
-    case K_CYCLE: { int i = [self current:h.key]; [self choose:h.key value:choices()[h.key][(i + 1) % 4]]; return; }
+    case K_CYCLE: { NSArray *c = choices()[h.key]; int i = [self current:h.key]; [self choose:h.key value:c[(NSUInteger)(i + 1) % c.count]]; return; }
     case K_STATE: self.preview.state = PV_STATES[h.val]; [self setNeedsDisplay:YES]; return;
     case K_RESET: [self.host resetSettings]; [self setNeedsDisplay:YES]; return;
     case K_TAB: self.tab = h.val; self.hot = nil; [self setNeedsDisplay:YES]; return;
