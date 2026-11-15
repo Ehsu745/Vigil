@@ -535,6 +535,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     Canvas _cv;
     int _lastCount;
     NSRect _core[MAX_SESS + 1]; // where each polyhedron was last drawn, for coreAt:
+    NSRect _drawn[MAX_SESS + 1]; // the same, but kept for a small core behind the main one (READY's pieces fly on)
     int _coreN;
     // the gesture in progress
     NSString *_downSid, *_clickSid;
@@ -971,7 +972,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     for (int pass = 0; pass < 3; pass++) // the small ones behind it, the one in focus, the small ones in front
         for (int i = 0; i < n; i++) {
             if (i == fi ? pass != 1 : pass != (depth[i] < 0 ? 0 : 2)) continue;
-            if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
+            if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = _drawn[i] = NSZeroRect; continue; } // Settings > Other sessions off
             const Session *s = &room->s[i];
             int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
             if (px < 32) px = 32;
@@ -981,7 +982,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
                 double rate = core_rate(s, now) * (i == fi || s->mo.loose_on ? 1 : 0.5); // the small ones need fewer frames
                 _due[i] = now + 1.0 / rate - 0.01;
             }
-            _core[i] = at[i];
+            _core[i] = _drawn[i] = at[i];
             if (own[i]) { [self showSat:sid_of(s) image:_img[i] rect:at[i] now:now]; [shown addObject:sid_of(s)]; continue; }
             CGFloat dim = depth[i] < 0 ? 1 - 0.35 * fmin(1, -depth[i] / fmax(1, ry)) : 1; // the far side a little dimmer
             CGContextSetAlpha(ctx, dim);
@@ -1154,7 +1155,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
             double rate = core_rate(s, now); // Balanced: 1.5 times a terminal's rate
             _due[i] = now + 1.0 / rate - 0.01;
         }
-        _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
+        _core[i] = _drawn[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
         if (_reordering && [_downSid isEqualToString:sid_of(s)]) { held = i; continue; } // drawn last, at the mouse
         CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
         focus_frame(ctx, _core[i], s, now);
@@ -1171,6 +1172,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     [self readyLayer:room now:now];
 }
 
+- (NSRect)drawnOnScreen:(int)i { return NSIsEmptyRect(_drawn[i]) ? NSZeroRect : [self.window convertRectToScreen:[self convertRect:_drawn[i] toView:nil]]; }
 - (void)hideReady { [_layer hide]; [_hearts hide]; }
 // READY: the pieces one core throws, on a layer over the screen, and the hearts of its dodge game
 - (void)readyLayer:(const Room *)room now:(double)now {
@@ -1180,15 +1182,15 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     int who = -1, game = -1;
     for (int i = 0; i < room->n && i < _coreN; i++) {
         const Session *s = &room->s[i];
-        if (NSIsEmptyRect(_core[i]) || !_img[i]) continue;
+        if (NSIsEmptyRect(_drawn[i]) || !_img[i]) continue;
         if (who < 0 && s->mo.loose_on) who = i;
         if (game < 0 && (s->game_on || now - s->game_end < 1.2) && s->game_at > 0) game = i;
     }
     if (who >= 0 && self.window.visible)
-        [_layer draw:&room->s[who] core:[self coreOnScreen:who] pixels:(int)CGImageGetWidth(_img[who]) shape:&g_shape glow:g_glow coreFrac:g_core now:now];
+        [_layer draw:&room->s[who] core:[self drawnOnScreen:who] pixels:(int)CGImageGetWidth(_img[who]) shape:&g_shape glow:g_glow coreFrac:g_core now:now];
     else [_layer hide];
     if (game >= 0 && self.window.visible) {
-        NSRect r = [self coreOnScreen:game];
+        NSRect r = [self drawnOnScreen:game];
         NSScreen *sc = nil;
         for (NSScreen *x in [NSScreen screens]) if (NSPointInRect(NSMakePoint(NSMidX(r), NSMidY(r)), x.frame)) sc = x;
         [_hearts show:&room->s[game] screen:sc ?: self.window.screen now:now];
