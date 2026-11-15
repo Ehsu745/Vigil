@@ -1219,6 +1219,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @property(strong) NSMutableDictionary<NSString *, NSNumber *> *overlay; // sid -> a panel state shown instead of its own
 @property(strong) Speaker *speaker;
 @property(strong) NSMutableDictionary<NSString *, NSArray *> *seen; // sid -> @[last reply time, last NEEDS YOU time] already handled
+@property(copy) NSString *watchedIterm; // the iTerm2 session in front (its UUID) while iTerm2 is the app in front, else nil
+@property BOOL askingIterm;             // a question to iTerm2 is under way
+@property double askedIterm;            // when it was last asked
 @property(strong) NSMutableSet<NSString *> *summarizing;             // sids waiting for claude -p
 @property(strong) Listener *listener;
 @property(copy) NSString *pendingSid, *pendingText; // a recognized reply waiting to be sent
@@ -1416,6 +1419,8 @@ static NSWindowCollectionBehavior follow_behavior(void) {
         int n = tail_poll(&g_tail, g_ev, 1024);
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
     }
+    [self followIterm:now];
+    for (int i = 0; i < g_room.n; i++) if (g_room.s[i].unread && [self watching:&g_room.s[i]]) g_room.s[i].unread = 0; // seen in its tab: no READY, no reading aloud
     [self trackMouse:now];
     [self watchForNews:now];
     [self updateFocus:now];
@@ -1688,6 +1693,44 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
 // New replies and new permission requests. With --auto-speak a reply is read out if you were at the
 // keyboard or mouse in the last 60 seconds, and a permission request jumps the queue. What was already
 // there when the panel started is never read out.
+// Which iTerm2 session is in front, asked of iTerm2 about once a second while it is the app in front (by osascript, in the
+// background: the panel never waits for it). A session whose own tab you are looking at needs no reminders.
+- (void)followIterm:(double)now {
+    NSString *front = [NSWorkspace sharedWorkspace].frontmostApplication.bundleIdentifier;
+    if (![front isEqualToString:@"com.googlecode.iterm2"]) { self.watchedIterm = nil; return; }
+    if (self.askingIterm || now - self.askedIterm < 1.0) return;
+    self.askingIterm = YES;
+    self.askedIterm = now;
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    task.arguments = @[@"-e", @"tell application \"iTerm2\" to get id of current session of current window"];
+    NSPipe *out = [NSPipe pipe];
+    task.standardOutput = out;
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    __weak AppDelegate *me = self;
+    task.terminationHandler = ^(NSTask *t) {
+        NSData *d = [out.fileHandleForReading readDataToEndOfFile];
+        NSString *uuid = t.terminationStatus == 0 ? [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+                                                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *s = me;
+            if (!s) return;
+            s.askingIterm = NO;
+            s.watchedIterm = uuid.length ? uuid : nil; // (Automation not allowed, or no window: nobody is watched)
+        });
+    };
+    if (![task launchAndReturnError:NULL]) self.askingIterm = NO;
+}
+// you are looking at this session: its iTerm2 tab is in front, and you have used the keyboard or mouse in the last minute
+- (BOOL)watching:(const Session *)s {
+    if (!self.watchedIterm || self.away) return NO;
+    NSString *iterm = msg_text(s, @"iterm");
+    NSRange colon = [iterm rangeOfString:@":"];
+    if (colon.location != NSNotFound) iterm = [iterm substringFromIndex:colon.location + 1]; // "w0t0p1:UUID" -> UUID
+    if (!iterm.length || ![iterm isEqualToString:self.watchedIterm]) return NO;
+    return CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType) < 60;
+}
+
 - (void)watchForNews:(double)now {
     Room *room = &g_room;
     double idle = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
@@ -1698,7 +1741,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
         NSArray *was = self.seen[sid];
         self.seen[sid] = @[@(fmax(replyAt, [was[0] doubleValue])), @(fmax(waitAt, [was[1] doubleValue]))];
         if (!was || !g_auto_speak || s->muted) continue;
-        if (waitAt > [was[1] doubleValue]) [self report:s urgent:YES];
+        if (waitAt > [was[1] doubleValue]) { if (![self watching:s]) [self report:s urgent:YES]; } // (its tab in front of you: you see it ask)
         else if (replyAt > [was[0] doubleValue] && idle < 60) { s->unread = 0; [self report:s urgent:NO]; }
     }
     (void)now;
