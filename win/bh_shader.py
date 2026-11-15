@@ -29,9 +29,10 @@ patches = list(zip(strs[0::2], strs[1::2]))
 
 PANEL_PATCHES = [
     ('#version 300 es', '#version 330 core'),
-    ('uniform vec4 u_camQuat;', 'uniform vec4 u_camQuat;\n  uniform float u_heat, u_spot, u_spot_a, u_spot_t, u_flare, u_flare_a, u_flare_t;\n  uniform vec4 u_gp[64]; uniform vec2 u_gq[64]; uniform int u_gn; uniform vec4 u_gb;'),
+    ('uniform vec4 u_camQuat;', 'uniform vec4 u_camQuat;\n  uniform float u_heat, u_spot, u_spot_a, u_spot_t, u_spot_r, u_flare, u_flare_a, u_flare_t;\n  uniform vec4 u_gp[64]; uniform vec2 u_gq[64]; uniform int u_gn; uniform vec4 u_gb;'),
     # the panel's gas: the actions' streams (bh_gas_points), traced as glowing tubes, so they bend round it and hide behind it
     ('void main() {', '''float vigil_edge = 1.0; /* (1, fading to 0 at the picture's edge: gas out there is not cut off at a stroke) */
+float vigil_erf(float x) { float t = x * x, y = sqrt(1.0 - exp(-t * (1.2732395 + 0.147 * t) / (1.0 + 0.147 * t))); return x < 0.0 ? -y : y; }
 void vigil_gas(vec3 a0, vec3 a1, inout vec3 accC, inout float accA) {
   if (u_gn < 2) return;
   vec3 mid = 0.5 * (a0 + a1), rd = a1 - a0;
@@ -43,14 +44,25 @@ void vigil_gas(vec3 a0, vec3 a1, inout vec3 accC, inout float accA) {
     vec3 b0 = u_gp[i].xyz, b1 = u_gp[i + 1].xyz, sd = b1 - b0, sm = 0.5 * (b0 + b1);
     float r0 = abs(u_gq[i].y), r1 = abs(u_gq[i + 1].y), sl2 = max(dot(sd, sd), 1e-8);
     if (length(mid - sm) > hs + 0.5 * sqrt(sl2) + 3.0 * max(r0, r1)) continue;
-    float t = clamp(dot(sm - a0, rd) / rl2, 0.0, 1.0); vec3 pr = a0 + rd * t;
-    float h = clamp(dot(pr - b0, sd) / sl2, 0.0, 1.0); vec3 q = b0 + sd * h;
-    t = clamp(dot(q - a0, rd) / rl2, 0.0, 1.0); pr = a0 + rd * t;
-    h = clamp(dot(pr - b0, sd) / sl2, 0.0, 1.0); q = b0 + sd * h;
-    float rr = mix(r0, r1, h), d2 = dot(pr - q, pr - q) / (rr * rr);
-    if (d2 > 9.0) continue;
+    /* the link's nearest point to the ray's line; then the soft tube's light along this step of the ray, integrated
+     * exactly (a Gaussian across the tube: erf), so the steps add up seamlessly (the nearest point alone, step by step,
+     * counted the tube twice or not at all by turns: bands across the stream) */
+    vec3 rn = rd / sl, w0 = a0 - b0;
+    float B = dot(rn, sd), D = dot(rn, w0), E = dot(sd, w0), den = sl2 - B * B;
+    float h = den > 1e-6 ? clamp((E - B * D) / den, 0.0, 1.0) : 0.0;
+    if (h >= 1.0 && i + 2 < u_gn && u_gq[i + 2].y >= 0.0) continue; /* (a joint is the next link's: counted by both, each piece showed as a bright bead) */
+    vec3 q = b0 + sd * h, ud = sd / sqrt(sl2), wq = a0 - q, rp = rn, wp = wq;
+    if (h > 0.0 && h < 1.0) { rp = rn - ud * dot(rn, ud); wp = wq - ud * dot(wq, ud); } /* (along the link: only the distance across it counts) */
+    float rr = mix(r0, r1, h), k2 = dot(rp, rp), dens;
+    if (k2 < 1e-4) { float d2 = dot(wp, wp) / (rr * rr); if (d2 > 9.0) continue; dens = exp(-d2) * sl; } /* (the ray runs along the tube) */
+    else {
+      float ts = -dot(wp, rp) / k2, dm2 = max(dot(wp, wp) - ts * ts * k2, 0.0) / (rr * rr);
+      if (dm2 > 9.0) continue;
+      float k = sqrt(k2) / rr;
+      dens = exp(-dm2) * 0.8862269 / k * (vigil_erf(k * (sl - ts)) - vigil_erf(-k * ts));
+    }
     float br = mix(u_gp[i].w, u_gp[i + 1].w, h), tp = mix(u_gq[i].x, u_gq[i + 1].x, h);
-    float dens = br * exp(-d2) * min(sl, 1.77 * rr) * 0.7 * vigil_edge;
+    dens *= br * 0.7 * vigil_edge;
     vec3 col = mix(vec3(0.72, 0.84, 1.0), vec3(1.0, 0.5, 0.16), tp) * (1.6 - 0.6 * tp);
     accC += col * dens * (1.0 - accA);
     accA += dens * 0.12;
@@ -61,7 +73,7 @@ void vigil_gas(vec3 a0, vec3 a1, inout vec3 accC, inout float accA) {
  * the top of the shadow, races round the photon ring with it */
 void vigil_spot(vec3 a0, vec3 a1, vec3 v, inout vec3 accC, inout float accA) {
   if (u_spot <= 0.0) return;
-  const float R = 7.0;
+  float R = u_spot_r;
   if (min(abs(a0.y), abs(a1.y)) > 2.0 && a0.y * a1.y > 0.0) return;
   float lo = min(length(a0), length(a1)), hi = max(length(a0), length(a1));
   vec3 sd = a1 - a0; float rl2 = max(dot(sd, sd), 1e-8), sl = sqrt(rl2);
@@ -85,14 +97,13 @@ void main() {
   { vec2 uv = gl_FragCoord.xy / u_resolution; vigil_edge = smoothstep(0.0, 0.12, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y))); }'''),
     ('sample_accretion_disk(p, p_prev, ro, v, r_new, isco, M, a, currentDt, rs, accumulatedColor, accumulatedAlpha);', 'sample_accretion_disk(p, p_prev, ro, v, r_new, isco, M, a, currentDt, rs, accumulatedColor, accumulatedAlpha);\n        vigil_gas(p_prev, p, accumulatedColor, accumulatedAlpha);\n        vigil_spot(p_prev, p, v, accumulatedColor, accumulatedAlpha);'),
     ('  void sample_accretion_disk(', '''  /* the panel's actions on the gas: a torn star's heat, a hot spot riding the inner edge, a flare's flash (each 0: off) */
-  /* where the hot spot is (its angle round the disc, the view's frame): once round in 5 s, faster than the gas's slow turn, so
-   * it is seen to go round, in front of the shadow and over it */
-  float vigil_spot_at() { return u_spot_a + sign(u_spin + 1e-8) * u_spot_t * 6.2831853 / 5.0; } /* (the way the gas goes: its angle growing) */
+  /* where the hot spot is (its angle round the disc, the view's frame) */
+  float vigil_spot_at() { return u_spot_a; } /* (worked out by gpu.c: it spirals in, the way the gas goes) */
   float vigil_boost(vec3 q, float r) {
       float b = 1.0 + u_heat * 2.0 * exp(-(r - 7.0) * (r - 7.0) / 30.0);
       float az = atan(q.z, q.x);
       if (u_spot > 0.0) { float da = az - vigil_spot_at() + sign(u_spin + 1e-8) / (pow(r, 1.5) + u_spin) * u_disk_time * 1.2; /* (az: the gas's own frame) */ da -= 6.2831853 * floor((da + 3.14159265) / 6.2831853); if (da * sign(u_spin + 1e-8) < 0.0) da *= 0.4; /* (smeared out behind it) */
-          float sa = 0.3 + 0.12 * u_spot_t, sr = 0.75 + 0.04 * u_spot_t; b += 10.0 * u_spot * exp(-(r - 7.0) * (r - 7.0) / (sr * sr) - da * da / (sa * sa)) / (1.0 + 0.15 * u_spot_t); }
+          float sa = 0.3 + 0.12 * u_spot_t, sr = 0.75 + 0.04 * u_spot_t; b += 10.0 * u_spot * exp(-(r - u_spot_r) * (r - u_spot_r) / (sr * sr) - da * da / (sa * sa)) / (1.0 + 0.15 * u_spot_t); }
       if (u_flare > 0.0) { /* the flare: the inner disc warms as its loop rises, then flashes as it snaps (BH_FLARE_SNAP), the
                               * flash running outward and fading */
           float t = u_flare_t - 1.8;

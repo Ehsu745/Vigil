@@ -5,12 +5,12 @@
  * on, still a needle, slowing, and breaks out there. */
 #define SPIKES_LEN .5f   /* the spike's length (the cone is drawn on the layer from the start, so nothing cuts it off) */
 #define SPIKES_MAXT 8
-#define SPIKES_ON .75f   /* how long a dodged needle flies on, still a needle, before it breaks */
-#define SPIKES_DRAG 2.2f /* how fast it slows meanwhile: little, it carries on with its strike */
-#define SPIKES_KEEP 26.f /* the most speed it carries on with (stage units a second) */
+#define SPIKES_ON 1.3f   /* how long a dodged needle flies on, still a needle, before it breaks */
+#define SPIKES_DRAG 1.1f /* how fast it slows meanwhile: little, it carries on with its strike */
+#define SPIKES_KEEP 9.f  /* the most speed it carries on with (stage units a second): it stays in sight */
 typedef struct {
     int v, nt, tris[SPIKES_MAXT], grown, shot, hit, has_from, on;
-    float t0, aim[3], from[3], pos[3], vel[2], ton;
+    float t0, aim[3], from[3], pos[3], vel[2], ton, len0;
 } SpikesCone;
 typedef struct { int n; SpikesCone c[3]; } SpikesAtk;
 _Static_assert(sizeof(SpikesAtk) <= sizeof(((ReadyRS *)0)->own), "SpikesAtk must fit in ReadyRS.own");
@@ -74,7 +74,9 @@ static void spikes_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, floa
         float e = t - C->t0;
         if (e < 0) continue;
         /* growing in place (the spike itself does it), already drawn as its own piece, so the core's tile never cuts it off */
-        float pv = m->push[C->v], len = e < .9f ? fmaxf(.02f, pv != 0 ? pv : SPIKES_LEN) : fmaxf(0, pv);
+        float pv = m->push[C->v], len = fmaxf(.02f, pv != 0 ? pv : SPIKES_LEN);
+        if (e >= .78f) { if (C->len0 <= 0) C->len0 = len; len = C->len0; } /* fired: its length kept (as the spike on the core draws back
+                                                                            * in, a flying cone flattened with it into a squat hexagon) */
         float apexM[3], apexV[3], apexS[3], axisV[3], toT[3], goal[3], at[3], Rt[9];
         for (int k = 0; k < 3; k++) apexM[k] = sh->v[C->v][k] * (1 + len);
         m3_app(apexV, f->Mf, apexM); r_from_view(f, apexV, apexS);
@@ -105,9 +107,19 @@ static void spikes_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, floa
             for (int q = 0; q < 2; q++) { C->vel[q] *= k; C->pos[q] += C->vel[q] * dt; }
             turn_to(Rt, axisV, toT); memcpy(at, C->pos, sizeof at);
         } else { turn_to(Rt, axisV, toT); memcpy(at, goal, sizeof at); }
+        if (i < R->n) memcpy(R->p[i].pos, at, sizeof at); /* its stand-in piece rides on its point: READY's layer grows round it
+                                                            * wherever it flies (left at the core, a dodged needle flew out of it) */
         float shp = e < .55f ? io3(fmaxf(0, e - .2f) / .35f) : 1; /* drawn into a needle as it tears off, and kept so until it breaks */
+        float fly = C->on && !C->hit ? io3(clampf((e - C->ton) / .25f, 0, 1)) : 0; /* dodged: it slims into a long dart, rolling as it flies */
         { float S[9], Rg[9], atV[3], aM[3];
-          sharpen_m(S, axisV, shp); m3_mul(Rg, Rt, S);
+          sharpen_m(S, axisV, shp);
+          if (fly > 0) {
+              float w = 1 - .45f * fly, h = 1 + .45f * fly, Rr[9], T2[9]; /* (slimmer and longer than the needle it was) */
+              for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) T2[a * 3 + b] = (a == b ? w : 0) + (h - w) * axisV[a] * axisV[b];
+              m3_mul(S, T2, S);
+              m3_rot(Rr, axisV, (e - C->ton) * 7); m3_mul(S, Rr, S); /* (rolling about its axis: a cone, not a flat fan) */
+          }
+          m3_mul(Rg, Rt, S);
           r_to_view(f, at, atV); m3_app(aM, f->Mf, apexM);
           for (int j = 0; j < C->nt; j++) { /* the cone as one piece: its apex on at */
               float cm[3], cv[3], d[3], Rd[3], tv[3];
@@ -117,7 +129,7 @@ static void spikes_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, floa
               for (int k = 0; k < 3; k++) tv[k] = atV[k] + Rd[k];
               r_place(c, f, C->tris[j], tv, Rg);
           } }
-        if (e > .4f && e < .9f) { m->glow[C->v] = 1; if (mrand(c->s) < .5f) r_spark(c, f, at, z, .06f, 2, 0, 10, SK_FLARE, 0, RGB255(230, 240, 255)); } /* a glint on the point */
+        if ((e > .4f && e < .9f) || (fly > 0 && !C->hit)) { m->glow[C->v] = 1; if (mrand(c->s) < .5f) r_spark(c, f, at, z, .06f, 2, 0, 10, SK_FLARE, 0, RGB255(230, 240, 255)); } /* a glint on the point */
         if ((e >= .78f && e < .9f) || (C->on && !C->hit && mrand(c->s) < .6f)) { float v[3] = {-toT[0], -toT[1], -toT[2]}; r_spark(c, f, at, v, .12f, 3, 0, 1.2f, SK_STREAK, 0, RGB255(225, 236, 255)); }
         int got = 0, brk = 0;
         if (!C->hit && e >= .9f && !C->on) { /* you were still there, or you dodged */
@@ -131,9 +143,15 @@ static void spikes_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, floa
                 float sp = fminf(3 * sqrtf(l2) / .12f, SPIKES_KEEP), dl = hypotf(toT[0], toT[1]);
                 if (dl < 1e-4f) dl = 1e-4f;
                 C->on = 1; C->ton = e; memcpy(C->pos, at, sizeof C->pos);
+                /* its spike stays out until it breaks: the flying cone is drawn with the spike's own triangles, and as the
+                 * spike drew back into the core it collapsed into a squat pyramid */
+                for (int k = 0; k < MAX_SPIKE; k++) { Spike *sp = &m->sp[k]; if (sp->v == C->v && sp->len != 0 && c->now - sp->at < sp->up + sp->hd + sp->dn) sp->hd = (float)(c->now - sp->at) - sp->up + SPIKES_ON + .05f; }
                 C->vel[0] = toT[0] / dl * sp; C->vel[1] = toT[1] / dl * sp;
             }
-        } else if (!C->hit && C->on && e - C->ton >= SPIKES_ON) brk = 1; /* spent: it breaks out there */
+        } else if (!C->hit && C->on && e - C->ton >= SPIKES_ON) { /* spent: it breaks out there, and its spike draws back in */
+            brk = 1;
+            for (int k = 0; k < MAX_SPIKE; k++) { Spike *sp = &m->sp[k]; if (sp->v == C->v && sp->len != 0 && c->now - sp->at < sp->up + sp->hd + sp->dn) sp->hd = fmaxf(0, (float)(c->now - sp->at) - sp->up); }
+        }
         if (brk) {
             C->hit = 1;
             float rest = C->on ? hypotf(C->vel[0], C->vel[1]) : 0; /* what it still carries */
@@ -164,17 +182,20 @@ static void spikes_run(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, floa
                     RShard *Q = &R->sh[q];
                     float ox = Q->base[0] - at[0], oy = Q->base[1] - at[1], lat = ox * sd[0] + oy * sd[1], near = 1 - hypotf(ox, oy) / reach; /* near: 1 at the point */
                     float side = lat > .02f ? 1 : lat < -.02f ? -1 : (mrand(c->s) < .5f ? -1 : 1);
-                    float fwd = (got ? rnd(c->s, 4, 9) : rnd(c->s, 2, 4) + rest * rnd(c->s, .8f, 1.1f)) * (.55f + .65f * near);
-                    float sp = got ? 3.8f : 1.6f, out = side * rnd(c->s, 0, .6f * sp) + (rnd(c->s, -1, 1) + rnd(c->s, -1, 1)) * .5f * sp; /* a lean to its own side, mostly random */
-                    Q->vel[0] = fw[0] * fwd + sd[0] * out; Q->vel[1] = fw[1] * fwd + sd[1] * out; Q->vel[2] = 0;
-                    { /* its triangles, still round one node, opened back into a hexagon (a miss, spent out there, has little
-                       * speed left) or a tight tangle on you: they burst apart from the needle's middle, each its own way */
+                    if (got) { /* on you: a tight tangle that splashes off, bursting apart from the needle's middle */
+                        float fwd = rnd(c->s, 4, 9) * (.55f + .65f * near), sp = 3.8f, out = side * rnd(c->s, 0, .6f * sp) + (rnd(c->s, -1, 1) + rnd(c->s, -1, 1)) * .5f * sp;
+                        Q->vel[0] = fw[0] * fwd + sd[0] * out; Q->vel[1] = fw[1] * fwd + sd[1] * out; Q->vel[2] = 0;
                         float rx = Q->base[0] - cen[0], ry = Q->base[1] - cen[1], rl = hypotf(rx, ry), g = rnd(c->s, -.7f, .7f);
                         if (rl < 1e-3f) { float a = rnd(c->s, 0, TAU); rx = cosf(a); ry = sinf(a); } else { rx /= rl; ry /= rl; }
-                        float bx = rx * cosf(g) - ry * sinf(g), by = rx * sinf(g) + ry * cosf(g), bs = got ? rnd(c->s, 2, 3.5f) : rnd(c->s, 3, 5.5f);
+                        float bx = rx * cosf(g) - ry * sinf(g), by = rx * sinf(g) + ry * cosf(g), bs = rnd(c->s, 2, 3.5f);
                         Q->vel[0] += bx * bs; Q->vel[1] += by * bs;
+                    } else { /* spent out there: it snaps, and its pieces carry on along its flight, each at its own speed and
+                              * veering off at its own angle (no burst from its middle: that opened into the same hexagon) */
+                        float fwd = (rest * rnd(c->s, .35f, 1.05f) + rnd(c->s, .6f, 2.2f)) * (.6f + .5f * near), vr = rnd(c->s, -.6f, .6f) + side * rnd(c->s, 0, .35f);
+                        Q->vel[0] = (fw[0] * cosf(vr) - fw[1] * sinf(vr)) * fwd; Q->vel[1] = (fw[0] * sinf(vr) + fw[1] * cosf(vr)) * fwd; Q->vel[2] = 0;
+                        Q->wait = rnd(c->s, 0, .35f);
                     }
-                    Q->w = (mrand(c->s) < .5f ? 1 : -1) * rnd(c->s, got ? 1.5f : 4, 9); Q->ang = rnd(c->s, got ? -.6f : -1.5f, got ? .6f : 1.5f);
+                    Q->w = (mrand(c->s) < .5f ? 1 : -1) * rnd(c->s, got ? 1.5f : 3, got ? 9 : 12); Q->ang = rnd(c->s, got ? -.6f : -2.5f, got ? .6f : 2.5f);
                     Q->drag = rnd(c->s, 2.8f, 6.5f); Q->bob = rnd(c->s, .3f, 1.7f);
                 }
             }

@@ -468,7 +468,7 @@ double panel_rate(const Session *s, double now, const Smooth *sm, double hz) {
         default: r = sm->busy;
     }
     double out = r <= 0 ? hz : r;
-    if (s->mo.hole > 0.5f && s->mo.rt == RT_HOLE && s->mo.rs.hole.moving && out < 60) out = 60; /* the black hole playing, or in the hand: smooth */
+    if (s->mo.hole > 0.5f && s->mo.rt == RT_HOLE && s->mo.rs.hole.moving && out < (BH_LIGHT ? 30 : 60)) out = BH_LIGHT ? 30 : 60; /* the black hole playing, or in the hand: smooth */
     if (s->mo.hole > 0.01f && out < 15) out = 15; /* the black hole's disc keeps turning (traced per pixel: not every refresh while it only turns) */
     if (s->unread && out < 18) out = 18;         /* the flash of an unread reply */
     return out > hz ? hz : out < 2 ? 2 : out;

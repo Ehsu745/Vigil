@@ -1,6 +1,7 @@
 /* Software renderer. Everything is added into a float RGB canvas (light adds up, like a screen blend)
  * and clamped at the end. Glow is computed from distance, so there is no blur pass.
  * Sizes are given for a 600-pixel tile and scaled by k = tile / 600. */
+#include <stdatomic.h>
 #include "vigil.h"
 #include <ctype.h>
 #include <math.h>
@@ -798,13 +799,6 @@ static void bh_ribbon(Canvas *c, Clip cl, float (*p)[2], const int *ok, const fl
     }
 }
 /* a point (disc frame: x toward you, y across, z up its axis) on screen: both its images, in pixels; how many */
-static int bh_point(const BHView *V, const float *d, float k, float ox, float oy, float im[2][2]) {
-    float P[3];
-    for (int q = 0; q < 3; q++) P[q] = d[0] * V->ea[q] + d[1] * V->ec[q] + d[2] * V->n[q];
-    int n = 0;
-    for (int i = 0; i < 2; i++) { float X, Y; if (bh_image(P, i, &X, &Y)) { im[i][0] = ox + X * k; im[i][1] = oy - Y * k; n |= 1 << i; } }
-    return n;
-}
 /* the black hole's disc axis as it is drawn now: as the hand and the wheel left it (HoleRS.nv; at rest about 15 degrees
  * above edge-on), with its own slow sway, and the precession */
 void bh_hole_axis(const Session *s, double now, float *out) {
@@ -872,9 +866,11 @@ static unsigned long g_b2_clock;
 static int g_b2_want = -1; /* the map asked for last */
 static unsigned char g_b2_tex[256 * 256]; /* blackhole-simulation's noise texture: random bytes (its hash) */
 static int g_b2_tex_ok;
+int BH_GPU_ON, BH_LIGHT;
+static float b2_res(void) { return BH_TUNE.b2_res; } /* (the map's size: the same in light, so switching never rebuilds the maps and shows the old engine meanwhile) */
 static float b2_key_now(float *k) {
     const BhTune *t = &BH_TUNE;
-    float v[12] = {t->b2_spin, t->b2_lens, t->b2_temp, t->b2_height, t->b2_disk, t->b2_steps, t->b2_res, t->b2_ext, t->b2_dist, 0, 0, 0};
+    float v[12] = {t->b2_spin, t->b2_lens, t->b2_temp, t->b2_height, t->b2_disk, t->b2_steps, b2_res(), t->b2_ext, t->b2_dist, 0, 0, 0};
     memcpy(k, v, sizeof v);
     return 0;
 }
@@ -1013,7 +1009,6 @@ static float b2_ray(B2Map *m, size_t pix, float inc, float u, float v) { /* (m N
 }
 /* the maps: built for the view a hole shows now (and kept), a little each call */
 BhGpuImg BH_GPU_IMG;
-int BH_GPU_ON;
 void bh2_tick(const float *axis) {
     if (BH_TUNE.b2_engine < 0.5f || BH_GPU_ON) return;
     if (!g_b2_tex_ok) { unsigned s = 0x2545F491u; for (int i = 0; i < 256 * 256; i++) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; g_b2_tex[i] = (unsigned char)(s >> 7); } g_b2_tex_ok = 1; }
@@ -1028,7 +1023,7 @@ void bh2_tick(const float *axis) {
     g_b2_want = want;
     m->used = ++g_b2_clock;
     if (m->ready) return;
-    int n = (int)BH_TUNE.b2_res;
+    int n = (int)b2_res();
     if (n < 32) n = 32;
     if (n > 512) n = 512;
     if (!m->off) { /* new: room for it, the least used one going if too many are kept */
@@ -1103,9 +1098,10 @@ static void b2_shade_px(B2Shade *S, size_t j) {
         float turb = b2_noise(nx, ny, nz) * 0.5f + b2_noise(nx * 2.5f, ny * 2.5f, nz * 2.5f) * 0.25f, d = turb * w * S->dens;
         float boost = 1;
         if (V->act == HA_SPOT || V->act == HA_FLARE || heat > 0.01f) { /* our actions, on its gas: a hot spot, a flare, a torn star's heat */
-            float r = sqrtf(x * x + z * z), az = atan2f(nz, nx);
-            if (V->act == HA_SPOT) boost += bh_spot(V, r, az, 0) * 0.6f;
-            if (V->act == HA_FLARE) { float t = V->at; if (t > 0) boost += 6 * V->fo * (t < 0.18f ? t / 0.18f : expf(-(t - 0.18f) * 1.2f)) * expf(-(r - 6.8f) * (r - 6.8f) / (1.5f + t)); }
+            float r = sqrtf(x * x + z * z);
+            if (V->act == HA_FLARE) { float t = V->at - BH_FLARE_SNAP; /* (as the GPU's: the disc warms as its loop rises, then flashes as it snaps, the flash running outward) */
+                if (t > 0) { float fr = 5 + 6 * t, fw = 0.8f + 0.6f * t; boost += 3 * V->fo * expf(-t * 1.1f) * (expf(-(r - fr) * (r - fr) / (fw * fw)) + expf(-t * 3) * expf(-(r - 5) * (r - 5) / 6)); }
+                else boost += 0.6f * V->fo * clamp01(1 + t / BH_FLARE_SNAP) * expf(-(r - 6.5f) * (r - 6.5f) / 4); }
             boost += heat * 2 * expf(-(r - 7) * (r - 7) / 30);
         }
         float col = d * (1 - al) * boost;
@@ -1194,8 +1190,27 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
         float E = gpu ? BH_GPU_IMG.E : BH_TUNE.b2_ext, rho = atan2f(V.n[0], V.n[1]), cr = cosf(rho), sr = sinf(rho), fu = 1, /* (the wheel only turns its gas, never mirrors it) */ fv = b2_mir ? -1.0f : 1.0f;
         if (gpu) { fv = 1; fu = 1; cr = 1; sr = 0; } /* (its camera goes below the disc itself; its picture comes turned) */
         size_t nb = gpu ? 1 : (size_t)n * n;
-        B2Shade S = {bm, malloc(nb * 4 * sizeof(float)), malloc(nb * sizeof(float)), calloc(nb, 1), -V.T * 1.2f * BH_TUNE.b2_speed, /* (its gas the way the GPU's goes: the way its Doppler boost says) */ BH_TUNE.b2_dens, bh_hole_expo(s, now), E, fminf(V.sky_lim[0], V.sky_lim[1]) * 0.96f, &V};
-        if (!S.col || !S.tr || !S.done) { free(S.col); free(S.tr); free(S.done); return; }
+        B2Shade S = {bm, NULL, NULL, NULL, -V.T * 1.2f * BH_TUNE.b2_speed, /* (its gas the way the GPU's goes: the way its Doppler boost says) */ BH_TUNE.b2_dens, bh_hole_expo(s, now), E, fminf(V.sky_lim[0], V.sky_lim[1]) * 0.96f, &V};
+        /* On the CPU the map is shaded once a picture, shared by all its bands (the threads drawing it a band of rows
+         * each): the first to get here sets it up, and every band takes rows of it to shade until none are left, then
+         * waits for the rest. (Each band shading the whole picture's part of the map again was most of the CPU's black
+         * hole.) */
+        static atomic_flag b2c_lock = ATOMIC_FLAG_INIT;
+        static atomic_int b2c_next, b2c_rows_done;
+        static float *b2c_col, *b2c_tr, b2c_key[8]; static unsigned char *b2c_done; static size_t b2c_nb; static const void *b2c_s, *b2c_bm; static int b2c_i0, b2c_i1;
+        if (gpu) {
+            S.col = malloc(nb * 4 * sizeof(float)); S.tr = malloc(nb * sizeof(float)); S.done = calloc(nb, 1);
+            if (!S.col || !S.tr || !S.done) { free(S.col); free(S.tr); free(S.done); return; }
+        } else {
+            while (atomic_flag_test_and_set(&b2c_lock)) {}
+            if (nb != b2c_nb) {
+                free(b2c_col); free(b2c_tr); free(b2c_done);
+                b2c_col = malloc(nb * 4 * sizeof(float)); b2c_tr = malloc(nb * sizeof(float)); b2c_done = calloc(nb, 1);
+                b2c_nb = b2c_col && b2c_tr && b2c_done ? nb : 0; b2c_s = NULL;
+                if (!b2c_nb) { atomic_flag_clear(&b2c_lock); return; }
+            }
+            S.col = b2c_col; S.tr = b2c_tr; S.done = b2c_done;
+        }
         /* the screen (M, y up) to the map: turned by the axis's roll, mirrored for a view from below or a disc turned back */
 #define B2_AT(X, Y, OUT) do { \
             float u_ = ((X) * cr - (Y) * sr) * fu, v_ = ((X) * sr + (Y) * cr) * fv, fi_ = (u_ + E) / (2 * E) * n - 0.5f, fj_ = (E - v_) / (2 * E) * n - 0.5f; \
@@ -1214,11 +1229,28 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
         float gl[GM * GM], tmp[GM * GM];
         float gx0 = ox - ex, gy0 = oy - ey, gs = fmaxf(2 * ex, 2 * ey) / (GM - 1);
         int gw = (int)(2 * ex / gs) + 1, gh = (int)(2 * ey / gs) + 1; if (gw > GM) gw = GM; if (gh > GM) gh = GM;
-        for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float L4[4]; B2_AT((gx0 + i * gs - ox) / k, -(gy0 + j * gs - oy) / k, L4); gl[j * GM + i] = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2]; }
-        int br = (int)fmaxf(1, BH_TUNE.bloom_r * R / gs);
-        for (int pass = 0; pass < 2; pass++) {
-            for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float a = 0; int m2 = 0; for (int d = -br; d <= br; d++) { int ii = i + d; if (ii >= 0 && ii < gw) { a += gl[j * GM + ii]; m2++; } } tmp[j * GM + i] = a / m2; }
-            for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float a = 0; int m2 = 0; for (int d = -br; d <= br; d++) { int jj = j + d; if (jj >= 0 && jj < gh) { a += tmp[jj * GM + i]; m2++; } } gl[j * GM + i] = a / m2; }
+        if (!gpu) {
+            float key[8] = {(float)fmod(now, 1000.0), ox, oy, k, R, room, ex, (float)b2_mir};
+            if (b2c_s != s || b2c_bm != bm || memcmp(key, b2c_key, sizeof key)) { /* the first band of a new picture: its part of the map to shade */
+                memset(S.done, 0, nb);
+                float rM = 1.42f * fmaxf(ex, ey) / k + 1;
+                int i0 = (int)floorf((E - rM) / (2 * E) * n) - 2, i1 = (int)ceilf((E + rM) / (2 * E) * n) + 2;
+                b2c_i0 = i0 < 0 ? 0 : i0; b2c_i1 = i1 > n ? n : i1;
+                atomic_store(&b2c_rows_done, 0); atomic_store(&b2c_next, b2c_i0);
+                memcpy(b2c_key, key, sizeof key); b2c_s = s; b2c_bm = bm;
+            }
+            int i0 = b2c_i0, i1 = b2c_i1;
+            atomic_flag_clear(&b2c_lock);
+            for (;;) { int j = atomic_fetch_add(&b2c_next, 1); if (j >= i1) break; for (int i = i0; i < i1; i++) b2_shade_px(&S, (size_t)j * n + i); atomic_fetch_add(&b2c_rows_done, 1); }
+            while (atomic_load(&b2c_rows_done) < i1 - i0) {} /* (the last rows, others' still going: short) */
+        }
+        {
+            for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float L4[4]; B2_AT((gx0 + i * gs - ox) / k, -(gy0 + j * gs - oy) / k, L4); gl[j * GM + i] = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2]; }
+            int br = (int)fmaxf(1, BH_TUNE.bloom_r * R / gs);
+            for (int pass = 0; pass < 2; pass++) {
+                for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float a = 0; int m2 = 0; for (int d = -br; d <= br; d++) { int ii = i + d; if (ii >= 0 && ii < gw) { a += gl[j * GM + ii]; m2++; } } tmp[j * GM + i] = a / m2; }
+                for (int j = 0; j < gh; j++) for (int i = 0; i < gw; i++) { float a = 0; int m2 = 0; for (int d = -br; d <= br; d++) { int jj = j + d; if (jj >= 0 && jj < gh) { a += tmp[jj * GM + i]; m2++; } } gl[j * GM + i] = a / m2; }
+            }
         }
         if (gpu && fabsf(k * 2 * E / n - 1) < 0.003f) { /* the GPU's picture at the core's own scale: pixel for pixel */
             float rr0 = room * 0.88f;
@@ -1254,7 +1286,8 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                 float fi = (x + 0.5f - gx0) / gs, fj = (y + 0.5f - gy0) / gs; int i = (int)fi, j = (int)fj; float wi = fi - i, wj = fj - j, g = 0;
                 if (i >= 0 && j >= 0 && i < gw - 1 && j < gh - 1) g = (gl[j * GM + i] * (1 - wi) + gl[j * GM + i + 1] * wi) * (1 - wj) + (gl[(j + 1) * GM + i] * (1 - wi) + gl[(j + 1) * GM + i + 1] * wi) * wj;
                 if (g < 0.002f) continue;
-                float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x), dx_ = x + 0.5f - ox, dy_ = y + 0.5f - oy, ef = clamp01((room - 1 - sqrtf(dx_ * dx_ + dy_ * dy_)) / (room * 0.12f)), gb = BH_TUNE.bloom * g * ef * hb;
+                float dx_ = x + 0.5f - ox, dy_ = y + 0.5f - oy, ef = clamp01((room - 1 - sqrtf(dx_ * dx_ + dy_ * dy_)) / (room * 0.12f)), gb = BH_TUNE.bloom * g * ef * hb;
+                float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
                 p[0] += gb; p[1] += gb * 0.55f; p[2] += gb * 0.22f;
                 continue;
             }
@@ -1277,7 +1310,7 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                 float trn = 1, sky = 0, scol[3] = {0, 0, 0};
                 if (i_ >= 0 && j_ >= 0 && i_ < n && j_ < n) {
                     size_t kk = (size_t)j_ * n + i_; b2_shade_px(&S, kk); trn = S.tr[kk];
-                    if (V.sky > 0 && !bm->hit[kk]) { /* its starfield, at the exact direction (interpolated between the map's rays) */
+                    if (V.sky > 0 && !BH_LIGHT && !bm->hit[kk]) { /* its starfield, at the exact direction (interpolated between the map's rays) */
                         float d3[3] = {0, 0, 0}; int i0 = (int)floorf(fi_), j0 = (int)floorf(fj_); float wi = fi_ - i0, wj = fj_ - j0, ws = 0;
                         for (int q = 0; q < 4; q++) { int ii = i0 + (q & 1), jj = j0 + (q >> 1); if (ii < 0 || jj < 0 || ii >= n || jj >= n || bm->hit[(size_t)jj * n + ii]) continue;
                             float w = ((q & 1) ? wi : 1 - wi) * ((q >> 1) ? wj : 1 - wj); const short *dd = bm->dir + ((size_t)jj * n + ii) * 3; for (int c3 = 0; c3 < 3; c3++) d3[c3] += dd[c3] / 32767.0f * w; ws += w; }
@@ -1314,14 +1347,16 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
             }
             float fi = (x + 0.5f - gx0) / gs, fj = (y + 0.5f - gy0) / gs; int i = (int)fi, j = (int)fj; float wi = fi - i, wj = fj - j, g = 0;
             if (i >= 0 && j >= 0 && i < gw - 1 && j < gh - 1) g = (gl[j * GM + i] * (1 - wi) + gl[j * GM + i + 1] * wi) * (1 - wj) + (gl[(j + 1) * GM + i] * (1 - wi) + gl[(j + 1) * GM + i + 1] * wi) * wj;
-            float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x), ef = clamp01((room - 1 - hypotf(x + 0.5f - ox, y + 0.5f - oy)) / (room * 0.12f)); /* (nothing reaches the window's edge) */
-            if (sh > 0) { float a = clamp01(sh) * hb; p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a; }
-            float gb = BH_TUNE.bloom * g * ef * (1 - 0.95f * clamp01(sh)); /* (none in the shadow) */
+            float ef = clamp01((room - 1 - hypotf(x + 0.5f - ox, y + 0.5f - oy)) / (room * 0.12f)); /* (nothing reaches the window's edge) */
+            float gb = BH_TUNE.bloom * g * ef * (1 - 0.95f * clamp01(sh)), a_ = clamp01(sh) * hb; /* (no glow in the shadow) */
+            float lum = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2], d_ = fmaxf(clamp01(sh), clamp01(g * 2.5f + lum * 1.5f)) * hb * 0.92f * ef;
+            float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
+            if (sh > 0) { p[0] *= 1 - a_; p[1] *= 1 - a_; p[2] *= 1 - a_; }
             p[0] += (L4[0] * ef + gb) * hb; p[1] += (L4[1] * ef + gb * 0.55f) * hb; p[2] += (L4[2] * ef + gb * 0.22f) * hb;
-            if (c->dk) { float lum = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2], d = fmaxf(clamp01(sh), clamp01(g * 2.5f + lum * 1.5f)) * hb * 0.92f * ef, *dk = c->dk + (size_t)y * c->w + x; if (d > *dk) *dk = d; }
+            if (c->dk) { float *dk = c->dk + (size_t)y * c->w + x; if (d_ > *dk) *dk = d_; }
         }
 #undef B2_AT
-        free(S.col); free(S.tr); free(S.done);
+        if (gpu) { free(S.col); free(S.tr); free(S.done); }
     } else {
     /* the glow: the light on a coarse grid over the whole reach (not just this band's rows, so bands join up), blurred */
         enum { GM = 44 };
@@ -1367,94 +1402,84 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
      * the picture's edge so nothing is cut */
 #define EDGE_FADE(X, Y) clamp01((V.room - 2 - hypotf((X) - ox, (Y) - oy)) / (V.room * 0.22f))
     if (gpu) return; /* (the GPU drew the actions' gas itself: bh_gas_points) */
-    if (act == HA_FEED) { /* the star, drawn out as it nears the hole; then its debris, bound and unbound */
-        const TdeRS *T = &H->tde;
-        const Col STAR = {0.75f, 0.86f, 1}, WARM = {1, 0.6f, 0.28f};
-        float fade = bh_env(au, 0.04f, 0.2f) * hb * V.fo;
-        enum { NP = TDE_H > TDE_N ? TDE_H : TDE_N };
-        float sp[2][NP][2], al[2][NP] = {{0}}, ag[2][NP] = {{0}}; int ok[2][NP] = {{0}}; Col cc[NP] = {{0}}, cg[NP] = {{0}}; int n = 0;
-        if (!T->split) {
-            float r = sqrtf(T->s[0] * T->s[0] + T->s[1] * T->s[1] + T->s[2] * T->s[2]);
-            int m = (int)fminf((float)T->hn, 4 + 140 * powf(7.2f / r, 4));
-            for (int i = 0; i < m && n < NP; i += 3, n++) {
-                float hp[3]; for (int q = 0; q < 3; q++) hp[q] = T->hist[i][q] + T->s[3 + q] * T->acc;
-                float im[2][2]; int got = bh_point(&V, hp, k, ox, oy, im);
-                for (int g = 0; g < 2; g++) { ok[g][n] = got >> g & 1; if (ok[g][n]) { sp[g][n][0] = im[g][0]; sp[g][n][1] = im[g][1]; al[g][n] = fade * (1 - 0.85f * i / (m + 2)) * (g ? 0.3f : 1) * EDGE_FADE(im[g][0], im[g][1]); } }
-                cc[n] = STAR; cg[n] = (Col){0.5f, 0.65f, 1};
+    { /* the actions' gas, the same points the GPU traces (bh_gas_points: the torn star and its stream, the flare's loop
+       * and blob, gas pulled off a held press), and the hot spot spiralling in (bh_spot_state), each where its light
+       * really shows: its direct image, and its bent one near the shadow on the far side, fainter and thinner */
+        enum { GN = 80 };
+        float P[GN][4], Q[GN][2];
+        int gn = bh_gas_points(s, now, P, Q, 64);
+        if (act == HA_SPOT) { /* (the GPU draws it in its shader; here it is a clump and its smeared tail) */
+            float ang, rs, at2 = at, dur = HOLE_ACT_DUR[HA_SPOT], nn3[3], ea[3], ec[3], l;
+            float sf = fminf(1, at2 / 0.6f) * clamp01((dur - at2) / 3.5f) * V.fo * hb;
+            bh_spot_state(s, now, &ang, &rs);
+            bh_hole_axis(s, now, nn3);
+            if (fabsf(nn3[2]) > 0.999f) nn3[1] += 0.002f;
+            for (int q = 0; q < 3; q++) ea[q] = (q == 2) - nn3[2] * nn3[q];
+            l = sqrtf(ea[0] * ea[0] + ea[1] * ea[1] + ea[2] * ea[2]); for (int q = 0; q < 3; q++) ea[q] /= l;
+            ec[0] = nn3[1] * ea[2] - nn3[2] * ea[1]; ec[1] = nn3[2] * ea[0] - nn3[0] * ea[2]; ec[2] = nn3[0] * ea[1] - nn3[1] * ea[0];
+            float smear = 0.3f + 0.2f * at2;
+            for (int i = 0; i < 9 && gn < GN; i++) {
+                float u = i / 8.0f, a = ang - smear * u * u;
+                for (int q = 0; q < 3; q++) P[gn][q] = rs * (cosf(a) * ea[q] + sinf(a) * ec[q]);
+                P[gn][3] = sf * (i ? 2.2f * (1 - 0.8f * u) : 4); Q[gn][0] = 0.15f + 0.6f * u; Q[gn][1] = (i ? 1 : -1) * (0.45f + 0.2f * u);
+                gn++;
             }
-            for (int g = 0; g < 2; g++) {
-                for (int i = 0; i < n; i++) ag[g][i] = al[g][i] * 0.35f;
-                bh_ribbon(c, cl, sp[g], ok[g], ag[g], cg, n, wpx * (g ? 1.4f : 2.6f), R * 1.1f);
-                bh_ribbon(c, cl, sp[g], ok[g], al[g], cc, n, wpx * (g ? 0.5f : 0.8f), R * 1.1f);
-                if (n && ok[g][0]) { /* the star: a hot glowing ball, a wide soft glow round it */
-                    float X = sp[g][0][0], Y = sp[g][0][1], e = EDGE_FADE(X, Y) * fade * (g ? 0.4f : 1), sz = wpx * (g ? 0.6f : 1);
-                    blob(c, cl, X, Y, sz * 14, (Col){0.7f, 0.82f, 1}, 0.22f * e, (Col){0.4f, 0.55f, 1}, 0.08f * e, 0.15f);
-                    blob(c, cl, X, Y, sz * 3.2f, WHITE, 1.1f * e, STAR, 0.7f * e, 0.45f);
+        }
+        float sp[2][GN][2], al[2][GN], ag[2][GN]; int ok[2][GN]; Col cc[GN], cg[GN];
+        for (int a0 = 0; a0 < gn;) {
+            int a1 = a0 + 1;
+            while (a1 < gn && Q[a1][1] >= 0) a1++; /* (one stream: up to where the next starts) */
+            int m = a1 - a0;
+            float ext = 0, rad = 0;
+            for (int i = a0; i < a1; i++) { ext = fmaxf(ext, fabsf(P[i][0] - P[a0][0]) + fabsf(P[i][1] - P[a0][1]) + fabsf(P[i][2] - P[a0][2])); rad = fmaxf(rad, fabsf(Q[i][1])); }
+            for (int i = 0; i < m; i++) {
+                const float *pp = P[a0 + i];
+                float tp = Q[a0 + i][0];
+                cc[i] = mix((Col){0.72f, 0.84f, 1}, (Col){1, 0.5f, 0.16f}, tp); cg[i] = mix((Col){0.5f, 0.62f, 1}, (Col){1, 0.42f, 0.14f}, tp);
+                for (int g = 0; g < 2; g++) {
+                    float X, Y; ok[g][i] = bh_image(pp, g, &X, &Y);
+                    if (ok[g][i]) { sp[g][i][0] = ox + X * k; sp[g][i][1] = oy - Y * k; }
+                    al[g][i] = ok[g][i] ? fminf(1.2f, pp[3] * 0.55f) * (g ? 0.3f : 1) * EDGE_FADE(sp[g][i][0], sp[g][i][1]) : 0; ag[g][i] = al[g][i] * 0.35f;
                 }
             }
-        } else {
-            for (int i = 0; i < T->n; i++, n++) {
-                float q[3]; for (int j = 0; j < 3; j++) q[j] = T->p[i][j] + T->v[i][j] * T->acc;
-                float r = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]), im[2][2];
-                int got = T->on[i] ? bh_point(&V, q, k, ox, oy, im) : 0;
-                float life = clamp01((r - 3.2f) / 3.5f) * clamp01((30 - r) / 8), hot = clamp01((9 - r) / 5);
-                float clump = 0.65f + 0.7f * bh_noise(i * 0.35f, at * 0.6f, 64); /* (gas, not a wire: brighter and fainter along it) */
-                cc[n] = mix(mix(STAR, WHITE, 0.5f), WARM, clamp01(0.5f * (T->q[i] + 1) * 0.6f + hot));
-                cg[n] = mix((Col){0.55f, 0.6f, 1}, (Col){1, 0.45f, 0.18f}, clamp01(0.5f * (T->q[i] + 1) + hot));
-                for (int g = 0; g < 2; g++) { ok[g][n] = got >> g & 1; if (ok[g][n]) { sp[g][n][0] = im[g][0]; sp[g][n][1] = im[g][1]; al[g][n] = fade * life * clump * (0.6f + 0.6f * hot) * (g ? 0.3f : 1) * EDGE_FADE(im[g][0], im[g][1]); } }
-            }
             for (int g = 0; g < 2; g++) {
-                for (int i = 0; i < n; i++) ag[g][i] = al[g][i] * 0.3f;
-                bh_ribbon(c, cl, sp[g], ok[g], ag[g], cg, n, wpx * (g ? 1.5f : 3), R * 1.1f);
-                bh_ribbon(c, cl, sp[g], ok[g], al[g], cc, n, wpx * (g ? 0.5f : 0.85f), R * 1.1f);
+                if (ext < 0.05f) { /* (points on one spot: a ball of gas, a star, a flash) */
+                    if (!ok[g][0]) continue;
+                    float e = fminf(1.5f, P[a0][3] * 0.3f) * (g ? 0.35f : 1) * EDGE_FADE(sp[g][0][0], sp[g][0][1]), sz = rad * k * (g ? 0.6f : 1);
+                    blob(c, cl, sp[g][0][0], sp[g][0][1], sz * 5, cg[0], 0.25f * e, cg[0], 0.08f * e, 0.15f);
+                    blob(c, cl, sp[g][0][0], sp[g][0][1], sz * 1.4f, WHITE, 1.0f * e, cc[0], 0.7f * e, 0.45f);
+                    continue;
+                }
+                float w = fmaxf(wpx * 0.6f, rad * k * 0.9f);
+                bh_ribbon(c, cl, sp[g], ok[g], ag[g], cg, m, w * (g ? 1.6f : 3), R * 1.1f);
+                bh_ribbon(c, cl, sp[g], ok[g], al[g], cc, m, w * (g ? 0.5f : 0.9f), R * 1.1f);
             }
+            a0 = a1;
         }
-    }
-    if (act == HA_FLARE) { /* the flux eruption: a magnetic loop of hot gas rises off the flash, swells and twists, pinches
-                              * off and its plasmoid drifts out, fading; its bent image follows a moment later (echo) */
-        for (int g = 0; g < 2; g++) {
-            float t = at - 0.2f - 0.35f * g;
-            if (t <= 0) continue;
-            float a0 = V.p * 3.14159265f + BH_TS / (6.8f * sqrtf(6.8f)) * (0.2f + t) * 0.85f, f = expf(-t * 0.45f) * clamp01(t / 0.25f) * hb * V.fo * (g ? 0.35f : 1);
-            float pinch = clamp01((t - 1.4f) / 0.8f), hgt = 0.8f + 3.6f * fminf(t, 1.6f) + 1.6f * fmaxf(0, t - 1.6f), sgn = V.q < 0 ? -1 : 1;
-            enum { NL = 26 };
-            float lp[NL][2], la[NL], lg[NL]; int lo[NL]; Col lc[NL], lgc[NL];
-            for (int i = 0; i < NL; i++) {
-                float u = (float)i / (NL - 1), arc = sinf(3.14159265f * u), sep = 0.8f * (1 + 0.4f * t) * (1 - 0.7f * pinch);
-                float az = a0 + (u - 0.5f) * sep, rr = 6.8f + 1.6f * arc * fminf(t, 2) + 1.4f * pinch * t, tw = 0.35f * sinf(u * 9 + t * 5) * arc;
-                float d[3] = {rr * cosf(az) + tw * cosf(az + 1.57f), rr * sinf(az) + tw * sinf(az + 1.57f), sgn * hgt * arc}, im[2][2];
-                lo[i] = bh_point(&V, d, k, ox, oy, im) >> g & 1;
-                if (lo[i]) { lp[i][0] = im[g][0]; lp[i][1] = im[g][1]; }
-                float foot = 1 - pinch * (1 - arc); /* (pinched off: its feet let go) */
-                la[i] = lo[i] ? f * foot * (0.7f + 0.5f * arc) * EDGE_FADE(lp[i][0], lp[i][1]) : 0; lg[i] = la[i] * 0.35f;
-                lc[i] = mix((Col){1, 0.96f, 0.9f}, (Col){1, 0.66f, 0.38f}, clamp01(t / 2.5f + 0.3f * (1 - arc)));
-                lgc[i] = (Col){1, 0.45f, 0.18f};
-            }
-            for (int i = 0; i < NL; i++) { la[i] *= 1.5f; lg[i] *= 1.5f; }
-            bh_ribbon(c, cl, lp, lo, lg, lgc, NL, wpx * (g ? 2 : 4.2f), R);
-            bh_ribbon(c, cl, lp, lo, la, lc, NL, wpx * (g ? 0.7f : 1.25f), R);
-        }
-    }
-    { /* gas pulled off a held press: a stream spiralling in, heating as it falls */
-        const HoldRS *P = &H->hold;
-        float sp[2][HS_N][2], al[2][HS_N]; int ok[2][HS_N], n = 0; Col cc[HS_N];
-        for (int j = 0; j < HS_N; j++, n++) { /* oldest first */
-            int i = (P->head + j) % HS_N;
-            float q[3]; for (int d = 0; d < 3; d++) q[d] = P->p[i][d] + P->v[i][d] * P->acc;
-            float r = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
-            int got = 0; float im[2][2];
-            if (P->age[i] > 0) for (int g = 0; g < 2; g++) { float X, Y; if (bh_image(q, g, &X, &Y)) { im[g][0] = ox + X * k; im[g][1] = oy - Y * k; got |= 1 << g; } }
-            float hot = clamp01((10 - r) / 5.5f), life = clamp01((r - 4.5f) / 2) * clamp01(P->age[i] / 0.15f) * clamp01((7 - P->age[i]) / 1.5f) * hb;
-            cc[n] = mix((Col){1, 0.55f, 0.25f}, (Col){1, 0.92f, 0.8f}, hot);
-            for (int g = 0; g < 2; g++) { ok[g][n] = got >> g & 1; if (ok[g][n]) { sp[g][n][0] = im[g][0]; sp[g][n][1] = im[g][1]; } al[g][n] = life * (0.45f + 0.6f * hot) * (g ? 0.3f : 1); }
-        }
-        for (int g = 0; g < 2; g++) bh_ribbon(c, cl, sp[g], ok[g], al[g], cc, n, wpx * (g ? 0.55f : 0.9f), R * 0.5f);
     }
 }
 /* The actions' gas for the GPU to trace (win/gpu.c): points in the view's frame (x right, y up, z toward you; M), each
  * with how bright (P[i][3]), how hot (Q[i][0], 0: a star's blue-white .. 1: glowing orange) and how thick (Q[i][1], M;
  * negative: a new stream starts here). The torn star and its debris, the flare's loop, gas pulled off a held press:
  * the same paths the CPU draws as ribbons, now as gas the GPU bends round the hole and hides behind it. How many */
+/* two points of a stream not to join with a straight tube: it would pass close by the hole (a chord across its shadow,
+ * drawn in front of it as a line: a stream swinging round behind it is split there instead, and the hole hides it), or
+ * be very long (a straight stick across the picture) */
+static int gas_cuts(const float *a, const float *b) {
+    float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if (l2 > 14.0f * 14.0f) return 1;
+    float t = l2 > 1e-8f ? clamp01(-(a[0] * d[0] + a[1] * d[1] + a[2] * d[2]) / l2) : 0, c[3] = {a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t};
+    return c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 4.2f * 4.2f;
+}
+/* the hot spot spiralling in under gravity: from 8.5 M toward the disc's inner edge, faster as it goes (Kepler: its turn ~
+ * r^-1.5; once round in 5 s at 7 M), the way the gas goes. Its angle (the disc's frame) and radius now */
+void bh_spot_state(const Session *s, double now, float *ang, float *r) {
+    const HoleRS *H = &s->mo.rs.hole;
+    float at = H->act == HA_SPOT ? (float)(now - H->act_at) : 0, dur = HOLE_ACT_DUR[HA_SPOT], a = H->act_p * 3.14159265f, sg = BH_TUNE.b2_spin < 0 ? -1.0f : 1.0f;
+    for (int k = 0; k < 100 && at > 0; k++) { float tk = at * (k + 0.5f) / 100, u = fminf(1, tk / dur), rk = 8.5f - 3.3f * u * u; a += sg * 6.2831853f / 5 * powf(7 / rk, 1.5f) * at / 100; }
+    float u = fminf(1, at / dur);
+    *ang = a; *r = 8.5f - 3.3f * u * u;
+}
 int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], int max) {
     const HoleRS *H = &s->mo.rs.hole;
     float nn[3], ea[3], ec[3], l;
@@ -1467,30 +1492,34 @@ int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], in
     float at = act ? (float)(now - H->act_at) : 0, au = act ? clamp01(at / HOLE_ACT_DUR[act]) : 0, fo = act ? clamp01((float)(H->act_end - now) / 0.9f) : 0, hb = s->mo.hole;
     fo = fo * fo * (3 - 2 * fo);
 #define GAS_DISC(D, BR, TP, RAD) do { if (n < max) { const float *d_ = (D); for (int q_ = 0; q_ < 3; q_++) P[n][q_] = d_[0] * ea[q_] + d_[1] * ec[q_] + d_[2] * nn[q_]; \
+        if (!brk && n && gas_cuts(P[n - 1], P[n])) { brk = 1; } \
         P[n][3] = (BR); Q[n][0] = (TP); Q[n][1] = brk ? -(RAD) : (RAD); brk = 0; n++; } } while (0)
-#define GAS_VIEW(D, BR, TP, RAD) do { if (n < max) { for (int q_ = 0; q_ < 3; q_++) P[n][q_] = (D)[q_]; P[n][3] = (BR); Q[n][0] = (TP); Q[n][1] = brk ? -(RAD) : (RAD); brk = 0; n++; } } while (0)
+#define GAS_VIEW(D, BR, TP, RAD) do { if (n < max) { for (int q_ = 0; q_ < 3; q_++) P[n][q_] = (D)[q_]; \
+        if (!brk && n && gas_cuts(P[n - 1], P[n])) { brk = 1; } \
+        P[n][3] = (BR); Q[n][0] = (TP); Q[n][1] = brk ? -(RAD) : (RAD); brk = 0; n++; } } while (0)
     if (act == HA_FEED) {
         const TdeRS *T = &H->tde;
         float fade = bh_env(au, 0.04f, 0.2f) * hb * fo;
-        if (!T->split) { /* the star, drawn out along its path as it nears the hole */
-            float r = sqrtf(T->s[0] * T->s[0] + T->s[1] * T->s[1] + T->s[2] * T->s[2]);
-            int m = (int)fminf((float)T->hn, 4 + 140 * powf(7.2f / r, 4)), step = m > 60 ? 4 : 2;
-            float in = fade * clamp01((23 - r) / 4); /* (it comes in out of the dark, never popping in at the picture's edge) */
-            float st[3]; for (int q = 0; q < 3; q++) st[q] = T->hist[0][q] + T->s[3 + q] * T->acc;
-            GAS_DISC(st, in * 5, 0.05f, 0.7f); GAS_DISC(st, in * 5, 0.05f, 0.7f); /* the star: a round blob of its own (as the first point of
-                                                                                   * its stream, the tube narrowing to the stream sliced it in half) */
-            brk = 1;
-            for (int i = step; i < m && n < max - 1; i += step) { /* the gas drawn out of it, thin */
-                float hp[3]; for (int q = 0; q < 3; q++) hp[q] = T->hist[i][q] + T->s[3 + q] * T->acc;
-                GAS_DISC(hp, in * 1.1f * (1 - 0.85f * i / (m + 2)), 0.05f, 0.2f);
+        { /* the star: a bright ball while it holds together; its gas, in order along it (each piece's orbital energy once
+           * it is past its closest point; before that, how far in toward the hole), a ball still, then a stream as it tears */
+            float st[3]; for (int q = 0; q < 3; q++) st[q] = T->s[q] + T->s[3 + q] * T->acc;
+            float cr = sqrtf(st[0] * st[0] + st[1] * st[1] + st[2] * st[2]) + 1e-4f, in = fade * clamp01((23 - cr) / 4); /* (it comes in out of the dark) */
+            float torn = clamp01((T->spread - 1.0f) / 2.5f);
+            if (torn < 1) { GAS_DISC(st, in * 5 * (1 - torn), 0.05f, 0.75f); GAS_DISC(st, in * 5 * (1 - torn), 0.05f, 0.75f); brk = 1; }
+            int ord[TDE_N], m = 0; float key[TDE_N];
+            for (int i = 0; i < T->n; i++) {
+                if (!T->on[i]) continue;
+                float kk = T->split ? T->q[i] : -((T->p[i][0] - T->s[0]) * T->s[0] + (T->p[i][1] - T->s[1]) * T->s[1] + (T->p[i][2] - T->s[2]) * T->s[2]) / cr;
+                int at2 = m++;
+                while (at2 > 0 && key[at2 - 1] > kk) { key[at2] = key[at2 - 1]; ord[at2] = ord[at2 - 1]; at2--; }
+                key[at2] = kk; ord[at2] = i;
             }
-        } else { /* its debris: bound and falling in (heating), or flung away */
-            for (int i = 0; i < T->n && n < max - 1; i += 2) {
-                if (!T->on[i]) { brk = 1; continue; }
+            for (int o = 0; o < m && n < max - 3; o++) {
+                int i = ord[o];
                 float q3[3]; for (int j = 0; j < 3; j++) q3[j] = T->p[i][j] + T->v[i][j] * T->acc;
-                float r = sqrtf(q3[0] * q3[0] + q3[1] * q3[1] + q3[2] * q3[2]), life = clamp01((r - 3.2f) / 3.5f) * clamp01((30 - r) / 8), sh = clamp01(T->hot[i] / 2);
-                /* the stream thin and dim (cold gas); shocked, it glows hot and puffs up */
-                GAS_DISC(q3, fade * life * (0.45f + 1.6f * sh), 0.12f + 0.75f * sh, 0.24f + 0.25f * sh);
+                float r = sqrtf(q3[0] * q3[0] + q3[1] * q3[1] + q3[2] * q3[2]), sh = clamp01(T->hot[i] / 2);
+                float life = clamp01((r - 5.5f) / 3) * clamp01((30 - r) / 8); /* (in close it has joined the disc, which flares with it) */
+                GAS_DISC(q3, in * life * (0.3f + 0.7f * torn) * (0.45f + 1.6f * sh), 0.08f + 0.1f * torn + 0.75f * sh, 0.5f - 0.26f * torn + 0.25f * sh);
             }
             brk = 1;
             if (T->shock_amp > 0.05f) { /* the shock where the streams cross: a bright, swelling blob */
@@ -1519,18 +1548,30 @@ int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], in
         }
         brk = 1;
         if (ts > 0) { /* the flash where it snapped, then the blob flung out */
-            float azt = ph0, rt = R0 + 1.3f, ht = hgt;
+            float azt = H->act_p * 3.14159265f + om * SNAP, rt = R0 + 1.3f, ht = hgt; /* (where it snapped: the blob leaves from there) */
             float fl = expf(-ts * 4.5f) * 4.5f;
             float top[3] = {rt * cosf(azt), rt * sinf(azt), ht};
             if (fl > 0.05f) { GAS_DISC(top, f * fl, 0.1f, 0.5f + 0.9f * ts); GAS_DISC(top, f * fl, 0.1f, 0.5f + 0.9f * ts); brk = 1; }
-            float go = 1 - expf(-ts * 0.9f), rb = rt + 11 * go, hb2 = ht + 7 * go, ab = azt + 0.25f * go;
-            float cool = clamp01(ts / 2.2f), br = f * 2.6f * expf(-ts * 0.55f), rad = 0.45f + 0.5f * go;
-            for (int k = 0; k < 3; k++) { /* (a short smear along its path: the blob and its wake) */
-                float g2 = 1 - expf(-fmaxf(0, ts - 0.07f * k) * 0.9f), rk = rt + 11 * g2, hk = ht + 7 * g2, ak = azt + 0.25f * g2;
-                float p3[3] = {rk * cosf(ak), rk * sinf(ak), hk};
-                GAS_DISC(p3, br * (1 - 0.3f * k), 0.15f + 0.8f * cool, rad * (1 - 0.15f * k));
+            /* the blob, flung off under the hole's gravity (Paczynski-Wiita, as the torn star): launched outward, upward
+             * and along the way the gas turns, a little slower than it would take to get away, so it climbs, slows and
+             * curves round; worked out again from the snap each frame (a few hundred small steps) */
+            float rr0 = sqrtf(rt * rt + ht * ht), ve = 0.85f * sqrtf(2 / (rr0 - 2)), bp[3] = {top[0], top[1], top[2]}, bv[3];
+            { float out[3] = {cosf(azt), sinf(azt), 0}, up[3] = {0, 0, 1}, fw[3] = {-sinf(azt), cosf(azt), 0}, l2 = 0;
+              for (int q = 0; q < 3; q++) { bv[q] = 0.55f * out[q] + 0.45f * up[q] + 0.7f * fw[q]; l2 += bv[q] * bv[q]; }
+              for (int q = 0; q < 3; q++) bv[q] *= ve / sqrtf(l2); }
+            const float hstep = 0.4f;
+            float trail[3][3], tt = ts * BH_TS;
+            int steps = (int)(tt / hstep), mark[3] = {steps, (int)(fmaxf(0, ts - 0.08f) * BH_TS / hstep), (int)(fmaxf(0, ts - 0.16f) * BH_TS / hstep)};
+            for (int k = 0; k < 3; k++) memcpy(trail[k], bp, sizeof bp);
+            for (int st = 1; st <= steps && st < 600; st++) { /* velocity Verlet */
+                float a1[3], a2[3], r1 = sqrtf(bp[0] * bp[0] + bp[1] * bp[1] + bp[2] * bp[2]) + 1e-4f, g1 = -1 / ((r1 - 2) * (r1 - 2) * r1);
+                for (int q = 0; q < 3; q++) { a1[q] = bp[q] * g1; bv[q] += a1[q] * hstep / 2; bp[q] += bv[q] * hstep; }
+                float r2 = sqrtf(bp[0] * bp[0] + bp[1] * bp[1] + bp[2] * bp[2]) + 1e-4f, g2 = -1 / ((r2 - 2) * (r2 - 2) * r2);
+                for (int q = 0; q < 3; q++) { a2[q] = bp[q] * g2; bv[q] += a2[q] * hstep / 2; }
+                for (int k = 0; k < 3; k++) if (st == mark[k]) memcpy(trail[k], bp, sizeof bp);
             }
-            (void)rb; (void)hb2; (void)ab;
+            float cool = clamp01(ts / 2.2f), br = f * 2.6f * expf(-ts * 0.55f), rad = 0.45f + 0.25f * clamp01(ts / 1.5f);
+            for (int k = 0; k < 3; k++) GAS_DISC(trail[k], br * (1 - 0.3f * k), 0.15f + 0.8f * cool, rad * (1 - 0.15f * k)); /* (the blob and its wake) */
             brk = 1;
         }
     }

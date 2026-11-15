@@ -204,7 +204,8 @@ const unsigned char *gpu_hole(const Session *s, int n, float E, double now, int 
         pglUniform1i(U_("u_gn"), gn); pglUniform4f(U_("u_gb"), cx, cy, cz, rb);
         if (gn) { pglUniform4fv(U_("u_gp"), gn, &P[0][0]); pglUniform2fv(U_("u_gq"), gn, &Q[0][0]); }
     }
-    pglUniform1f(U_("u_spot"), spot); pglUniform1f(U_("u_spot_a"), H->act_p * 3.14159265f); pglUniform1f(U_("u_spot_t"), at);
+    { float ang, sr; bh_spot_state(s, now, &ang, &sr); /* (spiralling in: render.c) */
+      pglUniform1f(U_("u_spot"), spot); pglUniform1f(U_("u_spot_a"), ang); pglUniform1f(U_("u_spot_t"), at); pglUniform1f(U_("u_spot_r"), sr); }
     pglUniform1f(U_("u_flare"), flare); pglUniform1f(U_("u_flare_a"), H->act_p * 3.14159265f); pglUniform1f(U_("u_flare_t"), at);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);

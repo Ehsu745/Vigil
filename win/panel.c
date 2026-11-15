@@ -98,6 +98,7 @@ static float g_scroll_arg;           /* --settings-scroll PX: set once the page 
 static char g_set_shot[1024];       /* --settings-shot FILE: open it, let the preview run 2 s, save the window as a BMP and quit */
 static int g_shot_act, g_shot_n = 1; static float g_shot_step = .5f; /* --settings-hole A N STEP: once the preview is a grown black hole, play its action A, then save N shots STEP s apart (FILE_00.bmp ...) */
 static int g_stats;                 /* --stats: frames, pictures and window updates a second, to panel-stats.txt */
+static int g_hole_light;            /* on the CPU, the lighter black hole (Settings > Performance: CPU light, holeLight; BH_LIGHT) */
 static int g_gpu = 1;               /* the black hole drawn on the GPU (win/gpu.c) when it can be (Settings > Performance, holeGpu); --no-gpu: on the CPU */
 static int g_nogpu_arg;
 static double g_stat_gpu_ms; static long g_stat_gpu_n; /* (--stats: the GPU's share of the pictures) */
@@ -528,6 +529,7 @@ static void settings_load(void) {
         g_smooth_custom = cu;
     if (json_num(buf, "threads", &v) && v >= 0 && v <= 8) g_threads = (int)v;
     if (json_num(buf, "holeGpu", &v)) g_gpu = v != 0;
+    if (json_num(buf, "holeLight", &v)) g_hole_light = v != 0;
     if (json_num(buf, "setW", &v) && v >= 620 && v <= 6000) g_set_w = v; /* the Settings window itself */
     if (json_num(buf, "setH", &v) && v >= 480 && v <= 6000) g_set_h = v;
     if (json_num(buf, "setSide", &v)) g_set_side = v != 0;
@@ -569,7 +571,7 @@ static void settings_save(void) {
     fprintf(f, "], \"holeTilt\": %g, \"holeActs\": %lu, \"holeActsN\": %d, \"readyAttacks\": %lu, \"mapActions\": [", HOLE_TILT, (unsigned long)HOLE_ACTS, HA_N, (unsigned long)READY_ATKS);
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
     const Smooth *cu = &g_smooth_custom;
-    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], \"threads\": %d, \"holeGpu\": %d, ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand, g_threads, g_gpu);
+    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], \"threads\": %d, \"holeGpu\": %d, \"holeLight\": %d, ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand, g_threads, g_gpu, g_hole_light);
     fprintf(f, "\"setW\": %g, \"setH\": %g, \"setSide\": %d, \"hkMode\": \"%s\", \"hkHide\": \"%s\", \"hkReply\": \"%s\", \"hkSettings\": \"%s\", \"moveMod\": %d, \"sendCtrl\": %d, \"backdrop\": %d, \"bdWidth\": %d, \"bdStrength\": %d, \"bdCentre\": %d, \"shadeColor\": %d, \"shadeCustom\": %u, \"previewLight\": %d}\n",
             g_set_w, g_set_h, g_set_side, g_mode_hotkey, g_hk_hide, g_hk_reply, g_hk_set, g_move_mod, g_send_ctrl, g_backdrop, g_bd_w, g_bd_a, BACKDROP_CORE, g_shade_col, g_shade_custom, g_pv_light);
     fclose(f);
@@ -832,6 +834,7 @@ static int pic_make_at(Pic *p, const Session *s, int px, double now, float k, fl
     size_t big = need * ss * ss;
     BH_GPU_IMG.rgba = NULL;
     BH_GPU_ON = g_gpu && gpu_init(); /* (on the GPU: the CPU builds no maps of its own) */
+    BH_LIGHT = !BH_GPU_ON && !g_gpu && g_hole_light;
     if (g_gpu && s->mo.rt == RT_HOLE && s->mo.hole > 0.01f) { /* a black hole: the GPU draws it, if it can (else the CPU, as before) */
         double g0 = g_stats ? qpc_ms() : 0;
         /* its picture at exactly the core's scale (growing with the hole as it forms), so it is laid in pixel for pixel */
@@ -1547,6 +1550,18 @@ static void draw(double now) {
  * pieces are out. */
 static Pane g_layer;
 static Canvas g_lcv;
+/* an app filling that monitor (a game, a video, a presentation): READY never throws over it */
+static int full_on(HMONITOR mon) {
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == GetShellWindow() || fg == GetDesktopWindow()) return 0;
+    DWORD pid = 0; GetWindowThreadProcessId(fg, &pid);
+    if (pid == GetCurrentProcessId()) return 0;
+    wchar_t cls[32]; if (GetClassNameW(fg, cls, 32) && (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW"))) return 0; /* (the desktop) */
+    MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+    RECT r;
+    if (!GetMonitorInfo(mon, &mi) || !GetWindowRect(fg, &r)) return 0;
+    return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom;
+}
 static void layer_draw(double now) {
     Room *room = shown_room();
     int who = -1;
@@ -1580,6 +1595,11 @@ static void layer_draw(double now) {
     GetMonitorInfo(MonitorFromRect(&cr, MONITOR_DEFAULTTONEAREST), &mi);
     RECT mon = mi.rcMonitor;
     UnionRect(&mon, &mon, &cr); /* (the core itself may hang over the edge) */
+    if (s->aim_on) { /* the pointer's monitor too: what is thrown follows it across */
+        POINT ap = {(LONG)(cx + s->aim_x * u), (LONG)(cy + s->aim_y * u)};
+        MONITORINFO pm; memset(&pm, 0, sizeof pm); pm.cbSize = sizeof pm;
+        if (GetMonitorInfo(MonitorFromPoint(ap, MONITOR_DEFAULTTONEAREST), &pm)) UnionRect(&mon, &mon, &pm.rcMonitor);
+    }
     IntersectRect(&b, &b, &mon);
     /* while pieces are out the window only grows, in 128-pixel steps: a new size means a new bitmap and canvas, and
      * pieces scattering after a hit would otherwise change it every frame */
@@ -3753,7 +3773,7 @@ static void track_mouse(double now) {
         s->lock_to = i == hit && !busy && now - g_hover_since > 2.0 ? 1.0f : 0.0f; /* lock-on after resting 2 s, untouched */
     }
     watch_for_rush(now, scr);
-    { /* READY: one core at a time throws at the pointer (the main one first), while the pointer is on its monitor, off every core */
+    { /* READY: one core at a time throws at the pointer (the main one first), on any monitor, off every core */
         int atk = -1;
         for (int i = 0; i < room->n && i < MAX_SESS; i++) {
             room->s[i].aim_on = 0;
@@ -3767,7 +3787,7 @@ static void track_mouse(double now) {
             float mx = (cb.left + cb.right) * .5f, my = (cb.top + cb.bottom) * .5f;
             s->aim_x = (scr.x + mx - (r.left + r.right) * .5f) / u; s->aim_y = (scr.y + my - (r.top + r.bottom) * .5f) / u;
             s->aim_hit = (.5f * hypotf((float)(cb.right - cb.left), (float)(cb.bottom - cb.top)) + 7 * (float)g_dpi) / u;
-            s->aim_on = !busy && hit < 0 && !input_open() && !set_open() && MonitorFromPoint(scr, MONITOR_DEFAULTTONEAREST) == MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+            s->aim_on = !busy && hit < 0 && !input_open() && !set_open() && !full_on(MonitorFromPoint(scr, MONITOR_DEFAULTTONEAREST)); /* (any monitor, but never over an app filling one: a game, a video) */
         }
     }
     int grabbed = busy || g_down_sid[0];
@@ -4117,7 +4137,7 @@ static void write_stats(double now) {
         fprintf(f, "%.0f  ticks %.1f/s  pictures %.1f/s  window updates %.1f/s  tick %.2f ms avg  gap %.1f ms (sd %.1f, max %.1f)  late %ld  monitor %.0f Hz, scale %.2f  smooth %s  pictures %.0f ms/s  windows %.0f ms/s  reply paints %.1f/s field, %.1f/s card\n",
                 now, g_stat_tick / span, g_stat_pic / span, g_stat_push / span, g_stat_tick ? g_stat_ms / g_stat_tick : 0,
                 mean, sd, g_stat_gap_max, g_stat_late, g_hz, g_dpi, SMOOTH_NAME[g_smooth], g_stat_render_ms / span, g_stat_push_ms / span, g_stat_paint_edit / span, g_stat_paint_card / span);
-        fprintf(f, "    black hole: %s, %.1f GPU pictures/s, %.2f ms each%s%s\n", g_gpu && gpu_init() ? "GPU" : "CPU", g_stat_gpu_n / span, g_stat_gpu_n ? g_stat_gpu_ms / g_stat_gpu_n : 0, g_gpu ? "" : "  (", g_gpu ? "" : "--no-gpu or none)");
+        fprintf(f, "    black hole: %s, %.1f GPU pictures/s, %.2f ms each%s%s\n", g_gpu && gpu_init() ? "GPU" : BH_LIGHT ? "CPU light" : "CPU", g_stat_gpu_n / span, g_stat_gpu_n ? g_stat_gpu_ms / g_stat_gpu_n : 0, g_gpu ? "" : "  (", g_gpu ? "" : "--no-gpu or none)");
         g_stat_gpu_ms = 0; g_stat_gpu_n = 0;
         if (g_sa_n) {
             fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events read %.1f ms  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max);
@@ -4211,7 +4231,7 @@ static const float RATES[NRATES] = {2, 4, 6, 10, 15, 20, 30, 45, 60, 90, 120, 0}
 static const wchar_t *RATE_NAMES[NRATES] = {L"2", L"4", L"6", L"10", L"15", L"20", L"30", L"45", L"60", L"90", L"120", L"Max"};
 static const int THREADS[5] = {0, 1, 2, 4, 8};
 static const wchar_t *THREAD_NAMES[5] = {L"Auto", L"1", L"2", L"4", L"8"};
-static const wchar_t *HOLEGPU_NAMES[2] = {L"GPU", L"CPU"};
+static const wchar_t *HOLEGPU_NAMES[3] = {L"GPU", L"CPU", L"CPU light"};
 static float *rate_of(Smooth *m, int row) { return row == R_RIDLE ? &m->idle : row == R_RTHINK ? &m->think : row == R_RBUSY ? &m->busy : row == R_RREST ? &m->rest : &m->hand; }
 static int rate_stop(float v) { /* the slider's step nearest a rate */
     if (v <= 0) return NRATES - 1;
@@ -4308,7 +4328,7 @@ static int set_current(int row) {
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
         case R_LABELS: return g_labels;
         case R_AWAY: if (i < 8 && g_away_after == AWAYS[i]) return i; break;
-        case R_HOLEGPU: return g_gpu ? 0 : 1;
+        case R_HOLEGPU: return g_gpu ? 0 : g_hole_light ? 2 : 1;
         case R_CHATSIZE: if (i < 4 && g_chat_size == CHATSIZES[i]) return i; break;
         case R_CHATBG: return g_chat_bg;
         case R_WHEEL: return g_wheel_spin;
@@ -4419,7 +4439,7 @@ static void set_choose(int row, int val) {
     case R_TEXT: g_font = FONTS[val]; chat_refont(); break;
     case R_LABELS: g_labels = val; break;
     case R_AWAY: if (val >= 0 && val < 8) g_away_after = AWAYS[val]; break;
-    case R_HOLEGPU: g_gpu = val == 0; break;
+    case R_HOLEGPU: g_gpu = val == 0; g_hole_light = val == 2; break;
     case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
     case R_CHATBG: g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
@@ -4474,7 +4494,7 @@ static void page_reset(int pg) {
         snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
         snprintf(g_hk_reply, sizeof g_hk_reply, "%s", g_launch.hk[2]); snprintf(g_hk_set, sizeof g_hk_set, "%s", g_launch.hk[3]);
         g_move_mod = g_launch.move_mod; g_send_ctrl = g_launch.send_ctrl; hotkeys_apply(); break;
-    case PG_PERF: g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads; g_gpu = 1; break;
+    case PG_PERF: g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads; g_gpu = 1; g_hole_light = 0; break;
     }
     settings_applied(1);
 }
@@ -4774,7 +4794,7 @@ static int page_sections(int pg, SSec *s) {
             static wchar_t gnote[200];
             if (gpu_init()) swprintf(gnote, 200, L"asleep, it is drawn on the graphics card: a sixth of the CPU");
             else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it", gpu_why());
-            ROW(2, RK_SEG, R_HOLEGPU, 2, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
+            ROW(2, RK_SEG, R_HOLEGPU, 3, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
         }
         break;
     }
@@ -5015,7 +5035,7 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
  * with its button or a click on its row, switched on or off with its switch), what your hands can do to it, and below
  * them the routines Asleep may pick from. Returns the height used; draws only when asked (measured first) */
 static const char *HOLE_SHORT[HA_N] = {"", "", "a star torn apart as it swings past",
-    "a loop of hot gas rises off the disc, snaps and flings a blob out", "", "its disc wobbles round like a top", "a hot clump races round its inner edge"};
+    "a loop of hot gas rises off the disc, snaps and flings a blob out", "", "its disc wobbles round like a top", "a hot clump spirals in, faster as it falls"};
 static float sleep_body(Pane *pn, float a, float y0, float b, int draw) {
     float y = y0;
     { /* the black hole itself */
@@ -6440,6 +6460,7 @@ static void usage(void) {
         "  --stats              every 5 s, frames, pictures and window updates a second to panel-stats.txt\n"
         "  --settings           open the Settings window at once\n"
         "  --no-gpu             draw the black hole on the CPU, not the GPU\n"
+        "  --cpu-light          the same, the lighter way (Settings > Performance: CPU light)\n"
         "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n"
         "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
         "  --settings-light     start the preview on its light background (with --settings-shot)\n"
@@ -6449,7 +6470,8 @@ static void usage(void) {
         "  --settings-fold      with its sidebar folded to icons\n"
         "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n"
         "  --settings-scroll PX its page scrolled down that far (with --settings-shot)\n"
-        "  --settings-hole A N STEP  (with --settings-shot FILE) play the black hole's action A, save N shots STEP s apart\n\n"
+        "  --settings-hole A N STEP  (with --settings-shot FILE) play the black hole's action A, save N shots STEP s apart\n"
+        "  --settings-attack A N STEP  the same for READY's attack A\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, chat box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
@@ -6488,6 +6510,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
         else if (!strcmp(a, "--stats")) g_stats = 1;
         else if (!strcmp(a, "--no-gpu")) g_nogpu_arg = 1;
+        else if (!strcmp(a, "--cpu-light")) g_nogpu_arg = 2; /* (on the CPU, the light one) */
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
         else if (!strcmp(a, "--settings-tab") && v) { /* look, cluster, replies, motions, shortcuts, performance */
             static const char *TABS[PG_N] = {"look", "cluster", "replies", "motions", "shortcuts", "performance"};
@@ -6505,6 +6528,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
         else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
         else if (!strcmp(a, "--settings-hole") && v && i + 3 < argc) { g_shot_act = atoi(v); g_shot_n = atoi(argv[i + 2]); g_shot_step = (float)atof(argv[i + 3]); g_pv_st = ST_SLEEP; i += 3; }
+        else if (!strcmp(a, "--settings-attack") && v && i + 3 < argc) { g_shot_act = -atoi(v); g_shot_n = atoi(argv[i + 2]); g_shot_step = (float)atof(argv[i + 3]); g_pv_st = ST_READY; i += 3; } /* (READY's attack A, the same way) */
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
         else { usage(); return a[0] == '-' && (!strcmp(a, "-h") || !strcmp(a, "--help")) ? 0 : 2; }
     }
@@ -6519,7 +6543,7 @@ int main(int argc, char **argv) {
     }
     remember_launch();
     settings_load(); /* the Settings menu's choices win over the options */
-    if (g_nogpu_arg) g_gpu = 0; /* (--no-gpu wins: a check against the CPU) */
+    if (g_nogpu_arg) { g_gpu = 0; g_hole_light = g_nogpu_arg == 2; } /* (--no-gpu / --cpu-light win: a check against the CPU) */
     if (g_pv_light_arg > 0) g_pv_light = 1;
     if (!shape_make(&g_shape, g_shape_name)) { snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name); }
     pos_read();
@@ -6583,7 +6607,8 @@ int main(int argc, char **argv) {
         if (g_set_shot[0] && g_shot_act) { /* (a sequence: the action played once the hole has grown) */
             static double play_at; static int k;
             Session *ps = &g_pv_room.s[0];
-            if (!play_at && ps->mo.rt == RT_HOLE && ps->mo.rs.hole.grow > .97f && wall() > shot_at) { hole_play(ps, g_shot_act); play_at = wall() + .1; }
+            if (!play_at && g_shot_act > 0 && ps->mo.rt == RT_HOLE && ps->mo.rs.hole.grow > .97f && wall() > shot_at) { hole_play(ps, g_shot_act); play_at = wall() + .1; }
+            if (!play_at && g_shot_act < 0 && wall() > shot_at) { ready_play(ps, -g_shot_act); play_at = wall() + .1; }
             if (play_at && wall() >= play_at + k * g_shot_step) {
                 char f[1100]; snprintf(f, sizeof f, "%s_%02d.bmp", g_set_shot, k);
                 settings_shot(f);

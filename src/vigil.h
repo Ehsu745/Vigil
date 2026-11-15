@@ -201,11 +201,12 @@ typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int si
 enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_LENS, HA_PRECESS, HA_SPOT, HA_N };
 #define HA_RETIRED (1u << HA_JETS) /* (Jets: removed, never played or offered; its number kept so saved settings still line up) */
 #define HOLE_ACTS_DEF (((1u << HA_N) - 2) & ~HA_RETIRED)
-#define TDE_N 96  /* a star torn apart (HA_FEED): its debris, as points along the stream */
-#define TDE_H 192 /* the star's own path while it is drawn out, before it breaks up (substeps) */
-/* the debris of a star torn apart, in units of the hole's mass M, in the disc's own frame (x toward you, y across, z
- * up along its axis); the star itself until it passes closest (split 0), then each piece on its own orbit */
-typedef struct { float p[TDE_N][3], v[TDE_N][3], q[TDE_N], s[6], hist[TDE_H][3], heat, acc, shock[3], shock_amp, hot[TDE_N]; signed char on[TDE_N], back[TDE_N]; int hn, split, n; } TdeRS;
+#define TDE_N 56  /* a star torn apart (HA_FEED): the gas it is made of, each piece on its own orbit */
+/* a star torn apart, in units of the hole's mass M, in the disc's own frame (x toward you, y across, z up along its
+ * axis): a ball of gas held together by its own gravity until the hole's tidal pull wins, then each piece on its own
+ * orbit (s: its centre's place and speed; spread: how far its gas is from it, rms; split: past its closest point,
+ * each piece's orbital energy q then fixed, the order along the stream) */
+typedef struct { float p[TDE_N][3], v[TDE_N][3], q[TDE_N], s[6], spread, heat, acc, shock[3], shock_amp, hot[TDE_N]; signed char on[TDE_N], back[TDE_N]; int split, n; } TdeRS;
 /* (shock: where the returning stream crashes into the incoming one; shock_amp how bright; hot: each piece heated by it; back: it has turned at its far point, falling in again) */ /* acc: time not stepped yet (M) */
 /* gas pulled off the pointer while a press is held on the hole (screen frame: x right, y up, z toward you; M units) */
 #define HS_N 64
@@ -429,9 +430,12 @@ int bh2_progress(void);                                    /* how far the map as
 typedef struct { const Session *s; int n; float E; const unsigned char *rgba; } BhGpuImg;
 extern BhGpuImg BH_GPU_IMG;
 extern int BH_GPU_ON;
+extern int BH_LIGHT; /* the CPU's black hole lighter (the Windows panel's CPU light): no stars behind it, 30 pictures
+                      * a second at most while it plays */
 float bh_hole_expo(const Session *s, double now); /* how bright its light is now (hover, the wheel, away, back) */
 float bh_hole_E(const Session *s, int px);
 int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], int max); /* the actions' gas for the GPU (view frame, M) */
+void bh_spot_state(const Session *s, double now, float *ang, float *r); /* the hot spot: its angle (the disc's frame) and radius now */
 #define BH_FLARE_SNAP 1.8f /* the flare: when its loop snaps (s from its start) */ /* the picture's half width at the hole, M (the GPU draws it at this scale: pixel for pixel) */
 extern BhTune BH_TUNE;
 extern float HOLE_TILT; /* how fast a black hole's axis tilts and rolls on its own (0: still; the panels' Settings set it) */
