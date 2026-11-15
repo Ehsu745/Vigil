@@ -163,6 +163,7 @@ void room_move(Room *r, int from, int to) {
 
 /* a subagent's events: its own core, which the session's own state never sees (the session is busy on the Agent call
  * meanwhile, or has already stopped while a background one works on) */
+#define SUB_STALE 900 /* s without a word from a running subagent before it counts as done */
 static void sub_apply(Room *r, const Event *e) {
     char sid[72]; /* its session's id, a dash, its agent id, cut at 64 (as the hook makes it, for the msg file) */
     size_t n = 0;
@@ -184,7 +185,9 @@ static void sub_apply(Room *r, const Event *e) {
     snprintf(s->name, sizeof s->name, "%s", e->atype[0] ? e->atype : "agent");
     if (!strcmp(ev, "PreToolUse")) { snprintf(s->tool, sizeof s->tool, "%s", e->tool); set_state(s, ST_WORK, e->t); s->hold_work_until = e->t + HOLD_WORK; }
     else if (!strcmp(ev, "PostToolUse")) { set_state(s, ST_THINK, e->t); if (e->t + HOLD_WORK > s->hold_work_until) s->hold_work_until = e->t + HOLD_WORK; }
-    else if (!strcmp(ev, "SubagentStop")) { set_state(s, ST_CHEER, e->t); s->burst_at = e->t; s->sub_done = e->t; if (e->msg) s->unread = 1; }
+    /* done: SubagentStop, or its SubagentHandback (an agent that hands its report back that way ends there, and Claude
+     * Code sends no SubagentStop for it) */
+    if (!strcmp(ev, "SubagentStop") || (!strcmp(ev, "PostToolUse") && !strcmp(e->tool, "SubagentHandback"))) { set_state(s, ST_CHEER, e->t); s->burst_at = e->t; s->sub_done = e->t; if (e->msg) s->unread = 1; }
 }
 
 void room_apply(Room *r, const Event *e) {
@@ -364,6 +367,7 @@ void room_tick(Room *r, const Shape *sh, double now, float dt) {
     for (int i = 0; i < r->n;) {
         Session *s = &r->s[i];
         int gone = now - s->last > DROP_AFTER;
+        if (s->sub && s->sub_done <= 0 && now - s->last > SUB_STALE) s->sub_done = now; /* never heard to finish (a lost stop): done after a long silence */
         if (s->sub && s->sub_done > 0) /* a finished subagent: once its reply has been seen and the pointer has left it */
             gone = gone || (SUB_UNTIL_SEEN ? s->sub_seen && s->hover_to <= 0 && s->hover < .05f : now - s->sub_done > SUB_KEEP);
         if (gone) drop(r, s);
@@ -436,7 +440,7 @@ double session_rate(const Session *s, double now, int fps) {
                                       [ST_SPEAK] = 20, [ST_LISTEN] = 20, [ST_TRANSCRIBE] = 20, [ST_STANDBY] = 4, [ST_ERROR] = 20, [ST_READY] = 20};
     int busy = mouse_busy(s, now) || s->whim || motion_busy(s, now);
     double r = now - s->state_t < 1.5 || busy ? 20 : RATE[session_shown(s, now)];
-    if (s->mo.hole > 0.01f && r < 10) r = 10; /* the black hole's dust keeps turning */
+    if (s->mo.hole > 0.01f && r < 10) r = 10; /* the black hole's disc keeps turning */
     if (s->unread && r < 12) r = 12; /* the flash of an unread reply */
     return r < fps ? r : fps;
 }
@@ -464,7 +468,8 @@ double panel_rate(const Session *s, double now, const Smooth *sm, double hz) {
         default: r = sm->busy;
     }
     double out = r <= 0 ? hz : r;
-    if (s->mo.hole > 0.01f && out < 15) out = 15; /* the black hole's dust keeps turning */
+    if (s->mo.hole > 0.5f && s->mo.rt == RT_HOLE && s->mo.rs.hole.moving && out < 60) out = 60; /* the black hole playing, or in the hand: smooth */
+    if (s->mo.hole > 0.01f && out < 15) out = 15; /* the black hole's disc keeps turning (traced per pixel: not every refresh while it only turns) */
     if (s->unread && out < 18) out = 18;         /* the flash of an unread reply */
     return out > hz ? hz : out < 2 ? 2 : out;
 }

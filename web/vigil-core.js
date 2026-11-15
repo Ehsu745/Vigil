@@ -28,6 +28,10 @@
     held: (i, on, sx, sy) => X.v_held(i, on ? 1 : 0, sx, sy),
     press: (i, lx, ly, now) => X.v_press(i, lx, ly, now), ring: (i, now) => X.v_ring(i, now), defend: (i, dx, dy, now) => X.v_defend(i, dx, dy, now),
     turn: (i, dax, day) => X.v_turn(i, dax, day),
+    // the black hole (web/blackhole-mock.html): its look's tunables (BhTune, by number), actions, axis, room round it
+    tune: (k, v) => X.v_tune(k, v), tuneGet: k => X.v_tune_get(k), b2progress: () => X.v_b2_progress(),
+    holeActs: mask => X.v_hole_acts(mask >>> 0), holePlay: (i, a) => X.v_hole_play(i, a), holeTilt: speed => X.v_hole_tilt(speed),
+    pad: (i, p) => X.v_pad(i, p), holeView: (i, nx, ny, nz, now) => X.v_hole_view(i, nx, ny, nz, now),
     now: () => performance.now() / 1000,
     tick: (now, dt) => X.v_tick(now, dt),
     // slot i drawn into a px-square ImageData (straight alpha: the light alone, see-through where dark)

@@ -165,7 +165,6 @@ void motion_map_init(void);               /* sets MOTION_MAP to the defaults onc
 #define MAX_RING 6
 #define MAX_TRAIL 20
 #define MAX_BLADE 20
-#define NDUST 140
 #define NSTAR 22
 typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /* kind: 0 in-out, 1 speeds up and stops dead, 2 jerks out and back */
 typedef struct { int v; float len, up, hd, dn; double at; } Spike;         /* len < 0: pulled in toward the centre */
@@ -197,9 +196,25 @@ typedef struct { float rank[MAX_T]; unsigned char clicked[MAX_T]; int flags; dou
 typedef struct { float d[MAX_T]; unsigned char marks[MAX_T]; int k, flags; } BloomRS;
 typedef struct { float shut_at[MAX_T], ax[3]; int k, flags; } ZipRS;
 typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int size, gone; } Piece; /* a piece blown out, falling back */
-typedef struct { float r, a, s; } Dust;
-enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_RIPPLE, HA_PRECESS, HA_N }; /* the black hole's own actions */
-typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; float star[NSTAR][4], wake, grow, act_p, flow; int banged, beat_ring, moving, act; double act_at, act_next, press_seen, defend_seen; } HoleRS; /* flow: the disc's turn (faster while pointed at) */ /* act: playing now (HA_*), from act_at; act_p its random lean */ /* grow: 0..1, the void after it has swallowed the shell */
+/* the black hole's own actions, each after something seen (or predicted) at real black holes; the bits of HOLE_ACTS
+ * (and the panels' saved holeActs) keep their numbers: Lensing took Ripple's place */
+enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_LENS, HA_PRECESS, HA_SPOT, HA_N };
+#define HA_RETIRED (1u << HA_JETS) /* (Jets: removed, never played or offered; its number kept so saved settings still line up) */
+#define HOLE_ACTS_DEF (((1u << HA_N) - 2) & ~HA_RETIRED)
+#define TDE_N 96  /* a star torn apart (HA_FEED): its debris, as points along the stream */
+#define TDE_H 192 /* the star's own path while it is drawn out, before it breaks up (substeps) */
+/* the debris of a star torn apart, in units of the hole's mass M, in the disc's own frame (x toward you, y across, z
+ * up along its axis); the star itself until it passes closest (split 0), then each piece on its own orbit */
+typedef struct { float p[TDE_N][3], v[TDE_N][3], q[TDE_N], s[6], hist[TDE_H][3], heat, acc, shock[3], shock_amp, hot[TDE_N]; signed char on[TDE_N], back[TDE_N]; int hn, split, n; } TdeRS;
+/* (shock: where the returning stream crashes into the incoming one; shock_amp how bright; hot: each piece heated by it; back: it has turned at its far point, falling in again) */ /* acc: time not stepped yet (M) */
+/* gas pulled off the pointer while a press is held on the hole (screen frame: x right, y up, z toward you; M units) */
+#define HS_N 64
+typedef struct { float p[HS_N][3], v[HS_N][3], age[HS_N], acc; int head; double next; } HoldRS;
+typedef struct { Piece piece[MAX_T]; TdeRS tde; HoldRS hold; float star[NSTAR][4], wake, grow, act_p, act_q, flow;
+                 float nv[3], nvel[3], tilt_ph, ax_seen, ay_seen, flow_v; double touched; /* the disc's axis (x right, y up, z toward you; 0: as it rests), turned by
+                                * a drag and the wheel like a shell; when last handled; flow_v: the hand's push on its turn */
+                 float M0[9], dn[3], d1[3], d2[3]; /* the view as it began, and the disc's axis and plane in it (the collapse) */
+                 int banged, beat_ring, moving, act, last_act, pend, act_new; float pend_p; double act_end, act_at, act_next, press_seen, defend_seen, pdown; } HoleRS; /* flow: the disc's turn (faster while pointed at) */ /* act: playing now (HA_*), from act_at; act_p its random lean */ /* grow: 0..1, the void after it has swallowed the shell */
 typedef struct { double next; } DecodingRS;
 /* READY: a piece of the shell thrown at the pointer. Positions are on the stage: shell radii from the core window's
  * centre as if the core were at its usual size, y down (the panel's aim_x / aim_y are in the same units). */
@@ -322,6 +337,11 @@ typedef struct {
     double ring_at, vol_at;/* when the double-click ring started / the volume last changed */
     float vol;             /* speech volume 0..1 */
     int muted, held;       /* never speaks on its own / being dragged by the mouse */
+    int pressing;          /* the button is down on it and has not moved off (panel only) */
+    float quiet_to, quiet; /* you are away (panel only): a black hole goes quiet, embers and slow, and flares up when you are back */
+    double woke_at;        /* when it last woke from quiet */
+    float pad;             /* its picture is pad times the core's square, the core the same size in the middle (0, 1: none); the
+                            * panel gives the black hole room for its disc and its actions */
     float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */
     float sdir_x, sdir_y, sdir_tx, sdir_ty; /* its own spin's way round (rate about x, about y), eased to the last way it was
                                               * scrolled (panel: the wheel or a touchpad swipe); 0, 0 until then: the usual */
@@ -386,6 +406,37 @@ void whim_play(Session *s, int w, double now);            /* play action w now, 
  * names and what they do; hole_play plays one now (it becomes a black hole first if it is not one) */
 extern uint32_t HOLE_ACTS;
 extern const char *HOLE_ACT_NAME[HA_N], *HOLE_ACT_ABOUT[HA_N];
+extern const float HOLE_ACT_DUR[HA_N]; /* how long each plays, seconds */
+/* the black hole's look, tunable (web/blackhole-mock.html sets them live; the panels use the defaults) */
+typedef struct {
+    float ring_w, ring_a;          /* the photon ring: width, brightness */
+    float refl_a, refl_squeeze;    /* the disc reflected inside the shadow: how bright, how hard it is squeezed in */
+    float cloud, temp, doppler, beam; /* the disc: 0 lanes .. 1 soft clouds; colour temperature; the turn's speed in the Doppler shift; its power */
+    float bloom, bloom_r;          /* the glow round the light: strength, reach (shell radii) */
+    float star_n, star_a, lens_d;  /* the stars: how many (0..1), how bright; how far you are (M: the Einstein ring's size) */
+    float site_col, site_temp;     /* 1: colour as blackhole-simulation does it (blackbody, Novikov-Thorne temperature, d^3.5 beaming), at that peak temperature (K) */
+    /* the engine after blackhole-simulation (render.c, bh2_*): 1 on; its spin a*, lensing strength, disc temperature (K),
+     * density, thickness (H/R), outer edge (M), ray steps, map size (pixels), map reach (M), camera distance (M),
+     * exposure, how fast its gas turns */
+    float b2_engine, b2_spin, b2_lens, b2_temp, b2_dens, b2_height, b2_disk, b2_steps, b2_res, b2_ext, b2_dist, b2_expo, b2_speed;
+} BhTune;
+void bh_hole_axis(const Session *s, double now, float *n); /* the black hole's disc axis as drawn now (x right, y up, z toward you) */
+void bh2_tick(const float *axis);                          /* build (a little more of) the traced map for that view */
+int bh2_progress(void);                                    /* how far the map asked for last is built, 0..100 */
+/* the black hole drawn by the GPU (the Windows panel's win/gpu.c): set before drawing session s's picture, and draw_hole
+ * lays it in (its RGBA, n x n, the hole's plane +-E M across, the bottom row first; alpha: the shadow and the gas in front)
+ * in place of the CPU's tracing; BH_GPU_ON: the GPU draws the black holes, so the CPU builds no maps */
+typedef struct { const Session *s; int n; float E; const unsigned char *rgba; } BhGpuImg;
+extern BhGpuImg BH_GPU_IMG;
+extern int BH_GPU_ON;
+float bh_hole_expo(const Session *s, double now); /* how bright its light is now (hover, the wheel, away, back) */
+float bh_hole_E(const Session *s, int px);
+int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], int max); /* the actions' gas for the GPU (view frame, M) */
+#define BH_FLARE_SNAP 1.8f /* the flare: when its loop snaps (s from its start) */ /* the picture's half width at the hole, M (the GPU draws it at this scale: pixel for pixel) */
+extern BhTune BH_TUNE;
+extern float HOLE_TILT; /* how fast a black hole's axis tilts and rolls on its own (0: still; the panels' Settings set it) */
+#define BH_SHELL_M 8.5f /* the shell's radius in the hole's mass units, once it has grown (render.c's scale) */
+#define BH_TS 18.5f /* the hole's own time shown a second, in units of its mass M: the disc's inner edge turns in about 5 s */
 void hole_play(Session *s, int a);
 /* READY's attacks (RA_*), like the black hole's actions: which it may throw (READY_ATKS), names, what they do, play one now */
 enum { RA_NONE, RA_MISSILES, RA_FORGE, RA_SLINGSHOT, RA_SPIKES, RA_N };

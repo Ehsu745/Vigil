@@ -1213,142 +1213,337 @@ static void r_dormant(Ctx *c) {
  * light drawn in, the shell squeezed and trembling, crackling, an implosion), then bursts: the patches are blown
  * apart, small ones fastest, each tumbling; at once the pull takes over and they fall back on a tightening spiral,
  * twisting harder and stretching thin, and are swallowed at the edge of the void with a golden flash. Then only
- * the void and its dust disc. Pointing at it wakes it: the pieces come home. */
+ * the hole and its disc (drawn in render.c). Pointing at it wakes it: the pieces come home. */
 static void hole_enter(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; HoleRS *H = &m->rs.hole;
-    float SW[3] = {rnd(s, -.3f, .3f), 1, rnd(s, -.3f, .3f)}, X[3] = {1, 0, 0};
-    norm3(SW);
     int cnt[MAX_T]; memset(cnt, 0, sizeof cnt);
     for (int t = 0; t < sh->nt; t++) {
         Piece *pc = &H->piece[m->grp[t]];
         for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) pc->c[q] += sh->v[sh->t[t][k]][q] / CIRCUM / 3;
         cnt[m->grp[t]]++;
     }
-    for (int g = 0; g < m->ng; g++) {
+    /* the disc's plane as render.c will draw it (about 6 degrees above it, y down here), in the view as it is now */
+    memcpy(H->M0, c->M, sizeof H->M0);
+    float el = .26f, roll = -.06f;
+    H->dn[0] = sinf(roll) * cosf(el); H->dn[1] = -cosf(roll) * cosf(el); H->dn[2] = sinf(el);
+    float X[3] = {1, 0, 0}, d = dot3(X, H->dn);
+    for (int q = 0; q < 3; q++) H->d1[q] = X[q] - d * H->dn[q];
+    norm3(H->d1); cross3(H->d2, H->dn, H->d1);
+    for (int g = 0; g < m->ng; g++) { /* each piece: where it starts (in the view), the way it will be blown, its spin */
         Piece *pc = &H->piece[g];
         for (int q = 0; q < 3; q++) pc->c[q] /= cnt[g] ? cnt[g] : 1;
-        memcpy(pc->n, pc->c, sizeof pc->n); norm3(pc->n);
-        cross3(pc->tn, SW, pc->n);
-        if (len3(pc->tn) > .05f) norm3(pc->tn); else { cross3(pc->tn, X, pc->n); norm3(pc->tn); }
-        pc->r = len3(pc->c);
-        pc->vr = rnd(s, 2, 3) * (1.18f - .06f * cnt[g]) * .55f; /* small ones fly fastest (sized so they stay in the tile) */
-        pc->L = rnd(s, .25f, .7f); rand_dir(s, pc->ax);
-        pc->spin = rnd(s, 2, 7) * (mrand(s) < .5f ? -1 : 1) / sqrtf((float)(cnt[g] ? cnt[g] : 1));
-        pc->size = cnt[g];
+        float v[3]; m3_app(v, c->M, pc->c);
+        pc->r = len3(v); memcpy(pc->n, v, sizeof pc->n); norm3(pc->n);
+        cross3(pc->tn, H->dn, pc->n); /* (it will go round the way the disc turns) */
+        if (len3(pc->tn) < .05f) memcpy(pc->tn, H->d1, sizeof pc->tn);
+        norm3(pc->tn);
+        pc->vr = rnd(s, 2.1f, 3.0f) * (1.15f - .05f * cnt[g]); /* small ones fly fastest */
+        pc->L = rnd(s, .35f, .8f); pc->phi = 0;
+        rand_dir(s, pc->ax); pc->spin = rnd(s, 2, 7) * (mrand(s) < .5f ? -1 : 1) / sqrtf((float)(cnt[g] ? cnt[g] : 1)); pc->tw = 0;
+        pc->size = cnt[g]; pc->gone = 0;
     }
-    for (int i = 0; i < NDUST; i++) H->dust[i] = (Dust){1.25f + powf(mrand(s), 1.6f) * 1.9f, mrand(s) * TAU, rnd(s, .6f, 1.6f)};
     for (int i = 0; i < NSTAR; i++) { H->star[i][0] = rnd(s, -1.6f, 1.6f); H->star[i][1] = rnd(s, -1.6f, 1.6f); H->star[i][2] = rnd(s, .6f, 1.4f); H->star[i][3] = rnd(s, 0, TAU); }
     H->moving = 1;
 }
-uint32_t HOLE_ACTS = (1u << HA_N) - 2; /* all of them */
-const char *HOLE_ACT_NAME[HA_N] = {"", "Jets", "Feeding", "Flare", "Ripple", "Precession"};
-const char *HOLE_ACT_ABOUT[HA_N] = {"", "Two beams shoot out of its poles, across the disc, and fade.",
-    "A star drifts in, is stretched into a streak as it spirals down, and vanishes into the shadow; the ring flashes.",
-    "A burst of gas falls in: the disc and its halo blaze, then settle.",
-    "A gravity wave: a faint ring spreads outward and the disc's lanes shiver as it passes.",
-    "The disc slowly tips to show its face, then settles back."};
+uint32_t HOLE_ACTS = HOLE_ACTS_DEF; /* all of them (Jets retired); HA_LENS is not played but a switch: the stars behind it bent round it, always */
+const char *HOLE_ACT_NAME[HA_N] = {"", "Jets", "Tidal disruption", "Flare", "Lensing", "Precession", "Hot spot"};
+const char *HOLE_ACT_ABOUT[HA_N] = {"",
+    "(retired)",
+    "A star falls in on a long orbit, is pulled into a thin stream as it swings past, half of it flung away and half wrapping round the hole and falling in; the disc flares.",
+    "A loop of hot gas arches up off the inner disc, twisting as it grows, then snaps: a flash, the disc lit up, and its top flung out as a blob that cools as it goes; the photon ring echoes the flash a moment later.",
+    "Always, while it is in use: the stars behind the hole bent round its shadow into arcs and doubled images inside its circle, shifting as you turn it. Off: a plain dark sky.",
+    "Frame dragging: the disc wobbles like a top, its axis sweeping round a widening cone so it shows its face from every side, while the cores round it are whipped round faster and closer, as if being sucked in, then let go.",
+    "A bright clump circles the inner edge, brighter as it comes toward you, its lensed image racing round the photon ring, and slowly smears out."};
+const float HOLE_ACT_DUR[HA_N] = {0, 6.5f, 10, 5.5f, 7, 9, 10};
 void hole_play(Session *s, int a) {
-    if (a <= HA_NONE || a >= HA_N) return;
+    if (a <= HA_NONE || a >= HA_N || a == HA_LENS || (HA_RETIRED >> a & 1)) return; /* (Lensing is not played: it is always on, or off) */
     if (s->mo.rt != RT_HOLE || s->mo.hole < 0.5f) motion_play(s, RT_HOLE); /* not a black hole yet: it becomes one, then plays it */
     s->mo.hole_want = a;
 }
+/* A tidal disruption (HA_FEED), in units of the hole's mass M and its own time (BH_TS a second), in the disc's frame.
+ * Gravity is Paczynski-Wiita's, -1 / (r - 2)^2, which has the real hole's last stable orbit (6) and lets orbits
+ * precess, so the returning stream crosses itself. The star comes in on a near-parabolic orbit; while it nears the
+ * hole it is drawn out along its path (TdeRS.hist); once past the closest point it breaks up: each piece along the
+ * stretch keeps its own speed, spread so the inner, leading half is bound (it swings back round and falls in) and the
+ * trailing half is flung away. Pieces that fall in heat the disc (heat: the flare it gives). */
+float HOLE_TILT = 2.5f;
+static int bits_n(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
+static void tde_acc(const float *p, float *a) {
+    float r = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) + 1e-4f, f = -1 / ((r - 2) * (r - 2) * r);
+    for (int q = 0; q < 3; q++) a[q] = p[q] * f;
+}
+static void tde_step(float *p, float *v, float h) { /* velocity Verlet */
+    float a[3]; tde_acc(p, a);
+    for (int q = 0; q < 3; q++) { v[q] += a[q] * h / 2; p[q] += v[q] * h; }
+    tde_acc(p, a);
+    for (int q = 0; q < 3; q++) v[q] += a[q] * h / 2;
+}
+static void tde_start(Session *s, HoleRS *H) {
+    TdeRS *T = &H->tde;
+    memset(T, 0, sizeof *T);
+    const float r0 = 23, rp = 7.2f, L = rp * sqrtf(2 / (rp - 2));
+    float psi = H->act_p * 3.14159265f, f0 = -acosf(2 * rp / r0 - 1) * 1.08f, th = psi + f0, inc = (H->act_q < 0 ? -1 : 1) * (.4f + .4f * fabsf(H->act_q)); /* (well out of the disc's plane: in it, the star was half buried in the disc's gas) */
+    float v0 = sqrtf(2 / (r0 - 2)), vt = L / r0, vr = -sqrtf(fmaxf(0, v0 * v0 - vt * vt));
+    float p[3] = {r0 * cosf(th), r0 * sinf(th), 0}, v[3] = {vr * cosf(th) - vt * sinf(th), vr * sinf(th) + vt * cosf(th), 0};
+    float ax[3] = {cosf(psi), sinf(psi), 0}, Rm[9]; /* tipped out of the disc's plane about the line to its closest point */
+    m3_rot(Rm, ax, inc);
+    m3_app(T->s, Rm, p); m3_app(T->s + 3, Rm, v);
+    (void)s;
+}
+static void tde_tick(HoleRS *H, float dt) {
+    TdeRS *T = &H->tde;
+    const float h = .1f, hh = h; /* a fixed step (M), the time left over carried on (and drawn ahead by it: render.c), so it never jerks */
+    T->acc += dt * BH_TS;
+    int n = (int)(T->acc / h);
+    T->acc -= n * h;
+    if (n > 40) n = 40;
+    for (int k = 0; k < n; k++) {
+        if (!T->split) {
+            float rd = T->s[0] * T->s[3] + T->s[1] * T->s[4] + T->s[2] * T->s[5];
+            tde_step(T->s, T->s + 3, hh);
+            memmove(T->hist[1], T->hist[0], sizeof(float) * 3 * (TDE_H - 1));
+            memcpy(T->hist[0], T->s, sizeof T->hist[0]);
+            if (T->hn < TDE_H) T->hn++;
+            float rd2 = T->s[0] * T->s[3] + T->s[1] * T->s[4] + T->s[2] * T->s[5];
+            if (rd < 0 && rd2 >= 0) { /* past its closest point: it breaks up along the stretch it was drawn into */
+                int m = T->hn < 140 ? T->hn : 140;
+                T->split = 1; T->n = TDE_N;
+                for (int i = 0; i < TDE_N; i++) {
+                    float f = (float)i / (TDE_N - 1) * (m - 2);
+                    int j = (int)f; float w = f - j;
+                    for (int q = 0; q < 3; q++) {
+                        T->p[i][q] = T->hist[j][q] * (1 - w) + T->hist[j + 1][q] * w;
+                        T->v[i][q] = (T->hist[j][q] - T->hist[j + 1][q]) / hh;
+                    }
+                    T->q[i] = -1 + 2.0f * i / (TDE_N - 1); /* the head (nearest the hole) bound, the tail flung off */
+                    float sp = 1 + .3f * T->q[i]; /* (in order along the stream: a random spread would let pieces pass each other, beading it) */
+                    for (int q = 0; q < 3; q++) T->v[i][q] *= sp;
+                    T->on[i] = 1;
+                }
+            }
+        } else {
+            for (int i = 0; i < T->n; i++) {
+                if (!T->on[i]) continue;
+                float vr0 = T->p[i][0] * T->v[i][0] + T->p[i][1] * T->v[i][1] + T->p[i][2] * T->v[i][2];
+                tde_step(T->p[i], T->v[i], hh);
+                float r = sqrtf(T->p[i][0] * T->p[i][0] + T->p[i][1] * T->p[i][1] + T->p[i][2] * T->p[i][2]);
+                float vr1 = T->p[i][0] * T->v[i][0] + T->p[i][1] * T->v[i][1] + T->p[i][2] * T->v[i][2];
+                if (vr0 > 0 && vr1 <= 0) T->back[i] = 1; /* (at its far point: falling back in) */
+                if (T->hot[i] > 0) { /* shocked: it loses its energy and circles in, forming a disc (circularization) */
+                    float d = expf(-hh * 0.04f * T->hot[i]), vr = vr1 / (r * r);
+                    for (int q = 0; q < 3; q++) T->v[i][q] -= T->p[i][q] * vr * (1 - d); /* (its fall slowed: the radial part damped) */
+                    T->hot[i] *= expf(-hh * 0.01f);
+                }
+                if (r < 3.2f) { T->on[i] = 0; T->heat += (2.4f + 3 * T->hot[i]) / TDE_N; } /* fallen in: the disc flares */
+                else if (r > 40) T->on[i] = 0;
+            }
+            /* the returning stream crashing into the incoming one (its path swung round by the hole's pull, apsidal
+             * precession): a shock where they meet, the gas there heated */
+            for (int i = 0; i < T->n; i++) {
+                if (!T->on[i] || !T->back[i]) continue;
+                for (int j = 0; j < T->n; j += 2) {
+                    if (j == i || !T->on[j] || T->back[j]) continue;
+                    float dx = T->p[i][0] - T->p[j][0], dy = T->p[i][1] - T->p[j][1], dz = T->p[i][2] - T->p[j][2];
+                    if (dx * dx + dy * dy + dz * dz > 1.6f * 1.6f) continue;
+                    float w = T->shock_amp < 0.05f ? 1.0f : 0.15f;
+                    for (int q = 0; q < 3; q++) T->shock[q] += (0.5f * (T->p[i][q] + T->p[j][q]) - T->shock[q]) * w;
+                    T->shock_amp = fminf(3, T->shock_amp + 0.35f);
+                    T->hot[i] = fminf(4, T->hot[i] + 1.5f); T->hot[j] = fminf(4, T->hot[j] + 1);
+                    T->heat = fminf(1.5f, T->heat + 0.02f);
+                    break;
+                }
+            }
+            T->shock_amp *= expf(-hh * 0.03f);
+        }
+    }
+}
+/* Held down on the hole: gas is pulled off the pointer (the screen frame, M units) and falls in on a spiral, round the
+ * way the disc turns, onto the disc, which it heats (TdeRS.heat, the same flare as a torn star's) */
+static void hold_tick(Session *s, HoleRS *H, float dt, double now, int on) {
+    HoldRS *P = &H->hold;
+    if (on && now >= P->next) {
+        P->next = now + .035;
+        float lx = s->press_x, ly = s->press_y; /* (the panel keeps it under the pointer while held) */
+        float x = lx * BH_SHELL_M + rnd(s, -.25f, .25f), y = -ly * BH_SHELL_M + rnd(s, -.25f, .25f), z = rnd(s, -.4f, .4f), r = sqrtf(x * x + y * y + z * z) + 1e-3f;
+        if (r > 7.5f) {
+            int i = P->head; P->head = (P->head + 1) % HS_N;
+            float t[3] = {z, 0, -x}, tl = sqrtf(t[0] * t[0] + t[2] * t[2]) + 1e-3f, sp = .86f * sqrtf(1 / (r - 2));
+            P->p[i][0] = x; P->p[i][1] = y; P->p[i][2] = z;
+            for (int q = 0; q < 3; q++) P->v[i][q] = t[q] / tl * sp - P->p[i][q] / r * .05f;
+            P->age[i] = .001f;
+        }
+    }
+    const float hh = .12f;
+    P->acc += dt * BH_TS;
+    int n = (int)(P->acc / hh);
+    P->acc -= n * hh;
+    if (n > 40) n = 40;
+    for (int i = 0; i < HS_N; i++) {
+        if (P->age[i] <= 0) continue;
+        P->age[i] += dt;
+        for (int k = 0; k < n; k++) {
+            tde_step(P->p[i], P->v[i], hh);
+            P->v[i][1] *= 1 - .02f * hh; /* (settling toward the disc's plane) */
+        }
+        float r = sqrtf(P->p[i][0] * P->p[i][0] + P->p[i][1] * P->p[i][1] + P->p[i][2] * P->p[i][2]);
+        if (r < 4.5f || P->age[i] > 7) { P->age[i] = 0; H->tde.heat = fminf(1.5f, H->tde.heat + .012f); }
+    }
+}
 static void r_hole(Ctx *c) {
     Session *s = c->s; Motion *m = c->m; const Shape *sh = c->sh; const float *M = c->M; Want *w = c->w; HoleRS *H = &m->rs.hole;
-    const float BANG = 2.6f;
     float dt = fminf(.05f, c->dt), e = c->e;
-    H->wake += ((s->lock_to > .5f ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4)); /* resting on it (lock-on) wakes it; a glance does not */
-    H->flow += dt * (1 + 1.2f * s->hover + 0.8f * s->carry); /* the disc turns faster while pointed at or carried */
-    for (int i = 0; i < NDUST; i++) { /* the dust disc turns, and slowly falls in */
-        Dust *d = &H->dust[i];
-        d->a += dt * 1.15f / powf(d->r, 1.5f); d->r -= dt * .05f / d->r;
-        if (d->r < 1.05f) { d->r = 2.9f + mrand(s) * .3f; d->a = mrand(s) * TAU; }
-    }
-    if (e < BANG) { /* gathering power: a heartbeat that quickens, light and matter drawn in, the shell squeezed tighter */
-        float u = e / BANG, uu = u * u, ph = TAU * BANG * (1.2f * u + 3.4f * uu);
-        float beat = powf(fmaxf(0, sinf(ph)), 6), last = clampf((u - .93f) / .07f, 0, 1);
-        w->scale *= (1 - .12f * io3(u) - .035f * beat * (.3f + u)) * (1 - .14f * in3(last));
-        w->bright *= 1 + 3 * uu + .8f * beat * u;
-        set_rate(c, .2f + 1.4f * uu);
-        for (int i = 0; i < sh->nv; i++) w->push[i] = -(i % 3 ? .03f : .09f) * (.3f + .7f * u) * (1 + .6f * beat);
-        float shk = .028f * uu * (1 + beat);
-        for (int t = 0; t < sh->nt; t++) { float j[3] = {rnd(s, -1, 1), rnd(s, -1, 1), rnd(s, -1, 1)}; tt_set(m, t, j, shk); }
-        for (int k = 0; k < 2; k++) if (mrand(s) < (6 + 70 * uu) * dt) { /* matter and light drawn in from far out */
-            float d[3], p[3], v[3]; rand_dir(s, d);
-            float r0 = rnd(s, 1.25f, 1.6f), sp = rnd(s, 1, 1.6f) * (1 + u);
-            for (int q = 0; q < 3; q++) { p[q] = d[q] * r0; v[q] = -d[q] * sp; }
-            spark(s, M, p, v, (r0 - .3f) / sp, 0, 0, rnd(s, .7f, 1.4f), SK_STREAK, 0, mrand(s) < .5f ? RGB255(205, 170, 255) : RGB255(255, 225, 250));
+    /* resting on it (lock-on) wakes it; a glance does not, nor does handling it: a press, a hold, a drag, a carry, the wheel */
+    if (H->grow > .3f) { float d = expf(-dt * 2.2f); s->spin_x *= d; s->spin_y *= d; } /* (a throw or the wheel spins it a moment, not on and on) */
+    int handled = s->pressing || s->held || s->carried || fabsf(s->spin_x) + fabsf(s->spin_y) > .6f;
+    if (handled) H->touched = c->now;
+    H->wake += ((s->lock_to > .5f && !handled && c->now - H->touched > 1 ? 1.0f : 0.0f) - H->wake) * (1 - expf(-dt * 4));
+    { /* turned like a shell: a drag and the wheel (Session.spin_*, which also carries a flung drag on) turn its disc's axis,
+       * a trackball in the view (x right, y up, z toward you); left alone a while, it eases back to lying almost edge-on */
+        const float REST[3] = {-.06f * .966f, .966f, .26f}; /* (about 15 degrees above edge-on) */
+        if (len3(H->nv) < .5f) memcpy(H->nv, REST, sizeof H->nv);
+        float dax = s->ax - H->ax_seen, day = s->ay - H->ay_seen;
+        H->ax_seen = s->ax; H->ay_seen = s->ay;
+        float rx = 0, ry = 0;
+        if (H->grow > .3f) {
+            if (s->held && fabsf(dax) + fabsf(day) < 1) { rx = dax; ry = day; }
+            else { rx = s->spin_x * dt; ry = s->spin_y * dt; }
         }
-        if (mrand(s) < (2 + 25 * uu) * dt) m->glow[(int)(mrand(s) * sh->nv) % sh->nv] = 1; /* crackling */
-        if (beat > .95f && u > .3f && !H->beat_ring) { H->beat_ring = 1; ring(m, c->now, .25f + .4f * u); } else if (beat < .5f) H->beat_ring = 0;
+        if (fabsf(rx) + fabsf(ry) > 1e-6f) {
+            float X[3] = {1, 0, 0}, Y[3] = {0, 1, 0}, R1[9], R2[9], t[3];
+            m3_rot(R1, X, rx); m3_rot(R2, Y, ry);
+            m3_app(t, R1, H->nv); m3_app(H->nv, R2, t); norm3(H->nv);
+            H->flow_v += ry * 2.5f; /* (a sideways turn pushes the disc round too) */
+        }
+        /* home again once let alone: a critically damped spring whose pull eases in over a second, so it glides back
+         * without a jolt at either end */
+        float pull = H->act == HA_PRECESS ? 0 : clampf(((float)(c->now - H->touched) - .3f) / 1.0f, 0, 1), W = 3.2f;
+        pull = pull * pull * (3 - 2 * pull);
+        if (pull > 0) {
+            for (int q = 0; q < 3; q++) { H->nvel[q] += (W * W * (REST[q] - H->nv[q]) * pull - 2 * W * H->nvel[q]) * dt; H->nv[q] += H->nvel[q] * dt; }
+            norm3(H->nv);
+        } else for (int q = 0; q < 3; q++) H->nvel[q] = 0;
+        H->flow_v *= expf(-dt * 0.6f); /* (the wheel's push on the gas: a few seconds to ease off) */
+    }
+    { /* away: quiet (embers, slowed); back: it flares up */
+        float was = s->quiet;
+        s->quiet += (s->quiet_to - s->quiet) * (1 - expf(-dt * (s->quiet_to > s->quiet ? 0.5f : 2.5f)));
+        if (was > 0.5f && s->quiet <= 0.5f) s->woke_at = c->now;
+    }
+    H->flow += dt * (1 + 1.2f * s->hover + 0.8f * s->carry) * (1 - 0.75f * s->quiet) + H->flow_v * dt; /* the disc turns faster while pointed at, carried or wheeled; slower when you are away */
+    H->tilt_ph += dt * HOLE_TILT; /* (its own slow tilt and roll: a phase, so changing the speed never jumps it) */ /* the disc turns faster while pointed at or carried */
+    /* The shell bursts: for BANG s it gathers (trembling, squeezed, brighter), then the shield explodes, its pieces blown
+     * out every way, tumbling, and the core goes dark: a small black hole. Its pull takes over at once: the pieces slow,
+     * fall back on tightening spirals that settle into the disc's plane, stretch thin near the hole and are swallowed at
+     * its edge, and with each one it grows (grow: the share of the shell it has eaten). Worked out in the view as it
+     * began (HoleRS.M0, dn, d1, d2), then turned back into the shell's own frame. */
+    const float BANG = 0.9f, GM = 6;
+    float wake = H->wake;
+    if (e < BANG) {
+        float u = e / BANG, uu = u * u;
+        w->scale *= 1 - .1f * io3(u);
+        w->bright *= 1 + 2.5f * uu;
+        set_rate(c, .4f + 2 * uu);
+        float shk = .03f * uu;
+        for (int t = 0; t < sh->nt; t++) { float j[3] = {rnd(s, -1, 1), rnd(s, -1, 1), rnd(s, -1, 1)}; tt_set(m, t, j, shk); }
+        if (mrand(s) < (4 + 40 * uu) * dt) m->glow[(int)(mrand(s) * sh->nv) % sh->nv] = 1; /* crackling */
         return;
     }
-    if (!H->banged) { /* the bang */
+    if (!H->banged) { /* the shield explodes; the core is gone dark */
         H->banged = 1; ring(m, c->now, 1); flash(m, sh->nv, 1);
         float z[3] = {0, 0, 0};
-        spark_at(s, M, z, .7f, 48, RGB255(215, 185, 255)); /* (kept inside the tile: a bigger flare shows its square edge) */
-        spark_at(s, M, z, .25f, 26, RGB255(255, 255, 255));
-        for (int i = 0; i < 46; i++) { float d[3], p[3]; rand_dir(s, d); float sp = rnd(s, 1.5f, 3.3f); for (int q = 0; q < 3; q++) { p[q] = d[q] * .3f; d[q] *= sp; } spark(s, M, p, d, rnd(s, .35f, .8f), 2.2f, 0, rnd(s, 1, 2), SK_STREAK, 1, RGB255(200, 150, 255)); }
+        spark_at(s, M, z, .45f, 30, RGB255(255, 236, 214));
+        for (int i = 0; i < 36; i++) { float d[3], p[3]; rand_dir(s, d); float sp = rnd(s, 1.5f, 3.2f); for (int q = 0; q < 3; q++) { p[q] = d[q] * .3f; d[q] *= sp; } spark(s, M, p, d, rnd(s, .3f, .7f), 2.2f, 0, rnd(s, 1, 2), SK_STREAK, 1, RGB255(255, 200, 150)); }
     }
-    float eb = e - BANG, wake = H->wake;
-    m->hole = clampf(eb / .45f, 0, 1) * (1 - wake);
-    w->bright *= 1 + 2.5f * expf(-eb * 7);
+    float eb = e - BANG;
+    m->hole = clampf(eb / .25f, 0, 1) * (1 - wake);
+    w->bright *= 1 + 2 * expf(-eb * 8);
     w->rate = 0;
-    const float GM = 8;
+    float g2 = clampf(H->grow, 0, 1), edge = .21f + (5.196f / BH_SHELL_M - .21f) * g2 * g2 * (3 - 2 * g2); /* the shadow's edge, as render.c draws it */
     const int sub = 4;
-    float h = dt / sub;
-    int base = m->ntm, alive = 0;
+    float h = dt / sub, flat = clampf((eb - .3f) / 2.2f, 0, 1); /* the orbits settle into the disc's plane */
+    flat = flat * flat * (3 - 2 * flat);
+    int base = m->ntm, total = 0, eaten = 0;
     m->ta_on = 1;
+    const float *n = H->dn;
+    float Mt[9]; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Mt[i * 3 + j] = M[j * 3 + i];
     for (int g = 0; g < m->ng; g++) {
         Piece *pc = &H->piece[g];
+        total += pc->size;
         if (!pc->gone) for (int k = 0; k < sub; k++) {
-            pc->vr += -GM / (pc->r * pc->r) * h; pc->r = fmaxf(.05f, pc->r + pc->vr * h);
-            pc->phi += fminf(30, pc->L / (pc->r * pc->r)) * h; /* the spiral tightens as it falls */
-            pc->tw += (pc->spin + (pc->vr < 0 ? 4 / fmaxf(.25f, pc->r) : 0)) * h; /* and the twist grows near the hole */
+            pc->vr += -GM / (pc->r * pc->r) * h - pc->vr * .25f * h; pc->r = fmaxf(.05f, pc->r + pc->vr * h);
+            pc->phi += fminf(25, pc->L / (pc->r * pc->r)) * h; /* the spiral tightens as it falls */
+            pc->tw += (pc->spin + (pc->vr < 0 ? 3 / fmaxf(.25f, pc->r) : 0)) * h;
         }
-        float pos[3], rd[3];
-        for (int q = 0; q < 3; q++) pos[q] = (pc->n[q] * cosf(pc->phi) + pc->tn[q] * sinf(pc->phi)) * pc->r;
-        memcpy(rd, pos, sizeof rd); norm3(rd);
+        float rd[3], P[3];
+        for (int q = 0; q < 3; q++) rd[q] = pc->n[q] * cosf(pc->phi) + pc->tn[q] * sinf(pc->phi);
+        float hh = dot3(rd, n);
+        for (int q = 0; q < 3; q++) rd[q] -= hh * flat * n[q]; /* pressed toward the plane */
+        norm3(rd);
+        for (int q = 0; q < 3; q++) P[q] = rd[q] * pc->r;
         int falling = pc->vr < 0;
-        float stretch = falling ? 3 * clampf((.85f - pc->r) / .6f, 0, 1) : 0, sc = falling ? .3f + .7f * clampf((pc->r - .15f) / .7f, 0, 1) : 1;
-        float Sx[9], Rt[9], A[9];
-        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Sx[i * 3 + j] = (i == j) + stretch * rd[i] * rd[j];
-        m3_rot(Rt, pc->ax, pc->tw); m3_scale(Rt, sc);
-        m3_mul(A, Sx, Rt);
-        if (falling && pc->r < .16f && !pc->gone) { /* swallowed at the edge */
-            pc->gone = 1;
-            spark_at(s, M, pos, .35f, 8 + 4.0f * pc->size, RGB255(255, 196, 120));
-            for (int k = 0; k < 4; k++) { float q2[3], v[3]; for (int q = 0; q < 3; q++) q2[q] = pos[q] + rnd(s, -.2f, .2f); float sp = rnd(s, 3, 5); for (int q = 0; q < 3; q++) v[q] = -q2[q] * sp; spark(s, M, q2, v, .2f, 0, 0, 1, SK_STREAK, 0, RGB255(255, 222, 170)); }
+        float near = clampf((.9f - pc->r) / .6f, 0, 1), sx = falling ? 1 + 2.4f * near : 1, sc = falling ? .35f + .65f * clampf((pc->r - edge) / .6f, 0, 1) : 1;
+        float al = pc->gone ? 0 : clampf((pc->r - edge + .02f) / .18f, 0, 1);
+        if (falling && !pc->gone && pc->r < edge + .02f) { /* swallowed: a flicker at the edge, the hole a little bigger */
+            pc->gone = 1; H->tde.heat = fminf(1.2f, H->tde.heat + .05f);
+            float pl[3]; m3_app(pl, Mt, P); spark_at(s, M, pl, .25f, 5 + 2.0f * pc->size, RGB255(255, 210, 150));
         }
-        alive += !pc->gone;
-        float off[3], ac[3];
-        m3_app(ac, A, pc->c);
-        for (int q = 0; q < 3; q++) off[q] = pos[q] - ac[q];
-        float al = pc->gone ? 0 : falling ? clampf((pc->r - .14f) / .2f, 0, 1) : 1;
+        if (pc->gone) eaten += pc->size;
+        /* the piece: tumbling, then drawn out along its orbit and thinned across it as it nears the hole */
+        float tg[3], Rt[9], St[9], Av[9], A[9], T1[9];
+        cross3(tg, n, rd); norm3(tg);
+        m3_rot(Rt, pc->ax, pc->tw);
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) St[i * 3 + j] = ((i == j) + (sx - 1) * tg[i] * tg[j] + (1 / sqrtf(sx) - 1) * rd[i] * rd[j]) * sc;
+        m3_mul(Av, St, Rt);
+        m3_mul(T1, Av, H->M0); m3_mul(A, Mt, T1);
+        float Pl[3], ac[3], off[3];
+        m3_app(Pl, Mt, P); m3_app(ac, A, pc->c);
+        for (int q = 0; q < 3; q++) off[q] = Pl[q] - ac[q];
         if (wake > .001f) { for (int i = 0; i < 9; i++) A[i] = A[i] * (1 - wake) + I3[i] * wake; for (int q = 0; q < 3; q++) off[q] *= 1 - wake; al = al * (1 - wake) + wake; }
         tm_add(m, A);
         for (int t = 0; t < sh->nt; t++) if (m->grp[t] == g) { m->tmi[t] = (unsigned char)(base + g + 1); tt_set(m, t, off, 1); m->talpha[t] = al; }
     }
-    /* all swallowed: the void grows to 0.85 of the shell (back again as it wakes) */
-    float gt = !alive && wake < .5f ? 1.0f : 0.0f;
-    H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 1.1f : 4)));
-    /* grown: now and then one of its own actions (jets, feeding on a star, a flare, a ripple, a slow precession) */
-    static const float ACT_DUR[HA_N] = {0, 2.6f, 4.5f, 2.2f, 2.8f, 6};
-    if (H->grow > .5f && wake < .1f && s->press_at > H->press_seen + 1e-6) { /* a press: matter dropped in from that side */
-        H->press_seen = s->press_at; H->act = HA_FEED; H->act_at = c->now; H->act_p = atan2f(s->press_y, s->press_x) / 3.14159265f;
+    /* it grows as it eats: to the share of the shell swallowed (eased), back again as it wakes */
+    float gt = wake < .5f ? (total ? (float)eaten / total : 1) : 0;
+    H->grow += (gt - H->grow) * (1 - expf(-dt * (gt > H->grow ? 2.5f : 4)));
+    /* grown: now and then one of its own actions (feeding on a star, a flare, a slow precession, a hot spot) */
+    /* its actions never start or stop at a stroke: each has its end (act_end), and anything that cuts in (waking, a
+     * click, a rush, one asked for) brings that end to HOLE_OUT s away, so it fades out first; what cut in then starts */
+    const float HOLE_OUT = .9f;
+#define HOLE_START(A, P) do { H->act = (A); H->act_at = c->now; H->act_end = c->now + HOLE_ACT_DUR[A]; H->act_p = (P); H->act_q = rnd(s, -1, 1); H->act_new = 1; } while (0)
+#define HOLE_WANT(A, P) do { if (H->act == HA_NONE) HOLE_START(A, P); else { H->pend = (A); H->pend_p = (P); if (H->act_end > c->now + HOLE_OUT) H->act_end = c->now + HOLE_OUT; } } while (0)
+    if (s->press_at > H->press_seen + 1e-6) { H->press_seen = s->press_at; H->pdown = c->now; } /* pressed: a click or a hold? */
+    if (H->pdown > 0 && s->held) H->pdown = -1; /* (it became a drag) */
+    int ready = H->grow > .5f && wake < .1f;
+    if (H->pdown != 0 && !s->pressing && !s->held) { /* let go: a quick click drops a star in from that side */
+        if (H->pdown > 0 && c->now - H->pdown < .4 && ready && H->act != HA_FEED && H->pend != HA_FEED) HOLE_WANT(HA_FEED, s->press_x < 0 ? .75f : -.25f); /* (not again while one is falling in) */
+        H->pdown = 0;
     }
-    if (H->grow > .5f && wake < .1f && s->defend_at > H->defend_seen + 1e-6) { H->defend_seen = s->defend_at; H->act = HA_JETS; H->act_at = c->now; H->act_p = 0; } /* rushed at: it fires its jets */
-    if (H->grow < .5f || wake > .1f) { H->act = HA_NONE; H->act_next = 0; }
-    else if (H->grow < .95f) H->act_next = 0;
-    else if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
-    else if (m->hole_want && H->grow > .9f) { H->act = m->hole_want; H->act_at = c->now; H->act_p = rnd(s, -1, 1); m->hole_want = 0; } /* asked for (the Settings preview) */
-    else if (H->act == HA_NONE && c->now >= H->act_next) { /* one of those it may play (HOLE_ACTS), at random */
-        int on[HA_N], n = 0;
-        for (int a = 1; a < HA_N; a++) if (HOLE_ACTS >> a & 1) on[n++] = a;
-        if (n) { H->act = on[(int)(mrand(s) * n) % n]; H->act_at = c->now; H->act_p = rnd(s, -1, 1); }
-        else H->act_next = c->now + 5;
+    hold_tick(s, H, dt, c->now, H->pdown > 0 && s->pressing && c->now - H->pdown > .3 && H->grow > .9f && wake < .1f);
+    if (ready && s->defend_at > H->defend_seen + 1e-6) { H->defend_seen = s->defend_at; if (H->act != HA_FLARE) HOLE_WANT(HA_FLARE, rnd(s, -1, 1)); } /* rushed at: it flares */
+    if (m->hole_want && H->grow > .9f && wake < .1f) { HOLE_WANT(m->hole_want, rnd(s, -1, 1)); m->hole_want = 0; } /* asked for (the Settings preview) */
+    if (!ready) { H->pend = 0; H->act_next = 0; if (H->act && H->act_end > c->now + HOLE_OUT) H->act_end = c->now + HOLE_OUT; } /* waking: what plays fades out */
+    if (H->act != HA_NONE && c->now >= H->act_end) { /* over: what was waiting, or a while to rest */
+        H->last_act = H->act; H->act = HA_NONE;
+        if (H->pend && ready) { int a = H->pend; H->pend = 0; HOLE_START(a, H->pend_p); }
+        else H->act_next = c->now + rnd(s, 6, 14);
     }
-    else if (H->act != HA_NONE && c->now - H->act_at > ACT_DUR[H->act]) { H->act = HA_NONE; H->act_next = c->now + rnd(s, 6, 14); }
-    H->moving = 1; /* it never rests: the disc flows, hot spots orbit, the glow flickers (drawn in render.c) */
+    if (H->act == HA_NONE && ready && H->grow > .95f) {
+        if (!H->act_next) H->act_next = c->now + rnd(s, 4, 8);
+        else if (c->now >= H->act_next) { /* one of those it may play (HOLE_ACTS), at random, never the same twice running */
+            int on[HA_N], n = 0;
+            for (int a = 1; a < HA_N; a++) if (HOLE_ACTS >> a & 1 && a != HA_LENS && !(HA_RETIRED >> a & 1) && (a != H->last_act || bits_n(HOLE_ACTS & ~(1u << HA_LENS) & ~HA_RETIRED) < 2)) on[n++] = a;
+            if (n) HOLE_START(on[(int)(mrand(s) * n) % n], rnd(s, -1, 1));
+            else H->act_next = c->now + 5;
+        }
+    }
+    if (H->act == HA_FEED && H->act_new) tde_start(s, H); /* (only as it begins: never started over while it plays) */
+    H->act_new = 0;
+#undef HOLE_START
+#undef HOLE_WANT
+    H->tde.heat *= expf(-dt / 2.2f);
+    if (H->act == HA_FEED || (H->tde.split && c->now - H->act_at < 30)) tde_tick(H, dt);
+    if (m->hole > 0.01f) { float ax3[3]; bh_hole_axis(s, c->now, ax3); bh2_tick(ax3); } /* (the traced map for this view, a little at a time) */
+    H->moving = H->act != HA_NONE || H->grow < .99f || wake > .01f || H->tde.heat > .01f || H->hold.next > c->now - 3 || c->now - H->touched < 8; /* playing something: every refresh; else only its disc turns (panel_rate gives that 24 a second) */
 }
 
 /* the panel's own states */
@@ -2042,8 +2237,8 @@ const Routine ROUTINES[RT_N] = {
     [RT_UNLOCK] = {"Unlock", ST_CHEER, 0, 0, r_unlock, NULL, "Charges, bursts open with spikes and a ring, turns a full circle, then locks back click by click."},
     [RT_BLOOM] = {"Bloom", ST_CHEER, 4.6f, 0, r_bloom, NULL, "Curls in, bursts open ring by ring like a flower, turns once in full bloom, folds back and seals."},
     [RT_ZIP] = {"Zip", ST_CHEER, 3.7f, 0, r_zip, NULL, "A zipper head runs down a spiral snapping each patch shut, locks with a snap, sparks fountain."},
-    [RT_DORMANT] = {"Dormant", -1, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s. (Asleep: off by default, the black hole is)"},
-    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole with a hot disc and a lensed halo; then jets, feeding, flares, ripples. Asleep only."},
+    [RT_DORMANT] = {"Dormant", -1, 0, 0, r_dormant, NULL, "Drawn in slightly and barely turning; a faint scan every 6 s. (Retired: never picked, not offered; asleep, it is the black hole.)"},
+    [RT_HOLE] = {"Black hole", ST_SLEEP, 0, 0, r_hole, hole_enter, "Gathers power, bursts apart and falls back into a black hole: its disc and the lensed far side traced the way light bends round a real one; then jets, a star torn apart, flares, lensing, precession, hot spots. Asleep only."},
     [RT_BROADCAST] = {"Broadcast", ST_SPEAK, 0, 0, r_broadcast, NULL, "The patches rise and fall with the voice, like the bars of an equaliser."},
     [RT_RECEIVER] = {"Receiver", ST_LISTEN, 0, 0, r_receiver, NULL, "Holds still; the patches facing you open with the microphone level."},
     [RT_DECODING] = {"Decoding", ST_TRANSCRIBE, 0, 0, r_decoding, NULL, "Steps 36 degrees at a time while a scan plane reads the rows."},
@@ -2060,6 +2255,7 @@ static void routine_enter(Session *s, const Shape *sh, int st, double now) {
     if (rt < 0 || rt >= RT_N) {
         uint32_t ok = MOTION_MAP[st].rt;
         if (st != ST_SLEEP) ok &= ~(1u << RT_HOLE); /* the black hole is for sleep only */
+        ok &= ~(1u << RT_DORMANT); /* (retired: asleep, it is the black hole) */
         int n = 0;
         for (int i = 0; i < RT_N; i++) if (ok & (1u << i)) n++;
         rt = RT_DRIFT;
@@ -2422,7 +2618,7 @@ void motion_play(Session *s, int rt) {
 int motion_busy(const Session *s, double now) {
     const Motion *m = &s->mo;
     if (turns_busy(m) || m->inner > 0 || m->scan_a > 0 || m->lock > .01f || now < m->crazy_until || now - m->press_at < 1.4) return 1;
-    int quiet_hole = m->rt == RT_HOLE && m->hole > .99f && !m->rs.hole.moving; /* only the void and its dust: session_rate gives it 10 fps */
+    int quiet_hole = m->rt == RT_HOLE && m->hole > .99f && !m->rs.hole.moving; /* only its disc turning: panel_rate gives it 24 a second, session_rate 10 */
     if (!quiet_hole && (m->ntm || m->tt_on || m->ta_on || m->bright != 1)) return 1;
     if (m->trail_on || m->squash > 0) return 1;
     for (int i = 0; i < MAX_SPIKE; i++) if (spike_live(&m->sp[i], now)) return 1;

@@ -44,6 +44,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "../src/vigil.h"
+#include "gpu.h"
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
@@ -93,8 +94,13 @@ static unsigned g_text_custom = 0xF2F2F5;
 static int g_wheel_spin;            /* Settings > Scroll on a core: how the wheel spins it, one of WHEEL_NAMES (4: not at all) */
 static int g_chat_mono = 1;          /* Settings > Chat box font: the terminal's monospaced face, like Claude Code (else Segoe UI) */
 static int g_open_settings;         /* --settings: open the Settings window at once */
+static float g_scroll_arg;           /* --settings-scroll PX: set once the page is laid out (it is clamped to the page until then) */
 static char g_set_shot[1024];       /* --settings-shot FILE: open it, let the preview run 2 s, save the window as a BMP and quit */
+static int g_shot_act, g_shot_n = 1; static float g_shot_step = .5f; /* --settings-hole A N STEP: once the preview is a grown black hole, play its action A, then save N shots STEP s apart (FILE_00.bmp ...) */
 static int g_stats;                 /* --stats: frames, pictures and window updates a second, to panel-stats.txt */
+static int g_gpu = 1;               /* the black hole drawn on the GPU (win/gpu.c) when it can be (Settings > Performance, holeGpu); --no-gpu: on the CPU */
+static int g_nogpu_arg;
+static double g_stat_gpu_ms; static long g_stat_gpu_n; /* (--stats: the GPU's share of the pictures) */
 static long g_stat_tick, g_stat_pic, g_stat_push;
 static double g_stat_ms, g_stat_since;
 static double g_stat_gap, g_stat_gap2, g_stat_gap_max, g_stat_last; /* the time from one tick to the next: mean, spread, worst */
@@ -169,7 +175,9 @@ static const float SCALES[4] = {0.75f, 1.0f, 1.3f, 1.6f};     /* how big the cor
 static const char *FRAMES[7] = {"segments", "lens", "polar", "diamond", "lock", "orbits", "none"};
 static const wchar_t *FRAME_NAMES[7] = {L"Segments", L"Lens", L"Polar", L"Diamond", L"Lock", L"Orbits", L"None"};
 static const float GRAVITIES[4] = {1, 2, 4, 8};             /* the orbit spring's strength, times the lightest */
-static const double AWAYS[4] = {60, 120, 300, 0};
+static const float TILTS[5] = {0, 1, 2.5f, 4, 6};            /* a black hole's own tilt and roll, how fast (HOLE_TILT) */
+static const wchar_t *TILT_NAMES[5] = {L"Still", L"Slow", L"Normal", L"Fast", L"Faster"};
+static const double AWAYS[8] = {60, 120, 300, 600, 900, 1800, 3600, 0}; /* (seconds; 0: never) */
 static const float CHATSIZES[4] = {0.75f, 1.0f, 1.35f, 1.75f};
 static const unsigned CHAT_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A}; /* dark, so the text keeps its contrast */
 static const wchar_t *CHAT_BG_NAMES[6] = {L"Ink", L"Graphite", L"Navy", L"Plum", L"Pine", L"Custom"};
@@ -198,6 +206,8 @@ static unsigned inkx(unsigned v) { return box_light() ? ((v >> 16 & 255) * 3 / 1
  * a two-finger swipe on a touchpad, which sends both at once) spins it about the other axis, so a swipe spins it any
  * way you like; it keeps spinning that way afterwards (Session.sdir_*), until you send it another way */
 static double wall(void);
+static unsigned char g_sat_behind[MAX_SESS]; /* a small core behind the black hole now (its window goes under the hole's) */
+static int is_hole(const Session *s) { return s->mo.rt == RT_HOLE && s->mo.hole > 0.5f && s->mo.rs.hole.grow > 0.5f; } /* (asleep, a grown black hole) */
 static void wheel_spin2(Session *s, float notches, int sideways) {
     if (g_wheel_spin >= 4) return; /* Off */
     /* scrolled on and on, it spins up: each step pushes harder the longer the scrolling has gone on without a pause
@@ -208,6 +218,12 @@ static void wheel_spin2(Session *s, float notches, int sideways) {
     if (strcmp(sid, s->sid) || now - last > .3 || (sgn[ax] && sgn[ax] != sg)) { snprintf(sid, sizeof sid, "%s", s->sid); t0 = now; sgn[0] = sgn[1] = 0; }
     sgn[ax] = sg; last = now;
     float boost = 1 + 2.5f * fminf(1, (float)(now - t0) / 1.5f), cap = 8 * boost;
+    if (!sideways && is_hole(s)) { /* a black hole: the wheel pushes its gas round (back: the other way), spinning up the same way; a sideways swipe turns it over */
+        HoleRS *H = &s->mo.rs.hole;
+        float hc = 24 * boost; /* (its gas: up to 25 times its usual speed, 85 scrolled on) */
+        H->flow_v = fmaxf(-hc, fminf(hc, H->flow_v + notches * 3.2f * boost * (g_wheel_spin & 1 ? -1 : 1)));
+        return;
+    }
     float k = notches * 1.2f * boost * (g_wheel_spin & 1 ? -1 : 1); /* (the "back" choices turn the other way) */
     int roll = (g_wheel_spin < 2) != (sideways != 0); /* roll: the top goes away as the wheel goes down; turn: round the upright axis */
     if (roll) s->spin_x = fmaxf(-cap, fminf(cap, s->spin_x - k));
@@ -482,6 +498,7 @@ static void settings_load(void) {
     if (json_num(buf, "scale", &v) && v >= 0.5f && v <= 2.5f) g_scale = v;
     if (json_num(buf, "glow", &v) && v > 0) g_glow = v;
     if (json_num(buf, "gravity", &v) && v >= 0.5f && v <= 8) g_gravity = v;
+    if (json_num(buf, "holeTilt", &v)) for (int i = 0; i < 5; i++) if (fabsf(v - TILTS[i]) < 0.01f) HOLE_TILT = TILTS[i];
     if (json_num(buf, "tipSize", &v) && v >= 0.5f && v <= 2) g_chat_size = v;
     if (json_num(buf, "others", &v)) g_others = v != 0;
     if (json_num(buf, "labels", &v)) g_labels = v != 0;
@@ -510,6 +527,7 @@ static void settings_load(void) {
     if ((c = strstr(buf, "\"smoothCustom\"")) && sscanf(c, "\"smoothCustom\" : [ %f , %f , %f , %f , %f ]", &cu.idle, &cu.think, &cu.busy, &cu.rest, &cu.hand) == 5)
         g_smooth_custom = cu;
     if (json_num(buf, "threads", &v) && v >= 0 && v <= 8) g_threads = (int)v;
+    if (json_num(buf, "holeGpu", &v)) g_gpu = v != 0;
     if (json_num(buf, "setW", &v) && v >= 620 && v <= 6000) g_set_w = v; /* the Settings window itself */
     if (json_num(buf, "setH", &v) && v >= 480 && v <= 6000) g_set_h = v;
     if (json_num(buf, "setSide", &v)) g_set_side = v != 0;
@@ -522,7 +540,11 @@ static void settings_load(void) {
     MotionMap def[ST_N];
     motion_map_init();
     motion_map_default(def);
-    if (json_num(buf, "holeActs", &v)) HOLE_ACTS = (uint32_t)v & ((1u << HA_N) - 2); /* the black hole's own actions */
+    if (json_num(buf, "holeActs", &v)) { /* the black hole's own actions; any added since the file was written start on */
+        float nv = 6;
+        json_num(buf, "holeActsN", &nv);
+        HOLE_ACTS = ((uint32_t)v | (((1u << HA_N) - 1) & ~((1u << (int)nv) - 1))) & HOLE_ACTS_DEF;
+    }
     if (json_num(buf, "readyAttacks", &v)) READY_ATKS = (uint32_t)v & ((1u << RA_N) - 2); /* READY's attacks */
     if (json_masks(buf, "mapRoutines", rt) && json_masks(buf, "mapActions", act))
         for (int i = 0; i < ST_N; i++) {
@@ -544,10 +566,10 @@ static void settings_save(void) {
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
     fprintf(f, ", \"mapRoutines\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
-    fprintf(f, "], \"holeActs\": %lu, \"readyAttacks\": %lu, \"mapActions\": [", (unsigned long)HOLE_ACTS, (unsigned long)READY_ATKS);
+    fprintf(f, "], \"holeTilt\": %g, \"holeActs\": %lu, \"holeActsN\": %d, \"readyAttacks\": %lu, \"mapActions\": [", HOLE_TILT, (unsigned long)HOLE_ACTS, HA_N, (unsigned long)READY_ATKS);
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].act);
     const Smooth *cu = &g_smooth_custom;
-    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], \"threads\": %d, ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand, g_threads);
+    fprintf(f, "], \"smooth\": \"%s\", \"smoothCustom\": [%g, %g, %g, %g, %g], \"threads\": %d, \"holeGpu\": %d, ", SMOOTH_NAME[g_smooth], cu->idle, cu->think, cu->busy, cu->rest, cu->hand, g_threads, g_gpu);
     fprintf(f, "\"setW\": %g, \"setH\": %g, \"setSide\": %d, \"hkMode\": \"%s\", \"hkHide\": \"%s\", \"hkReply\": \"%s\", \"hkSettings\": \"%s\", \"moveMod\": %d, \"sendCtrl\": %d, \"backdrop\": %d, \"bdWidth\": %d, \"bdStrength\": %d, \"bdCentre\": %d, \"shadeColor\": %d, \"shadeCustom\": %u, \"previewLight\": %d}\n",
             g_set_w, g_set_h, g_set_side, g_mode_hotkey, g_hk_hide, g_hk_reply, g_hk_set, g_move_mod, g_send_ctrl, g_backdrop, g_bd_w, g_bd_a, BACKDROP_CORE, g_shade_col, g_shade_custom, g_pv_light);
     fclose(f);
@@ -597,7 +619,6 @@ static void pane_show_dirty(Pane *p, int x, int y, const RECT *dirty) {
     g_stat_push++;
     if (!p->shown) {
         SetWindowPos(p->w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW); p->shown = 1;
-        if (g_set && IsWindowVisible(g_set) && GetForegroundWindow() == g_set) SetWindowPos(g_set, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); /* (the Settings window in use stays in front) */
     }
 }
 
@@ -809,6 +830,17 @@ static int pic_make_at(Pic *p, const Session *s, int px, double now, float k, fl
     double r0 = g_stats ? qpc_ms() : 0;
     int ss = px <= 96 ? 2 : 1; /* a small core is drawn at twice the size and shrunk: cleaner edges where pixels are few */
     size_t big = need * ss * ss;
+    BH_GPU_IMG.rgba = NULL;
+    BH_GPU_ON = g_gpu && gpu_init(); /* (on the GPU: the CPU builds no maps of its own) */
+    if (g_gpu && s->mo.rt == RT_HOLE && s->mo.hole > 0.01f) { /* a black hole: the GPU draws it, if it can (else the CPU, as before) */
+        double g0 = g_stats ? qpc_ms() : 0;
+        /* its picture at exactly the core's scale (growing with the hole as it forms), so it is laid in pixel for pixel */
+        float E = bh_hole_E(s, px * ss);
+        const unsigned char *img = gpu_hole(s, px * ss, E, now, s->pad <= 1); /* (a small core: a mini hole) */
+        if (img) BH_GPU_IMG = (BhGpuImg){s, px * ss, E, img};
+        else { static int said; if (!said) { said = 1; fprintf(stderr, "vigil-panel: the black hole stays on the CPU: %s\n", gpu_why()); } }
+        if (g_stats) { g_stat_gpu_ms += qpc_ms() - g0; g_stat_gpu_n++; }
+    }
     canvas_resize(&g_cv, px * ss, px * ss);
     g_cv.sx = fx * ss; g_cv.sy = fy * ss; g_cv.ss = ss;
     if (big * 4 > g_rgba_cap) { free(g_rgba); g_rgba = malloc(big * 4); g_rgba_cap = big * 4; }
@@ -839,6 +871,7 @@ static int pic_make_at(Pic *p, const Session *s, int px, double now, float k, fl
     snprintf(p->sid, sizeof p->sid, "%s", s->sid);
     p->px = px;
     p->fx = fx; p->fy = fy;
+    BH_GPU_IMG.rgba = NULL;
     if (g_stats) g_stat_render_ms += qpc_ms() - r0;
     double ticks = floor(g_tick_hz / core_rate(s, now, k) + 0.5); /* every n-th tick, not "about every 1/rate s" */
     if (ticks < 1) ticks = 1;
@@ -1302,21 +1335,52 @@ static Orbit *orbit_of(const char *sid) {
 static RECT g_cluster_rc;           /* the main core and its orbit, on the desktop (the chat box goes beside it) */
 static double g_last_draw;
 
+/* a black hole gets a picture HOLE_PAD times its core's square, the core the same size in the middle: room for its disc,
+ * a torn star's debris and the flare's blob (Session.pad); its window grows with it, the core's own square (hits) does not */
+#define HOLE_PAD 2.6f
+static float hole_pad(const Session *s) { return s->mo.rt == RT_HOLE || s->mo.hole > 0.01f ? HOLE_PAD : 1; }
+/* a black hole's Precession: frame dragging whips the cores round it, faster and closer as if being sucked in, then
+ * lets them go back: how strong now (0..1) */
+static float hole_drag(const Session *s, double now) {
+    const HoleRS *H = &s->mo.rs.hole;
+    if (s->mo.rt != RT_HOLE || H->act != HA_PRECESS) return 0;
+    float u = (float)((now - H->act_at) / HOLE_ACT_DUR[HA_PRECESS]);
+    if (u <= 0 || u >= 1) return 0;
+    float w = sinf((float)M_PI * u), fo = fminf(1, fmaxf(0, (float)(H->act_end - now) / 0.9f));
+    return w * w * fo * fo * (3 - 2 * fo); /* (cut short: it lets go smoothly) */
+}
 static void draw_single(Room *room, int n, double now) {
     int fi = 0;
     for (int i = 0; i < n; i++) if (!strcmp(room->s[i].sid, g_focus)) fi = i;
     float dt = (float)fmin(0.1, now - g_last_draw);
     g_last_draw = now;
     static double orbit; /* the small cores' own clock: it stops while the pointer is on a core, so one stays put to be scrolled */
-    if (g_hover < 0) orbit += dt;
+    float fd = 0;
+    for (int i = 0; i < n; i++) if (!strcmp(room->s[i].sid, g_focus)) fd = hole_drag(&room->s[i], now);
+    if (g_hover < 0 || fd > 0) orbit += dt * (1 + 9 * fd);
     float big = g_cw * 0.6f, rx = g_cw / 2.0f - (float)(8 * g_dpi), ry = rx * 1.15f;
     float small = g_others && n > 1 ? fminf(g_cw * 0.2f, (float)(2 * M_PI * rx / (n - 1) * 0.75)) : 0;
     rx -= small / 2; ry -= small / 2;
+    rx *= 1 - .5f * fd; ry *= 1 - .62f * fd; /* (dragged round the hole, closer in) */
     /* the pull back onto the orbit (strong) and along it to its place (weaker: a carried core leaves it sliding round
      * the orbit to the trailing side, and it slides home when the core stops), where it lets go, where the core catches it */
     OrbitK ok = orbit_k(rx, small);
     int dragged = g_moving == 2 ? down_index() : -1;
     static int last_fi = -1;
+    /* the main core asleep as a black hole: the small cores orbit it in the plane of its disc, tilting with it, faster
+     * the closer in, passing behind it (their windows under its window there, so its shadow and disc hide them); a flung
+     * one is pulled round by it and caught into orbit; you away, they drift out wide and slow */
+    static float hk_e; static double hclk;
+    const Session *mh = fi < n ? &room->s[fi] : NULL;
+    hk_e += ((mh && is_hole(mh) ? 1.0f : 0.0f) - hk_e) * (1 - expf(-dt * 1.2f));
+    float hax[3] = {0, 1, 0}, he1[3] = {1, 0, 0}, he2[3] = {0, 0, -1}, wide = mh ? mh->quiet : 0;
+    if (hk_e > 0.01f) {
+        bh_hole_axis(mh, now, hax);
+        float l = hypotf(hax[1], hax[0]);
+        if (l > 1e-3f) { he1[0] = hax[1] / l; he1[1] = -hax[0] / l; he1[2] = 0; } /* (the line where its disc crosses the screen) */
+        he2[0] = hax[1] * he1[2] - hax[2] * he1[1]; he2[1] = hax[2] * he1[0] - hax[0] * he1[2]; he2[2] = hax[0] * he1[1] - hax[1] * he1[0];
+        hclk += dt * (1 - 0.7f * wide);
+    }
     /* while the main core is carried nothing draws the small ones to their places: only gravity holds them to the
      * orbit, so they slide round it as the motion takes them (and bump into each other); put down, they slide home */
     float kt = g_moving == 1 ? 0 : ok.KT;
@@ -1332,6 +1396,14 @@ static void draw_single(Room *room, int n, double now) {
             a = M_PI / 2 + 2 * M_PI * k / (n - 1) + orbit * 0.10; /* its place: slowly around, starting at the top */
             bob = (float)(3 * g_dpi * sin(orbit * 0.8 + i * 1.7));
             tx = g_mx + rx * (float)cos(a); ty = g_my - ry * (float)sin(a) + bob; tw = small;
+            if (hk_e > 0.01f) { /* round the black hole, in its disc */
+                float Rk = rx * (0.9f + 0.1f * (k % 3)) * (1 + 0.45f * wide), wk = 0.5f * powf(rx / Rk, 1.5f);
+                double ph = hclk * wk + 2 * M_PI * k / (n - 1);
+                float c = (float)cos(ph), sn = (float)sin(ph), P3[3];
+                for (int q = 0; q < 3; q++) P3[q] = c * he1[q] + sn * he2[q];
+                tx += (g_mx + Rk * P3[0] - tx) * hk_e; ty += (g_my - Rk * P3[1] - ty) * hk_e;
+                g_sat_behind[i] = hk_e > 0.5f && P3[2] < 0;
+            } else g_sat_behind[i] = 0;
             k++;
         }
         if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = tw; ob->init = 1; }
@@ -1342,6 +1414,11 @@ static void draw_single(Room *room, int n, double now) {
             ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx = ob->vy = 0; ob->free = 0;
         } else if (ob->free) { /* out of orbit: it keeps going, slowing a little, and bounces off the screen's edges
                                 * (not where another monitor goes on), until the main core comes close */
+            if (hk_e > 0.5f) { /* a black hole pulls it round: a slingshot, then caught into orbit */
+                float dx = g_mx - ob->px, dy = g_my - ob->py, r = hypotf(dx, dy) + 1, G = 9e6f * (float)(g_dpi * g_dpi) * hk_e, f = G / (r * r * r);
+                ob->vx += dx * f * dt; ob->vy += dy * f * dt;
+                if (r < rx * 1.6f && hypotf(ob->vx, ob->vy) < 900 * g_dpi) ob->free = 0; /* (caught: it settles into its orbit) */
+            }
             fly_step(ob, dt);
             RECT wa = work_at(ob->px, ob->py);
             float hs = ob->w / 2 + 2;
@@ -1350,17 +1427,25 @@ static void draw_single(Room *room, int n, double now) {
             if (ob->py < wa.top + hs && !on_work(ob->px, wa.top - 1.0f)) { ob->py = wa.top + hs; ob->vy = fabsf(ob->vy) * BOUNCE; }
             if (ob->py > wa.bottom - hs && !on_work(ob->px, (float)wa.bottom)) { ob->py = wa.bottom - hs; ob->vy = -fabsf(ob->vy) * BOUNCE; }
             if (hypotf(ob->px - g_mx, ob->py - g_my) < ok.CATCH) ob->free = 0; /* caught: the spring takes it home */
+        } else if (hk_e > 0.5f) { /* round a black hole: drawn to its place on its orbit (critically damped: no overshoot) */
+            const float W = 5;
+            ob->vx += (W * W * (tx - ob->px) - 2 * W * ob->vx) * dt; ob->vy += (W * W * (ty - ob->py) - 2 * W * ob->vy) * dt;
+            ob->px += ob->vx * dt; ob->py += ob->vy * dt;
         } else { /* on its orbit: a bead on a ring round the main core, held onto the ring and drawn along it to its place */
             float d = bead_step(ob, g_mx, g_my + bob, tx, ty, a, rx, ry, small, kt, &ok, ring_of, rn, dt);
-            if (d > ok.BREAK) ob->free = 1; /* pulled too far: it lets go, and flies on with the speed it had */
+            if (fd > 0.02f) { float f = fminf(1, fd * 3); ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx *= 1 - f; ob->vy *= 1 - f; } /* (whipped round: on the spiral, never flung off) */
+            else if (d > ok.BREAK) ob->free = 1; /* pulled too far: it lets go, and flies on with the speed it had */
         }
         /* its window: the core, room round it for the focus frame, drawn at its exact place (part pixels too) */
         int w4 = ((int)ob->w / 4) * 4;
         Pane *sp = &g_pane[i];
         if (!sp->w) pane_create(sp);
         if (w4 < 12 || (i != fi && !g_others)) { pane_hide(sp); SetRectEmpty(&g_core_rc[i]); continue; }
-        int m = frame_margin(w4), pw = w4 + 2 * m + 1;
-        float fx = ob->px - w4 / 2.0f - m, fy = ob->py - w4 / 2.0f - m;
+        Session *ss = &room->s[i];
+        ss->pad = i == fi ? hole_pad(ss) : 0;
+        int wp = ss->pad > 1 ? ((int)(w4 * ss->pad) / 4) * 4 : w4, pad_off = (wp - w4) / 2; /* the picture, and the core's square in it */
+        int m = frame_margin(w4), pw = wp + 2 * m + 1;
+        float fx = ob->px - wp / 2.0f - m, fy = ob->py - wp / 2.0f - m;
         int ix = (int)floorf(fx), iy = (int)floorf(fy);
         /* a small core in eighths of a pixel (it is drawn on its beat anyway, so a slow drift glides); the main core in
          * halves, so its last tiny easing toward its place does not ask for a new picture every tick */
@@ -1376,24 +1461,34 @@ static void draw_single(Room *room, int n, double now) {
             if (sp->shown && sp->W == pw && !sp->dirty && g_tick_n % every) continue;
             g_pic[i].due = 0;
         }
-        int pc = pic_make_at(&g_pic[i], &room->s[i], w4, now, 1.5f, qx, qy);
+        int pc = pic_make_at(&g_pic[i], &room->s[i], wp, now, 1.5f, qx, qy);
         static float lfx[MAX_SESS], lfy[MAX_SESS];
         int shifted = qx != lfx[i] || qy != lfy[i];
-        SetRect(&g_core_rc[i], ix + m, iy + m, ix + m + w4, iy + m + w4);
+        SetRect(&g_core_rc[i], ix + m + pad_off, iy + m + pad_off, ix + m + pad_off + w4, iy + m + pad_off + w4);
         if (pc || shifted || sp->dirty || !sp->shown || sp->W != pw) {
             pane_size(sp, pw, pw);
             memset(sp->px, 0, (size_t)pw * pw * 4);
             blit_pic(sp, m, m, &g_pic[i]);
-            RECT lr = {m, m, m + w4, m + w4};
+            RECT lr = {m + pad_off, m + pad_off, m + pad_off + w4, m + pad_off + w4};
             focus_frame(sp, lr, &room->s[i], now);
             pane_show(sp, ix, iy);
             lfx[i] = qx; lfy[i] = qy;
         } else pane_move(sp, ix, iy);
     }
     for (int i = n; i < MAX_SESS; i++) pane_hide(&g_pane[i]);
-    if (fi != last_fi && fi < n && g_pane[fi].w) { /* the main core on top (under the Settings window) */
+    { /* behind the black hole: under its window (so its shadow and disc lie over it); in front: over it */
+        static signed char was[MAX_SESS];
+        for (int i = 0; i < n && i < MAX_SESS; i++) {
+            if (i == fi || !g_pane[i].w || !g_pane[fi].w) continue;
+            signed char want = g_sat_behind[i] ? 1 : 2;
+            if (want == was[i]) continue;
+            was[i] = want;
+            if (want == 1) SetWindowPos(g_pane[i].w, g_pane[fi].w, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            else SetWindowPos(g_pane[i].w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    if (fi != last_fi && fi < n && g_pane[fi].w) { /* the main core on top */
         SetWindowPos(g_pane[fi].w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); last_fi = fi;
-        if (g_set && IsWindowVisible(g_set) && GetForegroundWindow() == g_set) SetWindowPos(g_set, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     g_top = fi;
     SetRect(&g_cluster_rc, (int)(g_mx - rx - small), (int)(g_my - ry - small), (int)(g_mx + rx + small), (int)(g_my + ry + small));
@@ -3653,7 +3748,9 @@ static void track_mouse(double now) {
         s->hover_to = i == hit || i == down;
         if (s->sub && s->sub_done > 0 && i == hit && now - g_hover_since > .5) { s->sub_seen = 1; s->unread = 0; } /* a finished subagent's reply, read: it goes once the pointer leaves */
         if (i == hit) { s->look_x_to = lx; s->look_y_to = ly; }
-        s->lock_to = i == hit && !busy && now - g_hover_since > 2.0 ? 1.0f : 0.0f; /* lock-on after resting 2 s */
+        s->pressing = i == down && !g_dragging && !g_moving; /* (held down, not dragged: the black hole pulls gas off the pointer) */
+        if (i == down) { g_hover_since = now; if (i == hit && s->pressing) { s->press_x = lx; s->press_y = ly; } } /* (a press, held or not, is not resting on it; held, it follows the pointer) */
+        s->lock_to = i == hit && !busy && now - g_hover_since > 2.0 ? 1.0f : 0.0f; /* lock-on after resting 2 s, untouched */
     }
     watch_for_rush(now, scr);
     { /* READY: one core at a time throws at the pointer (the main one first), while the pointer is on its monitor, off every core */
@@ -3878,7 +3975,9 @@ static void update_overlays(double now) {
     for (int i = 0; i < room->n; i++) {
         Session *s = &room->s[i];
         s->overlay = 0;
-        s->overlay = away && session_shown(s, now) != ST_WAIT ? ST_STANDBY : 0;
+        int hole = s->mo.rt == RT_HOLE && s->mo.hole > 0.5f && session_shown(s, now) == ST_SLEEP; /* (asked with no overlay: what it is under it) */
+        s->overlay = away && !hole && session_shown(s, now) != ST_WAIT ? ST_STANDBY : 0; /* (asleep as a black hole, it goes quiet instead) */
+        s->quiet_to = away && hole ? 1.0f : 0.0f;
         if ((g_drag_sid[0] && !strcmp(s->sid, g_drag_sid)) || (now < g_drop_until && !strcmp(s->sid, g_drop_sid))) s->overlay = ST_TRANSCRIBE; /* an image on it */
         s->mo.hit_at = 0; /* READY: a piece hit the pointer; it keeps on until you point at the core */
         if (!s->overlay) { /* a reply nobody has seen: READY, until the pieces it threw are home */
@@ -4018,6 +4117,8 @@ static void write_stats(double now) {
         fprintf(f, "%.0f  ticks %.1f/s  pictures %.1f/s  window updates %.1f/s  tick %.2f ms avg  gap %.1f ms (sd %.1f, max %.1f)  late %ld  monitor %.0f Hz, scale %.2f  smooth %s  pictures %.0f ms/s  windows %.0f ms/s  reply paints %.1f/s field, %.1f/s card\n",
                 now, g_stat_tick / span, g_stat_pic / span, g_stat_push / span, g_stat_tick ? g_stat_ms / g_stat_tick : 0,
                 mean, sd, g_stat_gap_max, g_stat_late, g_hz, g_dpi, SMOOTH_NAME[g_smooth], g_stat_render_ms / span, g_stat_push_ms / span, g_stat_paint_edit / span, g_stat_paint_card / span);
+        fprintf(f, "    black hole: %s, %.1f GPU pictures/s, %.2f ms each%s%s\n", g_gpu && gpu_init() ? "GPU" : "CPU", g_stat_gpu_n / span, g_stat_gpu_n ? g_stat_gpu_ms / g_stat_gpu_n : 0, g_gpu ? "" : "  (", g_gpu ? "" : "--no-gpu or none)");
+        g_stat_gpu_ms = 0; g_stat_gpu_n = 0;
         if (g_sa_n) {
             fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events read %.1f ms  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max);
             for (long i = 0; i < g_sa_nl; i++) fprintf(f, " %.2fs/%.0fms", g_sa_lt[i], g_sa_lg[i]);
@@ -4102,7 +4203,7 @@ static double tick_interval(void) {
  * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
 #include "lucide.h"
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
-       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE };
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS };
 /* Settings > Performance: pictures a second for each kind of moment (0: the monitor's refresh rate), the steps a
  * slider stops at; and how many threads draw */
 #define NRATES 12
@@ -4110,6 +4211,7 @@ static const float RATES[NRATES] = {2, 4, 6, 10, 15, 20, 30, 45, 60, 90, 120, 0}
 static const wchar_t *RATE_NAMES[NRATES] = {L"2", L"4", L"6", L"10", L"15", L"20", L"30", L"45", L"60", L"90", L"120", L"Max"};
 static const int THREADS[5] = {0, 1, 2, 4, 8};
 static const wchar_t *THREAD_NAMES[5] = {L"Auto", L"1", L"2", L"4", L"8"};
+static const wchar_t *HOLEGPU_NAMES[2] = {L"GPU", L"CPU"};
 static float *rate_of(Smooth *m, int row) { return row == R_RIDLE ? &m->idle : row == R_RTHINK ? &m->think : row == R_RBUSY ? &m->busy : row == R_RREST ? &m->rest : &m->hand; }
 static int rate_stop(float v) { /* the slider's step nearest a rate */
     if (v <= 0) return NRATES - 1;
@@ -4117,7 +4219,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG };
 enum { PG_LOOK, PG_CLUSTER, PG_REPLIES, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Replies", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -4160,7 +4262,9 @@ static int g_pv_st = ST_THINK, g_pv_drag; /* the state the preview's main core s
 static int g_tab;                   /* the page open (PG_*) */
 static double g_mot_msg_until;      /* "a state needs a routine" shows until then */
 static float g_pv_zoom = 1;         /* the wheel over the preview: 1 to 3 times, to see the detail */
-static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy;
+static float g_pv_mx, g_pv_my, g_pv_ox, g_pv_oy, g_pv_vx, g_pv_vy, g_pv_big = 100;
+static POINT g_pv_down, g_pv_turn_at; /* where the preview core was pressed; where a drag turning it last was */
+static int g_pv_turn; static double g_pv_turn_t; static float g_pv_tvx, g_pv_tvy; /* pressed on it (no move key): held, or turning it */
 static double g_pv_orbit, g_pv_lock_until, g_pv_last;
 static float g_set_scroll, g_set_scroll_to, g_set_content_h, g_set_view_h; /* the page scrolls when it is taller than its room; it glides to _to */
 static int g_sizing;                /* dragging an edge or the corner: 1 right, 2 bottom, 3 both */
@@ -4172,7 +4276,7 @@ static const wchar_t *g_kmsg;
 static int g_md_row = -1, g_md_id, g_md_moved; /* a motion tile pressed: a click plays it, a drag moves it in or out of use */
 static POINT g_md_from, g_md_at;
 static RECT g_mzone[3][2];          /* [routines, actions, black hole][in use, more]: where a dragged tile may be dropped */
-static const char *HOLE_ICON[HA_N] = {"", "unfold", "sparkles", "sunDim", "waves", "rotateCcw"};
+static const char *HOLE_ICON[HA_N] = {"", "unfold", "sparkles", "sunDim", "scanEye", "rotateCcw", "orbit"};
 static const char *ATK_ICON[] = {"", "rocket", "hammer", "orbit", "triangle"};
 _Static_assert(sizeof ATK_ICON / sizeof *ATK_ICON == RA_N, "one icon per READY attack (a missing one crashes the Motions page)");
 static int own_rdy(void) { return g_pv_st == ST_READY; } /* row 2 of the Motions page: READY's attacks, else the black hole's actions */
@@ -4196,12 +4300,15 @@ static int set_current(int row) {
         case R_FRAME: if (!strcmp(g_frame, FRAMES[i])) return i; break;
         case R_SCALE: if (i < 4 && g_scale == SCALES[i]) return i; break;
         case R_GRAVITY: if (i < 4 && g_gravity == GRAVITIES[i]) return i; break;
+        case R_HOLETILT: if (i < 5 && HOLE_TILT == TILTS[i]) return i; break;
         case R_OTHERS: return g_others;
+        case R_HOLELENS: return HOLE_ACTS >> HA_LENS & 1;
         case R_CHATAT: return g_chat_middle;
         case R_CHATFONT: return !g_chat_mono;
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
         case R_LABELS: return g_labels;
-        case R_AWAY: if (i < 4 && g_away_after == AWAYS[i]) return i; break;
+        case R_AWAY: if (i < 8 && g_away_after == AWAYS[i]) return i; break;
+        case R_HOLEGPU: return g_gpu ? 0 : 1;
         case R_CHATSIZE: if (i < 4 && g_chat_size == CHATSIZES[i]) return i; break;
         case R_CHATBG: return g_chat_bg;
         case R_WHEEL: return g_wheel_spin;
@@ -4296,7 +4403,7 @@ static int pick_colour(unsigned *target) {
 }
 static void set_choose(int row, int val) {
     int palette = (row == R_CHATBG || row == R_TEXTCOL || row == R_SHADECOL) && val == 5;
-    if (val == set_current(row) && row != R_OTHERS && !palette) return;
+    if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && !palette) return; /* (a switch: flipped whatever it is) */
     if (palette && !pick_colour(row == R_CHATBG ? &g_chat_custom : row == R_SHADECOL ? &g_shade_custom : &g_text_custom)) return; /* cancelled: as it was */
     switch (row) {
     case R_SHAPE: snprintf(g_shape_name, sizeof g_shape_name, "%s", SHAPES[val]); shape_make(&g_shape, g_shape_name); break;
@@ -4305,12 +4412,14 @@ static void set_choose(int row, int val) {
     case R_FRAME: snprintf(g_frame, sizeof g_frame, "%s", FRAMES[val]); g_pv_lock_until = wall() + 2.5; break;
     case R_SCALE: g_scale = SCALES[val]; main_place(); break;
     case R_GRAVITY: g_gravity = GRAVITIES[val]; break;
+    case R_HOLETILT: HOLE_TILT = TILTS[val]; break;
     case R_OTHERS: g_others = !g_others; break;
     case R_CHATAT: g_chat_middle = val; break;
     case R_CHATFONT: g_chat_mono = !val; chat_refont(); break;
     case R_TEXT: g_font = FONTS[val]; chat_refont(); break;
     case R_LABELS: g_labels = val; break;
-    case R_AWAY: g_away_after = AWAYS[val]; break;
+    case R_AWAY: if (val >= 0 && val < 8) g_away_after = AWAYS[val]; break;
+    case R_HOLEGPU: g_gpu = val == 0; break;
     case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
     case R_CHATBG: g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
@@ -4329,6 +4438,7 @@ static void set_choose(int row, int val) {
     case R_BDW: if (val >= 0 && val < 4) { g_bd_w = val; bd_apply(); } break;
     case R_BDA: if (val >= 0 && val < 4) { g_bd_a = val; bd_apply(); } break;
     case R_BDCORE: BACKDROP_CORE = !BACKDROP_CORE; break;
+    case R_HOLELENS: HOLE_ACTS ^= 1u << HA_LENS; break;
     case R_SHADECOL: g_shade_col = val; break;
     default: return;
     }
@@ -4364,7 +4474,7 @@ static void page_reset(int pg) {
         snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
         snprintf(g_hk_reply, sizeof g_hk_reply, "%s", g_launch.hk[2]); snprintf(g_hk_set, sizeof g_hk_set, "%s", g_launch.hk[3]);
         g_move_mod = g_launch.move_mod; g_send_ctrl = g_launch.send_ctrl; hotkeys_apply(); break;
-    case PG_PERF: g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads; break;
+    case PG_PERF: g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads; g_gpu = 1; break;
     }
     settings_applied(1);
 }
@@ -4599,7 +4709,7 @@ typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
 static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAMES[4] = {L"XS", L"S", L"M", L"L"},
                      *TEXT_SIZES[5] = {L"XS", L"S", L"M", L"L", L"XL"}, *BOX_SIZES[4] = {L"S", L"M", L"L", L"XL"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
-                     *AWAY_NAMES[4] = {L"1 min", L"2 min", L"5 min", L"Never"}, *OPEN_NAMES[2] = {L"Next to core", L"Middle"},
+                     *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[2] = {L"Next to core", L"Middle"},
                      *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
                      *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *BACKDROP_NAMES[3] = {L"Off", L"On", L"Auto"}, *BDW_NAMES[4] = {L"Thin", L"Medium", L"Thick", L"Heavy"}, *BDA_NAMES[4] = {L"Light", L"Medium", L"Strong", L"Max"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
 static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
@@ -4629,7 +4739,7 @@ static int page_sections(int pg, SSec *s) {
         ROW(0, RK_SEG, R_LABELS, 2, L"Names over cores", L"all-cores mode", LABEL_NAMES, NULL, NULL, NULL);
         ROW(1, RK_SLIDER, R_GRAVITY, 4, L"Gravity", L"drag the core above to feel it", NULL, L"Floaty", L"Firm", NULL);
         ROW(1, RK_SEG, R_WHEEL, 5, L"Scroll on a core", NULL, WHEEL_NAMES, NULL, NULL, NULL);
-        ROW(2, RK_SEG, R_AWAY, 4, L"Rest after", L"no mouse or keys this long: the cores show STANDBY", AWAY_NAMES, NULL, NULL, NULL);
+        ROW(2, RK_SLIDER, R_AWAY, 8, L"Rest after", L"no mouse or keys this long: the cores show STANDBY", AWAY_NAMES, NULL, NULL, NULL);
         break;
     case PG_REPLIES:
         s[0].title = L"TEXT"; s[1].title = L"BOX"; n = 2;
@@ -4660,6 +4770,12 @@ static int page_sections(int pg, SSec *s) {
         ROW(1, RK_SLIDER, R_RREST, NRATES, L"Asleep or away", NULL, RATE_NAMES, NULL, NULL, "moon");
         ROW(1, RK_SLIDER, R_RHAND, NRATES, L"In the hand", L"pointed at or held", RATE_NAMES, NULL, NULL, "hand");
         ROW(2, RK_SEG, R_THREADS, 5, L"Drawing threads", L"how many share drawing a big core; Auto: about one a physical core", THREAD_NAMES, NULL, NULL, "layers");
+        {
+            static wchar_t gnote[200];
+            if (gpu_init()) swprintf(gnote, 200, L"asleep, it is drawn on the graphics card: a sixth of the CPU");
+            else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it", gpu_why());
+            ROW(2, RK_SEG, R_HOLEGPU, 2, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
+        }
         break;
     }
 #undef ROW
@@ -4876,6 +4992,8 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
         for (int id = first; id < last; id++) {
             int on = (set >> id) & 1;
             if (on != !pass) continue;
+            if (row == 0 && id == RT_DORMANT) continue; /* (retired: asleep, it is the black hole) */
+            if (row == 2 && !own_rdy() && (HA_RETIRED >> id & 1)) continue; /* (Jets: retired) */
             float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 64;
             mot_tile(pn, a, b, a + tw, b + 58, row, id, on, row == 0 && ((id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY)));
             k++;
@@ -4893,6 +5011,86 @@ static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     }
     return y - y0;
 }
+/* Asleep as a black hole: a page of its own. The hole itself (its sky, its tilt), its actions as a list (each played
+ * with its button or a click on its row, switched on or off with its switch), what your hands can do to it, and below
+ * them the routines Asleep may pick from. Returns the height used; draws only when asked (measured first) */
+static const char *HOLE_SHORT[HA_N] = {"", "", "a star torn apart as it swings past",
+    "a loop of hot gas rises off the disc, snaps and flings a blob out", "", "its disc wobbles round like a top", "a hot clump races round its inner edge"};
+static float sleep_body(Pane *pn, float a, float y0, float b, int draw) {
+    float y = y0;
+    { /* the black hole itself */
+        float h = 30 + 56 + 1 + 56 + 6;
+        if (draw) {
+            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
+            lu_icon(pn, "hole", a + 19, y + 17, 13, S_OR);
+            tx(a + 32, y + 8, b - 12, y + 26, L"THE BLACK HOLE", g_sf_cap, S_TEXT, DT_LEFT);
+            SRow lens = {RK_TOGGLE, R_HOLELENS, 1, L"Lensing", L"the stars behind it, bent round its shadow", NULL, NULL, NULL, "scanEye"};
+            SRow tilt = {RK_SLIDER, R_HOLETILT, 5, L"Tilt", L"how fast it tilts and rolls on its own", TILT_NAMES, NULL, NULL, "rotateCcw"};
+            draw_row(pn, &lens, a, y + 30, b, 56);
+            box(pn, a + 16, y + 86, b - 16, y + 87, 0, S_RULE, 0, 0);
+            draw_row(pn, &tilt, a, y + 87, b, 56);
+        }
+        y += h + 12;
+    }
+    { /* its actions */
+        int n = 0;
+        for (int id = 1; id < HA_N; id++) if (id != HA_LENS && !(HA_RETIRED >> id & 1)) n++;
+        float h = 30 + n * 52 + 6;
+        if (draw) {
+            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
+            lu_icon(pn, "sparkles", a + 19, y + 17, 13, S_OR);
+            wchar_t head[64];
+            swprintf(head, 64, L"ITS ACTIONS \x00B7 %d", bits(HOLE_ACTS & ~1u & ~(1u << HA_LENS) & ~HA_RETIRED));
+            tx(a + 32, y + 8, a + 200, y + 26, head, g_sf_cap, S_TEXT, DT_LEFT);
+            tx(a + 150, y + 8, b - 16, y + 26, L"one now and then, while it sleeps", g_sf_small, S_MUTED, DT_RIGHT | DT_END_ELLIPSIS);
+            int k = 0;
+            for (int id = 1; id < HA_N; id++) {
+                if (id == HA_LENS || (HA_RETIRED >> id & 1)) continue;
+                float ry = y + 30 + 52 * k++;
+                int on = HOLE_ACTS >> id & 1, hr = is_hot(K_HPLAY, 2, id), hs = is_hot(K_HTOG, 2, id);
+                if (k > 1) box(pn, a + 16, ry, b - 16, ry + 1, 0, S_RULE, 0, 0);
+                if (hr) box(pn, a + 6, ry + 3, b - 6, ry + 49, 9, S_CHIP_HOT, 0, 0);
+                lu_icon(pn, HOLE_ICON[id], a + 30, ry + 26, 18, on ? S_OR : S_MUTED);
+                txa(a + 52, ry + 8, b - 120, ry + 27, HOLE_ACT_NAME[id], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+                txa(a + 52, ry + 27, b - 120, ry + 45, HOLE_SHORT[id], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+                /* play: a round button with a triangle; the row plays it too */
+                float px = b - 88, cy = ry + 26;
+                aa_disc(pn, S(px), S(cy), S(14), hexc(hr ? S_OR : S_CHIP), 1);
+                float P[6] = {S(px - 4), S(cy - 6), S(px - 4), S(cy + 6), S(px + 6), S(cy)};
+                aa_tri(pn, P, hexc(hr ? S_ON_OR : S_TEXT), 1);
+                hit(a, ry, b - 70, ry + 52, K_HPLAY, 2, id);
+                /* its switch */
+                box(pn, b - 58, cy - 12, b - 16, cy + 12, 12, on ? S_OR : (hs ? S_EDGE_HOT : S_EDGE), 0, 0);
+                aa_disc(pn, S(on ? b - 28 : b - 46), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
+                hit(b - 66, ry + 6, b - 10, ry + 46, K_HTOG, 2, id);
+            }
+        }
+        y += h + 12;
+    }
+    { /* hands on: what the mouse does to it */
+        static const char *IC[5] = {"pointer", "hand", "mouse", "move", "eye"};
+        static const wchar_t *VERB[5] = {L"Click", L"Hold", L"Scroll", L"Drag or swipe", L"Rest on it"};
+        static const wchar_t *WHAT[5] = {L"drops a star in from that side", L"pulls a stream of gas off the pointer", L"spins its gas; keep going and it speeds up", L"turns it over", L"for 2 s, untouched: it wakes"};
+        int cols = b - a >= 560 ? 2 : 1, rows = (5 + cols - 1) / cols;
+        float h = 30 + rows * 32 + 8, cw = (b - a - 16) / cols;
+        if (draw) {
+            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
+            lu_icon(pn, "hand", a + 19, y + 17, 13, S_OR);
+            tx(a + 32, y + 8, b - 12, y + 26, L"HANDS ON", g_sf_cap, S_TEXT, DT_LEFT);
+            for (int i = 0; i < 5; i++) {
+                float cx = a + 8 + (i % cols) * cw, cy = y + 30 + (i / cols) * 32 + 16;
+                lu_icon(pn, IC[i], cx + 14, cy, 15, S_LABEL);
+                float vw = tw_of(VERB[i], g_sf_label);
+                tx(cx + 32, cy - 10, cx + 32 + vw + 2, cy + 10, VERB[i], g_sf_label, S_TEXT, DT_LEFT);
+                tx(cx + 40 + vw, cy - 10, cx + cw - 8, cy + 10, WHAT[i], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+            }
+        }
+        y += h + 16;
+    }
+    y += mot_tiles(pn, 0, a, draw ? y : -10000, b); /* the routines Asleep may pick from */
+    if (draw) { g_mzone[2][0] = g_mzone[2][1] = SR(0, 0, 0, 0); } /* (no tiles of the black hole's to drag here) */
+    return y - y0;
+}
 static float motions_page(Pane *pn, float x0, float y0, float x1) {
     float cw = x1 - x0, lw = cw >= 720 ? 250 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
     /* the list: each state with the icons of its routines and how many actions it has */
@@ -4908,7 +5106,7 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
         tx(a + 26, b, c - 100, b + 34, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
         /* its routines' icons (up to four), then +n, then the actions' count */
         uint32_t rt = MOTION_MAP[st].rt & ~1u;
-        int na = bits(MOTION_MAP[st].act & ~1u), shown = 0, more = 0;
+        int na = st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1) ? 0 : bits(MOTION_MAP[st].act & ~1u), shown = 0, more = 0; /* (a black hole plays none of them) */
         float ix = c - 10;
         wchar_t num[12];
         if (na) {
@@ -4930,11 +5128,19 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     int st = g_pv_st;
     float iy = ey + 16 + 30 + 10, ty = iy + 44 + 16;
     int hole = (st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1)) || (st == ST_READY && (MOTION_MAP[st].rt >> RT_RESTLESS & 1)); /* asleep as a black hole, or READY: their own first */
-    float th = mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16) + (hole ? 16 + 24 + mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28) : 0); /* (measured off the page) */
+    int no_acts = hole && st == ST_SLEEP; /* (a black hole plays only its own: the shell's actions never run on it, so they are not offered) */
+    int sleepy = hole && st == ST_SLEEP; /* (Asleep as a black hole: its own page) */
+    float th = sleepy ? sleep_body(pn, ex0 + 16, ty, x1 - 16, 0) : mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + (no_acts ? 0 : 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16)) + (hole ? 16 + 24 + mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28) : 0); /* (measured off the page) */
     float eh = (ty - ey) + th + 16;
     box(pn, ex0, ey, x1, ey + eh, 12, S_CARD, 0, 0);
     aa_disc(pn, S(ex0 + 22), S(ey + 31), S(5), LOOKS[st].halo, 1);
     tx(ex0 + 34, ey + 16, x1 - 180, ey + 46, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
+    if (sleepy) { /* (marked: it is a black hole) */
+        float nw = tw_of(state_wname(st), g_sf_card), bx = ex0 + 34 + nw + 10;
+        box(pn, bx, ey + 21, bx + 92, ey + 41, 10, S_CHIP, S_OR, 1);
+        lu_icon(pn, "hole", bx + 13, ey + 31, 11, S_OR);
+        tx(bx + 22, ey + 21, bx + 88, ey + 41, L"black hole", g_sf_small, S_OR, DT_LEFT);
+    }
     int htr = is_hot(K_MTRY, 0, 0), hrs = is_hot(K_MRESET, 0, 0);
     box(pn, x1 - 152, ey + 18, x1 - 80, ey + 44, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
     float P[6] = {S(x1 - 138), S(ey + 26), S(x1 - 138), S(ey + 36), S(x1 - 130), S(ey + 31)};
@@ -4946,7 +5152,7 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     /* the info line: what the tile under the pointer does */
     box(pn, ex0 + 16, iy, x1 - 16, iy + 44, 9, S_TILE, 0, 0);
     char line[400];
-    if (g_hot >= 0 && g_hits[g_hot].kind == K_MTOG) {
+    if (g_hot >= 0 && (g_hits[g_hot].kind == K_MTOG || g_hits[g_hot].kind == K_HPLAY || g_hits[g_hot].kind == K_HTOG)) {
         int row = g_hits[g_hot].row, id = g_hits[g_hot].val;
         lu_icon(pn, mot_icon(row, id), ex0 + 36, iy + 22, 18, S_OR);
         snprintf(line, sizeof line, "%s: %s", mot_name(row, id), mot_about(row, id));
@@ -4954,9 +5160,11 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
     else {
         wchar_t t[200];
-        swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
+        if (sleepy) swprintf(t, 200, L"Click an action to watch it above; its switch says whether it plays on its own.");
+        else swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
         tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     }
+    if (sleepy) { sleep_body(pn, ex0 + 16, ty, x1 - 16, 1); return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0); }
     float hh = 0;
     if (hole) { /* the black hole's own actions, in a frame of their own above the state's */
         float hin = mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28);
@@ -4965,7 +5173,7 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
         hh = hin + 24 + 16;
     }
     float h0 = mot_tiles(pn, 0, ex0 + 16, ty + hh, x1 - 16);
-    mot_tiles(pn, 1, ex0 + 16, ty + hh + h0 + 16, x1 - 16);
+    if (!no_acts) mot_tiles(pn, 1, ex0 + 16, ty + hh + h0 + 16, x1 - 16);
     return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0);
 }
 
@@ -5155,6 +5363,19 @@ static void settings_tick(double now) {
     OrbitK ok = orbit_k(rx, small);
     Session *m = &g_pv_room.s[0];
     if (g_pv_mx == 0 && g_pv_my == 0) { g_pv_mx = cx; g_pv_my = cy; }
+    g_pv_big = big;
+    if (g_pv_turn) { /* pressed on it: held still, or a drag that turns it under the hand */
+        POINT q; GetCursorPos(&q); ScreenToClient(g_set, &q);
+        if (m->pressing && abs(q.x - g_pv_down.x) + abs(q.y - g_pv_down.y) > (int)(4 * g_sdpi)) { m->pressing = 0; m->held = 1; }
+        if (m->held) {
+            float ddx = (float)(q.x - g_pv_turn_at.x) / (float)g_sdpi, ddy = (float)(q.y - g_pv_turn_at.y) / (float)g_sdpi, tdt = (float)(now - g_pv_turn_t);
+            if (ddx != 0 || ddy != 0) {
+                m->ay += ddx * 0.012f; m->ax += ddy * 0.012f;
+                if (tdt > 0.001f) { g_pv_tvx = ddy * 0.012f / tdt; g_pv_tvy = ddx * 0.012f / tdt; }
+                g_pv_turn_at = q; g_pv_turn_t = now;
+            }
+        }
+    }
     if (g_pv_drag) {
         POINT p; GetCursorPos(&p); ScreenToClient(g_set, &p);
         float nx = p.x - g_pv_rc.left - g_pv_ox, ny = p.y - g_pv_rc.top - g_pv_oy;
@@ -5187,7 +5408,9 @@ static void settings_tick(double now) {
         m->aim_x = ax; m->aim_y = ay; m->aim_hit = hit;
     }
     room_tick(&g_pv_room, &g_shape, now, dt);
-    if (!g_pv_drag) g_pv_orbit += dt;
+    float pfd = hole_drag(m, now);
+    if (!g_pv_drag) g_pv_orbit += dt * (1 + 9 * pfd);
+    rx *= 1 - .5f * pfd; ry *= 1 - .62f * pfd;
     Orbit *ring[3];
     int rn = 0;
     for (int i = 1; i < 4; i++) if (g_pv_ob[i].init && !g_pv_ob[i].free) ring[rn++] = &g_pv_ob[i];
@@ -5206,8 +5429,11 @@ static void settings_tick(double now) {
             if (ob->py < hs) { ob->py = hs; ob->vy = fabsf(ob->vy) * BOUNCE; }
             if (ob->py > ph - hs) { ob->py = ph - hs; ob->vy = -fabsf(ob->vy) * BOUNCE; }
             if (hypotf(ob->px - g_pv_mx, ob->py - g_pv_my) < ok.CATCH || (!g_pv_drag && ob->rest > 1.5f)) ob->free = 0;
-        } else if (bead_step(ob, g_pv_mx, g_pv_my + bob, tx, ty, a, rx, ry, small, g_pv_drag ? 0 : ok.KT, &ok, ring, rn, dt) > ok.BREAK)
-            ob->free = 1, ob->rest = 0;
+        } else {
+            float d = bead_step(ob, g_pv_mx, g_pv_my + bob, tx, ty, a, rx, ry, small, g_pv_drag ? 0 : ok.KT, &ok, ring, rn, dt);
+            if (pfd > 0.02f) { float f = fminf(1, pfd * 3); ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx *= 1 - f; ob->vy *= 1 - f; }
+            else if (d > ok.BREAK) ob->free = 1, ob->rest = 0;
+        }
     }
     /* the cluster's picture: the band's colour, the small cores, the main one and its frame on top */
     pane_size(&g_pv, pw, ph);
@@ -5222,6 +5448,8 @@ static void settings_tick(double now) {
         blit_pic_at(&g_pv, g_pv_ob[i].px - w4 / 2.0f, g_pv_ob[i].py - w4 / 2.0f, &g_pv_pic[i]);
     }
     int w4 = ((int)big / 4) * 4;
+    m->pad = hole_pad(m);
+    if (m->pad > 1) w4 = ((int)(w4 * m->pad) / 4) * 4; /* a black hole: room round it (the core the same size) */
     if (pics_now) { RENDER_PART = 1; pic_make(&g_pv_pic[0], m, w4, now, 3); RENDER_PART = 0; } /* the one you watch: every frame (READY's pieces: below) */
     else w4 = g_pv_pic[0].px;
     float fx = g_pv_mx - w4 / 2.0f, fy = g_pv_my - w4 / 2.0f;
@@ -5328,21 +5556,9 @@ static void krec_key(WPARAM vk) {
     krec_stop();
 }
 
-#define WM_SET_BEHIND (WM_APP + 7)
 static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     switch (msg) {
-    case WM_ACTIVATE: /* in use: above the cores (they are always on top); left for another app: under it, as any window */
-        if (LOWORD(wp) != WA_INACTIVE) SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        else PostMessage(w, WM_SET_BEHIND, 0, 0); /* (once the other window is in front: then it is known) */
-        break;
-    case WM_SET_BEHIND: {
-        HWND fg = GetForegroundWindow();
-        if (fg == w) return 0;
-        int top = fg && (GetWindowLongPtr(fg, GWL_EXSTYLE) & WS_EX_TOPMOST);
-        SetWindowPos(w, fg && !top ? fg : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); /* (just behind it: no longer on top) */
-        return 0;
-    }
     case WM_DPICHANGED: { /* dragged onto a monitor with another scale: drawn again at that scale */
         const RECT *r = (const RECT *)lp;
         g_sdpi = LOWORD(wp) / 96.0;
@@ -5412,7 +5628,9 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
             case K_MTOG: g_md_row = sh->row; g_md_id = sh->val; g_md_moved = 0; g_md_from = g_md_at = p; SetCapture(w); break; /* a click or a drag: told apart on the move */
             case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
-            case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; if (g_pv_st == ST_SLEEP) HOLE_ACTS = (1u << HA_N) - 2; if (g_pv_st == ST_READY) READY_ATKS = (1u << RA_N) - 2; settings_applied(1); break; }
+            case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; if (g_pv_st == ST_SLEEP) { HOLE_ACTS = HOLE_ACTS_DEF; HOLE_TILT = 2.5f; } if (g_pv_st == ST_READY) READY_ATKS = (1u << RA_N) - 2; settings_applied(1); break; }
+            case K_HPLAY: mot_play(2, sh->val); break;
+            case K_HTOG: mot_toggle(2, sh->val); break;
             case K_KREC: if (g_krec == sh->val) krec_stop(); else { g_krec = sh->val; for (int i = 1; i <= 4; i++) UnregisterHotKey(g_cluster.w, i); g_sl_dirty = 1; } break; /* (no hotkey steals the keys meanwhile) */
             case K_RESET: if (sh->row == 1) page_reset(g_tab); else set_reset(); break;
             case K_SIZE: g_sizing = sh->val; GetCursorPos(&g_size_from); g_size_w0 = g_set_w; g_size_h0 = g_set_h; SetCapture(w); break;
@@ -5420,11 +5638,20 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        if (PtInRect(&g_pv_rc, p)) { /* pick the preview core up (pressed off it: it jumps under the pointer) */
-            g_pv_ox = p.x - g_pv_rc.left - g_pv_mx; g_pv_oy = p.y - g_pv_rc.top - g_pv_my;
-            if (hypotf(g_pv_ox, g_pv_oy) > (g_pv_rc.bottom - g_pv_rc.top) * 0.25f) g_pv_ox = g_pv_oy = 0;
-            g_pv_drag = 1;
-            SetCapture(w);
+        if (PtInRect(&g_pv_rc, p)) { /* as on the desktop: the move key (Alt) picks the core up and carries it (pressed off it:
+                                       * it jumps under the pointer); a plain press on it is a press, a drag turns it */
+            Session *pm = &g_pv_room.s[0];
+            float dx = p.x - g_pv_rc.left - g_pv_mx, dy = p.y - g_pv_rc.top - g_pv_my, u = g_pv_big * SHELL_FRAC;
+            if (alt_held()) {
+                g_pv_ox = dx; g_pv_oy = dy;
+                if (hypotf(g_pv_ox, g_pv_oy) > (g_pv_rc.bottom - g_pv_rc.top) * 0.25f) g_pv_ox = g_pv_oy = 0;
+                g_pv_drag = 1;
+                SetCapture(w);
+            } else if (hypotf(dx, dy) < u * (hole_pad(pm) > 1 ? 1.6f : 1.15f)) {
+                g_pv_turn = 1; g_pv_down = g_pv_turn_at = p; g_pv_turn_t = wall(); g_pv_tvx = g_pv_tvy = 0;
+                pm->press_at = wall(); pm->press_x = dx / u; pm->press_y = dy / u; pm->pressing = 1;
+                SetCapture(w);
+            }
         }
         return 0;
     }
@@ -5442,16 +5669,26 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int h = set_hit_at(p), close = g_close_armed && h >= 0 && g_hits[h].kind == K_CLOSE;
         if (g_sizing) { g_sizing = 0; settings_save(); g_sl_dirty = 1; settings_tick(wall()); } /* let go: drawn in full at once */
         if (g_pv_drag || g_slide >= 0 || g_close_armed) { g_pv_drag = 0; g_slide = -1; g_close_armed = 0; g_sl_dirty = 1; }
+        if (g_pv_turn) { /* let go: thrown, it spins on, as on the desktop */
+            Session *pm = &g_pv_room.s[0];
+            int thrown = pm->held && wall() - g_pv_turn_t < 0.1;
+            if (pm->held) { pm->spin_x = thrown ? fmaxf(-8, fminf(8, g_pv_tvx)) : 0; pm->spin_y = thrown ? fmaxf(-8, fminf(8, g_pv_tvy)) : 0; }
+            g_pv_turn = 0;
+        }
+        g_pv_room.s[0].pressing = 0; g_pv_room.s[0].held = 0;
         ReleaseCapture();
         if (close) set_close();
         return 0;
     }
-    case WM_CAPTURECHANGED: g_pv_drag = 0; g_close_armed = 0; if (g_md_row >= 0) { g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1; } if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
+    case WM_CAPTURECHANGED: g_pv_drag = 0; g_pv_turn = 0; g_pv_room.s[0].pressing = g_pv_room.s[0].held = 0; g_close_armed = 0; if (g_md_row >= 0) { g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1; } if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
         chat_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
     case WM_MOUSEWHEEL: { /* over the preview: zoom; over the page: scroll it */
         POINT c = p; ScreenToClient(w, &c);
         float notch = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
+        Session *pm = &g_pv_room.s[0];
+        float hx = c.x - g_pv_rc.left - g_pv_mx, hy = c.y - g_pv_rc.top - g_pv_my;
+        if (PtInRect(&g_pv_rc, c) && hole_pad(pm) > 1 && hypotf(hx, hy) < g_pv_big * SHELL_FRAC * 1.6f) { wheel_spin(pm, notch); return 0; } /* a black hole: the wheel whirls its disc (zoom: the buttons) */
         if (PtInRect(&g_pv_rc, c)) {
             g_pv_zoom = clampf(g_pv_zoom * powf(1.2f, notch), 1, 3);
             if (g_pv_zoom < 1.05f) g_pv_zoom = 1;
@@ -5471,6 +5708,41 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 /* opens it in the middle of the monitor the pointer is on (or brings it back to the front) */
+/* Vigil's icon: the core itself, drawn by the shared renderer at that size on nothing (see-through round it), for the
+ * Settings window's title bar and taskbar button; a small one is drawn at twice the size and shrunk, for clean lines */
+static HICON vigil_icon(int px) {
+    static Session ic; static Canvas cv; static uint8_t *rgba; static size_t cap;
+    session_init(&ic, "vigil-icon", 0, &g_shape);
+    ic.ax = 0.42f; ic.ay = 0.6f; /* (a turn that shows its depth, as assets/icon.png does) */
+    ic.backdrop = 1; /* (the dark band along its lines: it reads on a light taskbar too) */
+    int ss = px < 64 ? 2 : 1, n = px * ss, nb = (int)(n / 0.8f + 0.5f), o0 = (nb - n) / 2; /* drawn larger, its middle kept: the shell fills the icon */
+    canvas_resize(&cv, nb, nb);
+    render_one(&cv, &ic, &g_shape, 0.5, 1.25f, g_core);
+    if ((size_t)nb * nb * 4 > cap) { free(rgba); cap = (size_t)nb * nb * 4; rgba = malloc(cap); }
+    canvas_rgba(&cv, rgba);
+    for (int y = 0; y < n; y++) memmove(rgba + (size_t)y * n * 4, rgba + ((size_t)(y + o0) * nb + o0) * 4, (size_t)n * 4); /* (rows only move up and left) */
+    BITMAPV5HEADER bh; memset(&bh, 0, sizeof bh);
+    bh.bV5Size = sizeof bh; bh.bV5Width = px; bh.bV5Height = -px; bh.bV5Planes = 1; bh.bV5BitCount = 32; bh.bV5Compression = BI_BITFIELDS;
+    bh.bV5RedMask = 0x00FF0000; bh.bV5GreenMask = 0x0000FF00; bh.bV5BlueMask = 0x000000FF; bh.bV5AlphaMask = 0xFF000000;
+    void *bits = NULL;
+    HDC dc = GetDC(NULL);
+    HBITMAP col = CreateDIBSection(dc, (BITMAPINFO *)&bh, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, dc);
+    if (!col || !bits) return NULL;
+    uint32_t *o = bits;
+    for (int y = 0; y < px; y++) for (int x = 0; x < px; x++) {
+        unsigned c[4] = {0, 0, 0, 0};
+        for (int j = 0; j < ss; j++) for (int i = 0; i < ss; i++) { const uint8_t *q = rgba + ((size_t)(y * ss + j) * n + x * ss + i) * 4; for (int k = 0; k < 4; k++) c[k] += q[k]; }
+        for (int k = 0; k < 4; k++) c[k] /= (unsigned)(ss * ss);
+        unsigned a = c[3] ? c[3] : 0, r = a ? c[0] * 255 / a : 0, g = a ? c[1] * 255 / a : 0, b = a ? c[2] * 255 / a : 0; /* (an icon wants straight alpha) */
+        o[y * px + x] = (a << 24) | ((r > 255 ? 255 : r) << 16) | ((g > 255 ? 255 : g) << 8) | (b > 255 ? 255 : b);
+    }
+    HBITMAP mask = CreateBitmap(px, px, 1, 1, NULL);
+    ICONINFO ii = {TRUE, 0, 0, mask, col};
+    HICON h = CreateIconIndirect(&ii);
+    DeleteObject(mask); DeleteObject(col);
+    return h;
+}
 static void settings_open(void) {
     double now = wall();
     pv_init(now);
@@ -5485,6 +5757,13 @@ static void settings_open(void) {
         RegisterClass(&sc);
         /* an ordinary window (in the taskbar and Alt+Tab): above the cores while in use, under another app once it is (WM_ACTIVATE) */
         g_set = CreateWindowEx(WS_EX_LAYERED | WS_EX_APPWINDOW, L"VigilSettings", L"Vigil settings", WS_POPUP, 0, 0, 10, 10, NULL, NULL, sc.hInstance, NULL);
+        { /* its icons: Vigil's core, at the sizes Windows asks for on this monitor */
+            UINT dpi = GetDpiForWindow(g_set);
+            if (!dpi) dpi = 96;
+            HICON big = vigil_icon(MulDiv(GetSystemMetrics(SM_CXICON), (int)dpi, 96) < 32 ? 32 : MulDiv(32, (int)dpi, 96)), small = vigil_icon(MulDiv(16, (int)dpi, 96));
+            if (big) SendMessage(g_set, WM_SETICON, ICON_BIG, (LPARAM)big);
+            if (small) SendMessage(g_set, WM_SETICON, ICON_SMALL, (LPARAM)small);
+        }
         g_sl.mem = CreateCompatibleDC(NULL);
         g_so.mem = CreateCompatibleDC(NULL);
         g_pv.mem = CreateCompatibleDC(NULL);
@@ -5498,7 +5777,7 @@ static void settings_open(void) {
         g_set_w = clampf(g_set_w, 620, (wa.right - wa.left) / (float)g_sdpi); /* the size kept, as much as this monitor has room for */
         g_set_h = clampf(g_set_h, 480, (wa.bottom - wa.top) / (float)g_sdpi);
         int W = SW_W(), H = SW_H();
-        SetWindowPos(g_set, HWND_TOPMOST, (wa.left + wa.right - W) / 2, (wa.top + wa.bottom - H) / 2, W, H, SWP_NOACTIVATE);
+        SetWindowPos(g_set, HWND_NOTOPMOST, (wa.left + wa.right - W) / 2, (wa.top + wa.bottom - H) / 2, W, H, SWP_NOACTIVATE); /* (an ordinary window: the cores, always on top, stay above it) */
         for (int i = 1; i < 4; i++) g_pv_ob[i].init = 0;
         g_pv_mx = g_pv_my = 0;
         g_pv_last = now;
@@ -5964,6 +6243,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
         wheel_spin(s, notches);
+        g_hover_since = wall(); /* (scrolling on it is not resting on it) */
         if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
         return 0;
     }
@@ -6003,7 +6283,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             start_follow();
             return 0;
         }
-        s->press_at = wall(); s->press_x = lx; s->press_y = ly;
+        s->press_at = wall(); s->press_x = lx; s->press_y = ly; s->pressing = 1;
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -6159,6 +6439,7 @@ static void usage(void) {
         "  --away SECONDS       no input this long: cores show STANDBY (default 120, 0 = never)\n"
         "  --stats              every 5 s, frames, pictures and window updates a second to panel-stats.txt\n"
         "  --settings           open the Settings window at once\n"
+        "  --no-gpu             draw the black hole on the CPU, not the GPU\n"
         "  --settings-shot FILE open it, save it as a BMP after 2 s and quit (to check a change)\n"
         "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
         "  --settings-light     start the preview on its light background (with --settings-shot)\n"
@@ -6166,7 +6447,9 @@ static void usage(void) {
         "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab NAME  open it on that page: look, cluster, replies, motions, shortcuts, performance\n"
         "  --settings-fold      with its sidebar folded to icons\n"
-        "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n\n"
+        "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n"
+        "  --settings-scroll PX its page scrolled down that far (with --settings-shot)\n"
+        "  --settings-hole A N STEP  (with --settings-shot FILE) play the black hole's action A, save N shots STEP s apart\n\n"
         "Right-click a core: Copy reply, Reply, Bring to front, and Settings... (a window with a live preview:\n"
         "shape, inner core, glow, focus frame, size, gravity, other sessions, chat box, text size, labels,\n"
         "standby); settings are kept and win over these options until \"Reset to launch options\".\n\n"
@@ -6204,6 +6487,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--labels") && v) { g_labels = strcmp(v, "hover") != 0; i++; }
         else if (!strcmp(a, "--away") && v) { g_away_after = atof(v); i++; }
         else if (!strcmp(a, "--stats")) g_stats = 1;
+        else if (!strcmp(a, "--no-gpu")) g_nogpu_arg = 1;
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
         else if (!strcmp(a, "--settings-tab") && v) { /* look, cluster, replies, motions, shortcuts, performance */
             static const char *TABS[PG_N] = {"look", "cluster", "replies", "motions", "shortcuts", "performance"};
@@ -6211,6 +6495,7 @@ int main(int argc, char **argv) {
             g_open_settings = 1; i++;
         }
         else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
+        else if (!strcmp(a, "--settings-scroll") && v) { g_scroll_arg = (float)atof(v); i++; } /* (the page scrolled down that far: to see all of it in a screenshot) */
         else if (!strcmp(a, "--settings-state") && v) { /* the state its preview (and Motions) shows: idle, think, work, wait, cheer, sleep, ... */
             for (int k = 0; k < ST_N; k++) if (!_strnicmp(v, STATE_NAME[k], 4)) g_pv_st = k;
             i++;
@@ -6219,6 +6504,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--settings-light")) g_pv_light_arg = 1;
         else if (!strcmp(a, "--settings-zoom") && v) { g_pv_zoom = clampf((float)atof(v), 1, 3); i++; }
         else if (!strcmp(a, "--record") && v && i + 2 < argc) { snprintf(g_rec_scene, sizeof g_rec_scene, "%s", v); snprintf(g_rec_file, sizeof g_rec_file, "%s", argv[i + 2]); i += 2; }
+        else if (!strcmp(a, "--settings-hole") && v && i + 3 < argc) { g_shot_act = atoi(v); g_shot_n = atoi(argv[i + 2]); g_shot_step = (float)atof(argv[i + 3]); g_pv_st = ST_SLEEP; i += 3; }
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
         else { usage(); return a[0] == '-' && (!strcmp(a, "-h") || !strcmp(a, "--help")) ? 0 : 2; }
     }
@@ -6233,6 +6519,7 @@ int main(int argc, char **argv) {
     }
     remember_launch();
     settings_load(); /* the Settings menu's choices win over the options */
+    if (g_nogpu_arg) g_gpu = 0; /* (--no-gpu wins: a check against the CPU) */
     if (g_pv_light_arg > 0) g_pv_light = 1;
     if (!shape_make(&g_shape, g_shape_name)) { snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name); }
     pos_read();
@@ -6292,7 +6579,19 @@ int main(int argc, char **argv) {
     double shot_at = wall() + 2;
     for (;;) {
         tick();
-        if (g_set_shot[0] && wall() > shot_at) { settings_shot(g_set_shot); break; }
+        if (g_scroll_arg > 0 && wall() > shot_at - 1.5) { g_set_scroll_to = g_scroll_arg; g_scroll_arg = 0; g_sl_dirty = 1; }
+        if (g_set_shot[0] && g_shot_act) { /* (a sequence: the action played once the hole has grown) */
+            static double play_at; static int k;
+            Session *ps = &g_pv_room.s[0];
+            if (!play_at && ps->mo.rt == RT_HOLE && ps->mo.rs.hole.grow > .97f && wall() > shot_at) { hole_play(ps, g_shot_act); play_at = wall() + .1; }
+            if (play_at && wall() >= play_at + k * g_shot_step) {
+                char f[1100]; snprintf(f, sizeof f, "%s_%02d.bmp", g_set_shot, k);
+                settings_shot(f);
+                if (++k >= g_shot_n) break;
+            }
+            if (wall() > shot_at + 60) break;
+        }
+        else if (g_set_shot[0] && wall() > shot_at) { settings_shot(g_set_shot); break; }
         LARGE_INTEGER due;
         due.QuadPart = -next_wait();
         SetWaitableTimer(clock, &due, 0, NULL, NULL, FALSE);
