@@ -1911,6 +1911,9 @@ static void atk_hit(Ctx *c, const RFrame *f, ReadyRS *R, const float *T, const f
         r_spark(c, f, T, d, rnd(c->s, .22f, .45f), 2.5f, 0, rnd(c->s, .9f, 1.5f), SK_STREAK, 1, col);
     }
     Motion *m = c->m;
+    R->hits++;
+    { Session *s = c->s; /* the dodge game: a hit costs a heart; the last one ends the run */
+      if (s->game_on && s->hearts > 0) { s->hearts--; s->heart_at = c->now; if (!s->hearts) { s->game_on = 0; s->game_end = c->now; } } }
     int k = 0;
     for (int i = 1; i < 4; i++) if (m->imp[i].at < m->imp[k].at) k = i;
     m->imp[k].at = c->now; m->imp[k].x = T[0]; m->imp[k].y = T[1]; m->imp[k].dx = d0[0]; m->imp[k].dy = d0[1];
@@ -2200,7 +2203,7 @@ static void r_restless(Ctx *c) {
         }
         m->atk_want = 0;
         if (a) {
-            R->atk = a; R->t = R->rt = 0; R->has_last = 0; R->pv[0] = R->pv[1] = 0; R->nsh = 0;
+            R->atk = a; R->t = R->rt = 0; R->has_last = 0; R->hits = 0; R->pv[0] = R->pv[1] = 0; R->nsh = 0;
             memset(R->fx, 0, sizeof R->fx); memset(&R->own, 0, sizeof R->own);
             switch (a) {
             case RA_MISSILES: missiles_start(c, &f, R, T); break;
@@ -2231,7 +2234,10 @@ static void r_restless(Ctx *c) {
     int out = 0;
     for (int i = 0; i < R->n; i++) if (R->p[i].st != RP_HOME && R->p[i].st != RP_BROKE) out = 1;
     for (int i = 0; i < R->nsh; i++) if (!R->sh[i].home) out = 1;
-    if (!out || R->rt > 14) { R->atk = 0; R->n = 0; R->next = c->now + rnd(s, 1.2f, 2.6f); }
+    if (!out || R->rt > 14) {
+        if (!R->hits && s->aim_on && !s->game_on && !m->atk_want) { s->game_on = 1; s->hearts = GAME_HEARTS; s->game_at = c->now; } /* dodged whole: a run starts */
+        R->atk = 0; R->n = 0; R->next = c->now + rnd(s, 1.2f, 2.6f);
+    }
 }
 
 /* every routine: name, the state it was made for, how long it keeps DONE on screen, fine patches, run, enter, what it does */

@@ -201,6 +201,7 @@ typedef struct { float c[3], n[3], tn[3], ax[3], r, vr, L, phi, spin, tw; int si
 enum { HA_NONE, HA_JETS, HA_FEED, HA_FLARE, HA_LENS, HA_PRECESS, HA_SPOT, HA_N };
 #define HA_RETIRED (1u << HA_JETS) /* (Jets: removed, never played or offered; its number kept so saved settings still line up) */
 #define HOLE_ACTS_DEF (((1u << HA_N) - 2) & ~HA_RETIRED)
+#define GAME_HEARTS 10
 #define TDE_N 56  /* a star torn apart (HA_FEED): the gas it is made of, each piece on its own orbit */
 /* a star torn apart, in units of the hole's mass M, in the disc's own frame (x toward you, y across, z up along its
  * axis): a ball of gas held together by its own gravity until the hole's tidal pull wins, then each piece on its own
@@ -232,7 +233,7 @@ typedef struct { int kind; float at, dir[3], amt; } RFeel;
 #define RF_MAX 8
 /* t: the attack's clock, rt: the same in real time (kept apart so an attack could hold its own clock); own: the attack's own working state (each attack's
  * struct, checked against its size where it is defined) */
-typedef struct { RPiece p[RP_MAX]; RShard sh[RS_MAX]; RFeel fx[RF_MAX]; int atk, n, nsh, has_last; float t, rt, pv[2], last[2], charge; double next; union { double d[512]; unsigned char b[4096]; } own; } ReadyRS;
+typedef struct { RPiece p[RP_MAX]; RShard sh[RS_MAX]; RFeel fx[RF_MAX]; int atk, n, nsh, has_last, hits; float t, rt, pv[2], last[2], charge; double next; union { double d[512]; unsigned char b[4096]; } own; } ReadyRS;
 typedef struct { int flinched; } CrazyRS;
 typedef union {
     OracleRS oracle; ThinkRS think; BladesRS blades; EngineRS engine; AxesRS axes; TypewriterRS typewriter;
@@ -373,6 +374,11 @@ typedef struct {
      * units, reaching past the whole mouse; aim_on 0 when the pointer is elsewhere */
     float aim_x, aim_y, aim_hit;
     int aim_on;
+    /* READY's dodge game (panel only): an attack dodged whole starts a run of GAME_HEARTS hearts; each hit costs one; the
+     * run ends with the last, or when READY does (game_at: it started; heart_at: one was lost; game_end: it ended) */
+    int game_on, hearts;
+    float glow_boost;      /* panel only: a moment's extra glow (a satellite winding up before the black hole throws it), 0..1 */
+    double game_at, heart_at, game_end;
     float backdrop;        /* panel only: a soft dark halo behind the core and its thrown pieces, 0..1, so they show over a light app */
     Motion mo;
 } Session;

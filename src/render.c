@@ -1673,6 +1673,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     Look lit_look = s->cur; /* pointed at: a brighter shell */
     lit_look.edge *= 1 + HOVER.bright * 0.6f * s->hover;
     lit_look.edge *= 1 + CARRY.lift * s->carry + 0.5f * s->shake; /* carried: lit up, more so when shaken */
+    lit_look.edge *= 1 + 1.5f * s->glow_boost; glow *= 1 + 0.8f * s->glow_boost; /* (winding up to be thrown) */
     float wb = s->w_bright > 0 ? s->w_bright : 1, ws = s->w_scale > 0 ? s->w_scale : 1; /* a whim (0 = never ticked) */
     lit_look.edge *= 0.4f + 0.6f * wb;
     float mb = s->mo.bright > 0 ? s->mo.bright : 1; /* a routine's own brightness (a forge blow, a beacon facing you) */

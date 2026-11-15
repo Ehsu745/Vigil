@@ -1279,7 +1279,7 @@ static void draw_all(Room *room, int n, double now) {
  * behind; put down, they slide home. Pulled too far (carried very fast) gravity lets go: the small core flies
  * on with its speed, slowing slowly and bouncing off the screen's edges, until the main core comes close again. Alt-dragging a small core takes it
  * out of orbit by hand. */
-typedef struct { char sid[72]; float px, py, vx, vy, w, rest; int free, init; } Orbit;
+typedef struct { char sid[72]; float px, py, vx, vy, w, rest, lang; int free, init, thrown, latched; double wind_at, swallow_at; } Orbit; /* (thrown, latched, wind_at, swallow_at, lang: sat_play) */
 
 /* the springs: onto the orbit (gravity, strong) and along it to its place (weaker), where gravity lets go, where
  * the main core catches a loose one; for an orbit rx across with small cores `small` wide */
@@ -1352,6 +1352,66 @@ static float hole_drag(const Session *s, double now) {
     float w = sinf((float)M_PI * u), fo = fminf(1, fmaxf(0, (float)(H->act_end - now) / 0.9f));
     return w * w * fo * fo * (3 - 2 * fo); /* (cut short: it lets go smoothly) */
 }
+static int full_on(HMONITOR mon);
+/* A satellite with an unread reply, round a sleeping main core (a black hole): the hole throws it at the pointer to get your
+ * attention, every few seconds. It winds up (brighter, a moment), then is flung at where the pointer is going. A hit: it
+ * latches onto the pointer and circles it until you shake the mouse off (it never moves the real cursor). Dodged: the
+ * hole's pull bends it round and catches it into orbit again; led into the hole, it is swallowed and spat out a moment
+ * later on its orbit. 1 when this took its place this frame */
+static int sat_play(Room *room, int i, Orbit *ob, float tx, float ty, float rx, float hk, double now, float dt) {
+    Session *si = &room->s[i];
+    POINT cp; GetCursorPos(&cp);
+    float cx = (float)cp.x, cy = (float)cp.y, dp = (float)g_dpi;
+    static double next, shake_t[4], seen; static float lcx, lcy, lvx, pvx, pvy; static int shake_n;
+    si->glow_boost = 0;
+    if (now != seen) { /* the pointer's speed (smoothed) and its shakes, sharp turns back at speed: once a frame */
+        seen = now;
+        float vx = (cx - lcx) / fmaxf(dt, 1e-3f), vy = (cy - lcy) / fmaxf(dt, 1e-3f);
+        pvx += (vx - pvx) * fminf(1, dt * 12); pvy += (vy - pvy) * fminf(1, dt * 12);
+        if (fabsf(vx) > 900 * dp && lvx * vx < 0) { shake_t[shake_n++ % 4] = now; }
+        if (fabsf(vx) > 300 * dp) lvx = vx;
+        lcx = cx; lcy = cy;
+    }
+    int want = hk > 0.5f && si->overlay == ST_READY && !si->sub && !g_moving && !g_dragging && !full_on(MonitorFromPoint(cp, MONITOR_DEFAULTTONEAREST));
+    if (ob->swallow_at > 0) { /* swallowed: it shrinks into the hole, then comes out again on its orbit */
+        float u = (float)(now - ob->swallow_at);
+        if (u < 0.7f) { ob->px = g_mx; ob->py = g_my; ob->vx = ob->vy = 0; ob->w *= fmaxf(0.02f, 1 - u / 0.25f); return 1; }
+        ob->swallow_at = 0; ob->px = tx; ob->py = ty; ob->free = 0; ob->thrown = 0; ob->w *= 0.3f;
+        return 1;
+    }
+    if (ob->latched) { /* on the pointer: circling it */
+        int shaken = 0;
+        for (int k = 0; k < 4; k++) if (shake_t[k] > 0 && now - shake_t[k] < 0.9) shaken++;
+        if (shaken >= 3 || !want) { /* shaken off (or the reply read): flung off with the pointer's speed, caught by the hole */
+            ob->latched = 0; ob->free = 1; ob->vx = pvx * 0.7f; ob->vy = pvy * 0.7f; shake_n = 0; memset(shake_t, 0, sizeof shake_t);
+            next = now + 4;
+            return 0;
+        }
+        ob->lang += dt * 3.2f;
+        float R = ob->w * 0.95f + 10 * dp, gx = cx + cosf(ob->lang) * R, gy = cy + sinf(ob->lang) * R * 0.8f, W = 16;
+        ob->vx += (W * W * (gx - ob->px) - 2 * W * ob->vx) * dt; ob->vy += (W * W * (gy - ob->py) - 2 * W * ob->vy) * dt;
+        ob->px += ob->vx * dt; ob->py += ob->vy * dt;
+        return 1;
+    }
+    if (ob->thrown && ob->free) { /* in flight: on the pointer, or into the hole */
+        if (hypotf(ob->px - cx, ob->py - cy) < ob->w * 0.6f + 6 * dp) { ob->latched = 1; ob->thrown = 0; ob->free = 0; ob->lang = atan2f(ob->py - cy, ob->px - cx); shake_n = 0; memset(shake_t, 0, sizeof shake_t); return 1; }
+        if (hypotf(ob->px - g_mx, ob->py - g_my) < rx * 0.3f) { ob->swallow_at = now; return 1; }
+        return 0;
+    }
+    if (ob->thrown && !ob->free) ob->thrown = 0; /* (dodged and caught again) */
+    if (!want || ob->free) { ob->wind_at = 0; return 0; }
+    if (!next) next = now + 2;
+    if (!ob->wind_at && now >= next) ob->wind_at = now;
+    if (ob->wind_at) {
+        float u = (float)(now - ob->wind_at);
+        if (u < 0.8f) { si->glow_boost = u / 0.8f; return 0; } /* (winding up: it glows) */
+        /* flung at where the pointer is going */
+        float lx = cx + pvx * 0.25f - ob->px, ly = cy + pvy * 0.25f - ob->py, l = hypotf(lx, ly) + 1, sp = 1700 * dp;
+        ob->vx = lx / l * sp; ob->vy = ly / l * sp; ob->free = 1; ob->thrown = 1; ob->wind_at = 0; si->glow_boost = 0;
+        next = now + 3 + (rand() % 2000) / 1000.0;
+    }
+    return 0;
+}
 static void draw_single(Room *room, int n, double now) {
     int fi = 0;
     for (int i = 0; i < n; i++) if (!strcmp(room->s[i].sid, g_focus)) fi = i;
@@ -1411,7 +1471,8 @@ static void draw_single(Room *room, int n, double now) {
         }
         if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = tw; ob->init = 1; }
         ob->w += (tw - ob->w) * (1 - expf(-dt * 7)); /* grows or shrinks when the focus changes */
-        if (i == dragged) { /* in the hand (follow() moves it) */ }
+        if (i != fi && i != dragged && sat_play(room, i, ob, tx, ty, rx, hk_e, now, dt)) { /* thrown at the pointer by the black hole (sat_play) */ }
+        else if (i == dragged) { /* in the hand (follow() moves it) */ }
         else if (i == fi) { /* the main core: where it is put, quickly (a core swapping in glides to the middle) */
             float f = g_moving == 1 ? 1 : 1 - expf(-dt * 12);
             ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx = ob->vy = 0; ob->free = 0;
@@ -1642,6 +1703,46 @@ static void layer_draw(double now) {
     if (!IsRectEmpty(&dirty)) convert_banded(&B, &g_lcv, g_rgba, g_layer.px, dirty.left, dirty.top, dirty.right, dirty.bottom);
     pane_show_dirty(&g_layer, b.left, b.top, sized ? NULL : &dirty);
     if (g_layer.shown) SetWindowPos(g_layer.w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); /* over the cores */
+}
+
+/* READY's dodge game: the hearts, a column at the left edge of the core's monitor. They drop in one by one as a run
+ * starts; a lost one pops and goes dim; when the run ends they fade out */
+static Pane g_hearts;
+static float clampf01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+static void heart_at(Pane *pn, float cx, float cy, float sz, Col c, float a) {
+    float r = sz * 0.29f, P[6] = {cx - sz * 0.53f, cy - sz * 0.02f, cx + sz * 0.53f, cy - sz * 0.02f, cx, cy + sz * 0.55f};
+    aa_disc(pn, cx - sz * 0.25f, cy - sz * 0.12f, r, c, a);
+    aa_disc(pn, cx + sz * 0.25f, cy - sz * 0.12f, r, c, a);
+    aa_tri(pn, P, c, a);
+}
+static void hearts_draw(double now) {
+    Room *room = shown_room();
+    Session *g = NULL; int gi = -1;
+    for (int i = 0; i < room->n && i < MAX_SESS; i++) {
+        Session *s = &room->s[i];
+        if (s->game_on && s->overlay != ST_READY) { s->game_on = 0; s->game_end = now; } /* (READY over: the run with it) */
+        if ((s->game_on || now - s->game_end < 1.2) && s->game_at > 0 && !IsRectEmpty(&g_core_rc[i])) { g = s; gi = i; break; }
+    }
+    if (!g || g_hidden) { pane_hide(&g_hearts); return; }
+    if (!g_hearts.w) pane_create(&g_hearts);
+    RECT cr = g_core_rc[gi], wa = work_at((cr.left + cr.right) * .5f, (cr.top + cr.bottom) * .5f);
+    float dp = (float)g_dpi, sz = 22 * dp, gap = 32 * dp, W = 48 * dp, H = gap * GAME_HEARTS + 24 * dp;
+    int w = (int)ceilf(W), h = (int)ceilf(H);
+    pane_size(&g_hearts, w, h);
+    memset(g_hearts.px, 0, (size_t)w * h * 4);
+    float out = g->game_on ? 1 : clampf01(1 - (float)(now - g->game_end) / 1.2f); /* (the run over: they fade) */
+    Col red = {1, 0.30f, 0.42f}, dim = {0.17f, 0.17f, 0.21f}, white = {1, 1, 1}; /* (lost: solid dark, so its shapes show no seams) */
+    for (int k = 0; k < GAME_HEARTS; k++) {
+        float in = clampf01(((float)(now - g->game_at) - k * 0.06f) / 0.25f), pop = in * in * (3 - 2 * in) * (1 + 0.25f * sinf(3.14159265f * in));
+        float cx = W * 0.5f, cy = 12 * dp + gap * (k + 0.5f);
+        int full = k < g->hearts, lost = k == g->hearts && g->heart_at > g->game_at && now - g->heart_at < 0.6;
+        if (full) { heart_at(&g_hearts, cx, cy, sz * 1.25f * pop, red, 0.22f * in * out); heart_at(&g_hearts, cx, cy, sz * pop, red, in * out); heart_at(&g_hearts, cx - sz * 0.18f, cy - sz * 0.2f, sz * 0.22f * pop, white, 0.55f * in * out); }
+        else {
+            heart_at(&g_hearts, cx, cy, sz * pop, dim, in * out);
+            if (lost) { float u = (float)(now - g->heart_at) / 0.6f; heart_at(&g_hearts, cx, cy, sz * (1 + 0.8f * u), red, (1 - u) * (1 - u) * out); } /* (just lost: it pops) */
+        }
+    }
+    pane_show(&g_hearts, wa.left + (int)(10 * dp), (wa.top + wa.bottom - h) / 2);
 }
 
 /* ---- the chat box: name and state, then the last reply (or the permission notice) --------------------- */
@@ -4182,6 +4283,7 @@ static void tick(void) {
     room_tick(&g_ghost, &g_shape, now, dt);
     draw(now);
     layer_draw(now);
+    hearts_draw(now);
     settings_tick(now);
     if (g_stats) {
         QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&qf);
