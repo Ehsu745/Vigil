@@ -76,7 +76,7 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
 
 @implementation PreviewView {
     Room _room;
-    Canvas _cv;
+    Canvas _cv, _lcv;          // _lcv: READY's pieces and sparks, anywhere on the preview
     double _last, _orbit;
     NSPoint _main, _grab, _vel; // the main core's centre (view points), where it was grabbed, its speed
     BOOL _dragging;
@@ -114,7 +114,7 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     int shown[4] = {self.state, ST_WORK, ST_IDLE, ST_THINK};
     for (int i = 0; i < 4; i++) {
         Session *s = &_room.s[i];
-        s->state = shown[i] == ST_SLEEP ? ST_IDLE : shown[i];
+        s->state = shown[i] == ST_SLEEP || shown[i] == ST_READY ? ST_IDLE : shown[i];
         s->overlay = shown[i] == ST_IDLE ? 0 : shown[i];
         s->last = now;
         s->aura_a = others ? TOUCH.aura : 0;
@@ -140,6 +140,18 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
     m->move_x = (float)(_vel.x / big); m->move_y = (float)(-_vel.y / big);
     m->lock_to = _dragging || now < self.lockUntil ? 1.0f : 0.0f;
     m->hover_to = _dragging;
+    // READY: it throws at the pointer over the preview, else at a point going round the core, well inside the preview
+    m->aim_on = self.state == ST_READY && !_dragging;
+    if (m->aim_on) {
+        float u = (float)(big * SHELL_FRAC);
+        NSPoint p = [self convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
+        float ax = (float)((p.x + 5 - _main.x) / u), ay = (float)((_main.y - (p.y - 8)) / u), hit = (float)((0.5 * hypot(12, 19) + 7) / u);
+        if (!NSPointInRect(p, self.bounds) || hypotf(ax, ay) < 1.05f) {
+            float reach = (float)fmin(b.width * .42, b.height * .4) / u;
+            ax = reach * cosf((float)now * .5f); ay = reach * .8f * sinf((float)now * .5f); hit = 14 / u;
+        }
+        m->aim_x = ax; m->aim_y = ay; m->aim_hit = hit;
+    }
     room_tick(&_room, [self.host shape], now, dt);
     if (!_dragging) _orbit += dt;
     // the small cores: gravity holds them on the orbit; dragged, the main core leaves them sliding round to the
@@ -177,7 +189,9 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
 
 - (CGImageRef)newPictureOf:(const Session *)s pixels:(int)px now:(double)now CF_RETURNS_RETAINED {
     canvas_resize(&_cv, px, px);
+    RENDER_PART = 1; // READY's pieces: drawn over the whole preview (drawRect)
     render_one(&_cv, s, [self.host shape], now, [self num:@"glow"], [self num:@"core"]);
+    RENDER_PART = 0;
     size_t n = (size_t)px * (size_t)px * 4;
     uint8_t *buf = malloc(n);
     canvas_rgba(&_cv, buf);
@@ -228,6 +242,7 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
             CGContextDrawImage(ctx, NSRectToCGRect(_mainRect), img);
             CGImageRelease(img);
             [self.host drawFocusFrame:ctx rect:_mainRect session:&_room.s[0] now:now];
+            if (_room.s[0].mo.loose_on) [self drawPieces:ctx core:p scale:px now:now];
             continue;
         }
         for (int i = 1; i < 4 && others; i++) {
@@ -242,6 +257,33 @@ static int bits(uint32_t v) { int n = 0; for (; v; v &= v - 1) n++; return n; }
         }
     }
     [NSGraphicsContext restoreGraphicsState];
+}
+
+// READY: the pieces the main core throws and their sparks, anywhere on the preview, as the layer does on the screen
+- (void)drawPieces:(CGContextRef)ctx core:(int)p scale:(CGFloat)k now:(double)now {
+    int W = (int)(self.bounds.size.width * k), H = (int)(self.bounds.size.height * k);
+    if (W < 8 || H < 8) return;
+    canvas_resize(&_lcv, W, H);
+    double x = _main.x * k - p / 2.0, y = (self.bounds.size.height - _main.y) * k - p / 2.0;
+    int x0 = (int)floor(x), y0 = (int)floor(y);
+    _lcv.sx = (float)(x - x0); _lcv.sy = (float)(y - y0);
+    RENDER_PART = 2;
+    render_part(&_lcv, &_room.s[0], [self.host shape], now, [self num:@"glow"], [self num:@"core"], x0, y0, x0 + p, y0 + p);
+    RENDER_PART = 0;
+    _lcv.sx = _lcv.sy = 0;
+    size_t n = (size_t)W * H * 4;
+    uint8_t *buf = calloc(n, 1);
+    canvas_rgba(&_lcv, buf);
+    CFDataRef data = CFDataCreateWithBytesNoCopy(NULL, buf, (CFIndex)n, kCFAllocatorMalloc);
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGImageRef img = CGImageCreate((size_t)W, (size_t)H, 8, 32, (size_t)W * 4, space, (CGBitmapInfo)kCGImageAlphaPremultipliedLast,
+                                   provider, NULL, false, kCGRenderingIntentDefault);
+    CGContextDrawImage(ctx, NSRectToCGRect(self.bounds), img);
+    CGImageRelease(img);
+    CGColorSpaceRelease(space);
+    CGDataProviderRelease(provider);
+    CFRelease(data);
 }
 
 - (BOOL)onMain:(NSPoint)p { return hypot(p.x - NSMidX(_mainRect), p.y - NSMidY(_mainRect)) < _mainRect.size.width * SHELL_HIT; }
@@ -676,13 +718,18 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     for (int i = 0; i < n; i++) {
         int id = order[i];
         CGFloat a = l + (i % 7) * (cw + 5), y = y0 + 132 + (i / 7) * 31;
-        [self motionChip:a :y :a + cw :y + 26 on:(mm->rt >> id) & 1 off:id == RT_HOLE && st != ST_SLEEP row:@"rt" id:id name:ROUTINES[id].name];
+        [self motionChip:a :y :a + cw :y + 26 on:(mm->rt >> id) & 1 off:(id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY) row:@"rt" id:id name:ROUTINES[id].name];
     }
     // the actions
     CGFloat ya = y0 + 132 + ((n + 6) / 7) * 31 + 6;
-    tx(l, ya, r, ya + 20, [NSString stringWithFormat:@"Actions for %@", state_name(st)], label, S_LABEL, 0, NO);
+    BOOL rdy = st == ST_READY; // READY's own row: the attacks it may throw, instead of the actions
+    tx(l, ya, r, ya + 20, [NSString stringWithFormat:rdy ? @"Attacks for %@" : @"Actions for %@", state_name(st)], label, S_LABEL, 0, NO);
     CGFloat aw = (r - l - 7 * 5) / 8;
-    for (int w = 1; w < W_N; w++) {
+    if (rdy) for (int k = 1; k < RA_N; k++) {
+        CGFloat a = l + (k - 1) * (aw + 5), y = ya + 24;
+        [self motionChip:a :y :a + aw :y + 26 on:(READY_ATKS >> k) & 1 off:NO row:@"atk" id:k name:READY_ATK_NAME[k]];
+    }
+    else for (int w = 1; w < W_N; w++) {
         CGFloat a = l + ((w - 1) % 8) * (aw + 5), y = ya + 24 + ((w - 1) / 8) * 31;
         [self motionChip:a :y :a + aw :y + 26 on:(mm->act >> w) & 1 off:NO row:@"act" id:w name:WHIMS[w].name];
     }
@@ -694,25 +741,34 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         if ([h.key isEqualToString:@"rt"]) {
             NSString *home = ROUTINES[h.val].home != st && ROUTINES[h.val].home >= 0 ? [NSString stringWithFormat:@" (made for %@)", state_name(ROUTINES[h.val].home)] : @"";
             line = [NSString stringWithFormat:@"%s%@: %s", ROUTINES[h.val].name, home, ROUTINES[h.val].about ?: ""];
-        } else line = [NSString stringWithFormat:@"%s: %s", WHIMS[h.val].name, WHIMS[h.val].about ?: ""];
+        } else if ([h.key isEqualToString:@"atk"]) line = [NSString stringWithFormat:@"%s: %s", READY_ATK_NAME[h.val], READY_ATK_ABOUT[h.val] ?: ""];
+        else line = [NSString stringWithFormat:@"%s: %s", WHIMS[h.val].name, WHIMS[h.val].about ?: ""];
         tx(l, yd, r, yd + 40, line, small, S_LABEL, 0, YES);
     } else if ([[NSDate date] timeIntervalSince1970] < self.noteUntil) {
         tx(l, yd, r, yd + 20, @"A state needs at least one routine: switch another on first.", small, 0xFFB877, 0, NO);
     } else {
-        int nr = bits(mm->rt), na = bits(mm->act);
-        tx(l, yd, r, yd + 20, [NSString stringWithFormat:@"%@ uses %d routine%@ and %d action%@. Changes apply the next time a state starts, and are kept.",
-                               state_name(st), nr, nr == 1 ? @"" : @"s", na, na == 1 ? @"" : @"s"], small, S_MUTED, 0, NO);
+        int nr = bits(mm->rt), na = rdy ? bits(READY_ATKS) : bits(mm->act);
+        tx(l, yd, r, yd + 20, [NSString stringWithFormat:@"%@ uses %d routine%@ and %d %@%@. Changes apply the next time a state starts, and are kept.",
+                               state_name(st), nr, nr == 1 ? @"" : @"s", na, rdy ? @"attack" : @"action", na == 1 ? @"" : @"s"], small, S_MUTED, 0, NO);
     }
 }
 
 - (void)motionPlay:(NSString *)row id:(int)i {
     Session *m = [self.preview main];
     if ([row isEqualToString:@"rt"]) motion_play(m, i);
+    else if ([row isEqualToString:@"atk"]) ready_play(m, i);
     else whim_play(m, i, [[NSDate date] timeIntervalSince1970]);
     self.preview.lockUntil = 0;
 }
 - (void)motionToggle:(NSString *)row id:(int)i {
     int st = self.preview.state;
+    if ([row isEqualToString:@"atk"]) { // READY's attacks: any number of them, none too
+        READY_ATKS ^= 1u << i;
+        if (READY_ATKS >> i & 1) [self motionPlay:row id:i];
+        [self.host motionMapChangedForState:st routineOff:-1]; // (kept with the rest)
+        [self setNeedsDisplay:YES];
+        return;
+    }
     BOOL rt = [row isEqualToString:@"rt"];
     uint32_t *set = rt ? &MOTION_MAP[st].rt : &MOTION_MAP[st].act, bit = 1u << i;
     if (rt && (*set & bit) && bits(*set) == 1) { // a state needs a routine
@@ -877,6 +933,7 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
 
 - (void)changed { [self.view setNeedsDisplay:YES]; }
 - (void)showPage:(int)page { if (!self.panel) [self build]; self.view.tab = page; [self.view setNeedsDisplay:YES]; }
+- (void)showState:(int)st { if (!self.panel) [self build]; self.view.preview.state = st; [self.view setNeedsDisplay:YES]; }
 
 - (BOOL)saveShot:(NSString *)path {
     if (!self.panel) return NO;

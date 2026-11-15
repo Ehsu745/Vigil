@@ -25,6 +25,7 @@
 #import "tip.h"
 #import "reply.h"
 #import "settings.h"
+#import "ready.h"
 #include "orbit.h"
 
 static Room g_room, g_ghost;
@@ -47,10 +48,16 @@ static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_C
 static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
 static int g_wheel_spin;                        // what ⌥-scroll on a core does: roll, roll back, turn, turn back, off
 static const char *g_settings_shot;             // --settings-shot FILE: open the Settings window, save it as a PNG, quit
-static int g_settings_open;                     // --settings [motions]: open it at start (1 General, 2 Motions)
+static int g_settings_open;                     // --settings [motions|ready]: open it at start (1 General, 2 Motions, 3 Motions on Ready)
 static int g_smooth = SM_BALANCED; // Settings > Smoothness: how often the pictures are made (SMOOTH in session.c)
-// the panel's clock: 30 a second as before, 60 for Smooth and Max
-static double clock_hz(void) { return g_smooth == SM_SMOOTH || g_smooth == SM_MAX ? 60 : 30; }
+static int g_ready_hot; // a core is READY: its thrown pieces want every frame
+// the panel's clock: 30 a second as before, 60 for Smooth and Max, and while a core is READY
+static double clock_hz(void) { return g_smooth == SM_SMOOTH || g_smooth == SM_MAX || g_ready_hot ? 60 : 30; }
+// how often a core's picture is made: READY attacking or locking on wants every tick, as on Windows
+static double core_rate(const Session *s, double now) {
+    if (s->mo.atk_busy || s->mo.lock_on > 0 || s->mo.loose_on) return clock_hz();
+    return panel_rate(s, now, &SMOOTH[g_smooth], clock_hz());
+}
 static CGFloat g_width, g_top = 40, g_inset = 30, g_font_size = 12;
 static NSString *g_font_name = @"Monaco";
 static NSColor *g_bg;
@@ -155,6 +162,7 @@ static void restore_launch(void) {
     g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
     g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
     motion_map_default(MOTION_MAP); // the motion map has no launch option: back to its defaults
+    READY_ATKS = (1u << RA_N) - 2;  // nor READY's attacks: all of them
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
 }
@@ -185,6 +193,7 @@ static void load_settings(void) {
     if ((n = j[@"tipCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_tip_custom = n.unsignedIntValue;
     if ((n = j[@"textCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_text_custom = n.unsignedIntValue;
     if ((n = j[@"wheelSpin"]) && n.intValue >= 0 && n.intValue < 5) g_wheel_spin = n.intValue;
+    if ((n = j[@"readyAttacks"])) READY_ATKS = n.unsignedIntValue & ((1u << RA_N) - 2); // READY's attacks (Settings > Motions)
     NSArray *rt = j[@"mapRoutines"], *act = j[@"mapActions"]; // Settings > Motions, as the Windows panel keeps it
     motion_map_init();
     if ([rt isKindOfClass:[NSArray class]] && [act isKindOfClass:[NSArray class]] && rt.count == act.count && rt.count <= ST_N) {
@@ -207,7 +216,7 @@ static void load_settings(void) {
 static void save_settings(void) {
     NSMutableArray *rt = [NSMutableArray array], *act = [NSMutableArray array];
     for (int i = 0; i < ST_N; i++) { [rt addObject:@(MOTION_MAP[i].rt)]; [act addObject:@(MOTION_MAP[i].act)]; }
-    NSDictionary *j = @{@"mapRoutines": rt, @"mapActions": act, @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
+    NSDictionary *j = @{@"mapRoutines": rt, @"mapActions": act, @"readyAttacks": @(READY_ATKS), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
                         @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
                         @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0), @"gravity": @(g_gravity),
@@ -515,6 +524,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (void)hideSats;
 - (void)satsTakeMouse:(NSString *)sid;
 - (NSRect)coreRect:(int)i;
+- (NSRect)coreOnScreen:(int)i;
+- (void)hideReady;
 - (void)relayout;
 @end
 
@@ -524,6 +535,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     Canvas _cv;
     int _lastCount;
     NSRect _core[MAX_SESS + 1]; // where each polyhedron was last drawn, for coreAt:
+    NSRect _drawn[MAX_SESS + 1]; // the same, but kept for a small core behind the main one (READY's pieces fly on)
     int _coreN;
     // the gesture in progress
     NSString *_downSid, *_clickSid;
@@ -549,6 +561,8 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     double _eggRound;       // the Skein round the easter egg was last decided for
     BOOL _eggArmed;         // this round a blade will knock into the first small core it reaches
     NSMutableDictionary<NSString *, NSPanel *> *_sats; // a small core out of the cluster's window gets a window of its own
+    ReadyLayer *_layer;     // READY: the pieces it throws, anywhere on the screen
+    ReadyHearts *_hearts;   // READY's dodge game
 }
 
 - (BOOL)isOpaque { return NO; }
@@ -556,6 +570,10 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 - (BOOL)busy { return _downSid != nil; }
 - (BOOL)moving { return _dragging || _moving || _reordering; }
 - (NSRect)coreRect:(int)i { return i >= 0 && i < _coreN ? _core[i] : NSZeroRect; }
+- (NSRect)coreOnScreen:(int)i {
+    NSRect r = [self coreRect:i];
+    return NSIsEmptyRect(r) ? NSZeroRect : [self.window convertRectToScreen:[self convertRect:r toView:nil]];
+}
 
 - (NSString *)sidAt:(NSEvent *)e {
     int i = [self coreAt:[self convertPoint:e.locationInWindow fromView:nil] look:NULL center:NULL];
@@ -853,6 +871,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     const Room *r = [self shown];
     if (r->n != _lastCount) return YES;
     if (g_single && r->n > 1) return YES; // the small cores keep floating
+    for (int i = 0; i < r->n; i++) if (r->s[i].mo.loose_on || r->s[i].game_on || now - r->s[i].game_end < 1.3) return YES; // READY's pieces, hearts
     for (int i = 0; i < r->n && i <= MAX_SESS; i++) if (!_img[i] || now >= _due[i]) return YES;
     return NO;
 }
@@ -953,17 +972,17 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     for (int pass = 0; pass < 3; pass++) // the small ones behind it, the one in focus, the small ones in front
         for (int i = 0; i < n; i++) {
             if (i == fi ? pass != 1 : pass != (depth[i] < 0 ? 0 : 2)) continue;
-            if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = NSZeroRect; continue; } // Settings > Other sessions off
+            if (i != fi && (!g_others || at[i].size.width < 4)) { _core[i] = _drawn[i] = NSZeroRect; continue; } // Settings > Other sessions off
             const Session *s = &room->s[i];
             int px = ((int)(at[i].size.width * scale) / 8) * 8; // in steps, so a core growing is redrawn only now and then
             if (px < 32) px = 32;
             if (!_img[i] || now >= _due[i] || (int)CGImageGetWidth(_img[i]) != px) {
                 if (_img[i]) CGImageRelease(_img[i]);
                 _img[i] = [self newPictureOf:s pixels:px now:now];
-                double rate = panel_rate(s, now, &SMOOTH[g_smooth], clock_hz()) * (i == fi ? 1 : 0.5); // the small ones need fewer frames
+                double rate = core_rate(s, now) * (i == fi || s->mo.loose_on ? 1 : 0.5); // the small ones need fewer frames
                 _due[i] = now + 1.0 / rate - 0.01;
             }
-            _core[i] = at[i];
+            _core[i] = _drawn[i] = at[i];
             if (own[i]) { [self showSat:sid_of(s) image:_img[i] rect:at[i] now:now]; [shown addObject:sid_of(s)]; continue; }
             CGFloat dim = depth[i] < 0 ? 1 - 0.35 * fmin(1, -depth[i] / fmax(1, ry)) : 1; // the far side a little dimmer
             CGContextSetAlpha(ctx, dim);
@@ -1059,7 +1078,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 // renders one session into a see-through picture of px by px pixels
 - (CGImageRef)newPictureOf:(const Session *)s pixels:(int)px now:(double)now {
     canvas_resize(&_cv, px, px);
+    RENDER_PART = 1; // READY's loose pieces and sparks go on the layer (readyLayer:)
     render_one(&_cv, s, &g_shape, now, g_glow, g_core);
+    RENDER_PART = 0;
     size_t n = (size_t)px * (size_t)px * 4;
     uint8_t *buf = malloc(n);
     canvas_rgba(&_cv, buf);
@@ -1081,7 +1102,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height - g_inset; // the inset keeps the first line clear of the pane's title bar
     if (H < 60) H = 60;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 2.0;
-    if (g_single) { [self drawSingle:room now:now width:W height:self.bounds.size.height scale:scale]; return; }
+    if (g_single) { [self drawSingle:room now:now width:W height:self.bounds.size.height scale:scale]; [self readyLayer:room now:now]; return; }
     [self hideSats];
     NSFont *font = [NSFont fontWithName:g_font_name size:g_font_size];
     if (!font) font = [NSFont monospacedSystemFontOfSize:g_font_size weight:NSFontWeightRegular];
@@ -1131,10 +1152,10 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         if (!_img[i] || now >= _due[i] || (int)CGImageGetWidth(_img[i]) != px) {
             if (_img[i]) CGImageRelease(_img[i]);
             _img[i] = [self newPictureOf:s pixels:px now:now];
-            double rate = panel_rate(s, now, &SMOOTH[g_smooth], clock_hz()); // Balanced: 1.5 times a terminal's rate
+            double rate = core_rate(s, now); // Balanced: 1.5 times a terminal's rate
             _due[i] = now + 1.0 / rate - 0.01;
         }
-        _core[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
+        _core[i] = _drawn[i] = NSMakeRect((W - side) / 2, top - textH - side, side, side);
         if (_reordering && [_downSid isEqualToString:sid_of(s)]) { held = i; continue; } // drawn last, at the mouse
         CGContextDrawImage(ctx, NSRectToCGRect(_core[i]), _img[i]);
         focus_frame(ctx, _core[i], s, now);
@@ -1148,6 +1169,32 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         CGContextSetAlpha(ctx, 1);
         focus_frame(ctx, r, &room->s[held], now);
     }
+    [self readyLayer:room now:now];
+}
+
+- (NSRect)drawnOnScreen:(int)i { return NSIsEmptyRect(_drawn[i]) ? NSZeroRect : [self.window convertRectToScreen:[self convertRect:_drawn[i] toView:nil]]; }
+- (void)hideReady { [_layer hide]; [_hearts hide]; }
+// READY: the pieces one core throws, on a layer over the screen, and the hearts of its dodge game
+- (void)readyLayer:(const Room *)room now:(double)now {
+    if (!_layer) { _layer = [[ReadyLayer alloc] init]; _hearts = [[ReadyHearts alloc] init]; }
+    _layer.level = _hearts.level = self.window.level + 1; // over the cores
+    _layer.behavior = _hearts.behavior = self.window.collectionBehavior;
+    int who = -1, game = -1;
+    for (int i = 0; i < room->n && i < _coreN; i++) {
+        const Session *s = &room->s[i];
+        if (NSIsEmptyRect(_drawn[i]) || !_img[i]) continue;
+        if (who < 0 && s->mo.loose_on) who = i;
+        if (game < 0 && (s->game_on || now - s->game_end < 1.2) && s->game_at > 0) game = i;
+    }
+    if (who >= 0 && self.window.visible)
+        [_layer draw:&room->s[who] core:[self drawnOnScreen:who] pixels:(int)CGImageGetWidth(_img[who]) shape:&g_shape glow:g_glow coreFrac:g_core now:now];
+    else [_layer hide];
+    if (game >= 0 && self.window.visible) {
+        NSRect r = [self drawnOnScreen:game];
+        NSScreen *sc = nil;
+        for (NSScreen *x in [NSScreen screens]) if (NSPointInRect(NSMakePoint(NSMidX(r), NSMidY(r)), x.frame)) sc = x;
+        [_hearts show:&room->s[game] screen:sc ?: self.window.screen now:now];
+    } else [_hearts hide];
 }
 @end
 
@@ -1181,6 +1228,33 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @property(copy) NSString *dragSid;                  // the core image files are being dragged over
 @property(strong) SettingsWindow *settings;         // right-click > Settings...
 @end
+
+// an app filling the screen at p (a game, a video, a presentation): READY never throws over it. Asked of the window
+// server at most twice a second.
+static BOOL app_fills_screen_at(NSPoint p, double now) {
+    static double asked;
+    static BOOL fills;
+    static NSRect where;
+    if (now - asked < 0.5 && NSPointInRect(p, where)) return fills;
+    asked = now; fills = NO; where = NSZeroRect;
+    NSScreen *sc = nil;
+    for (NSScreen *x in [NSScreen screens]) if (NSPointInRect(p, x.frame)) sc = x;
+    NSRunningApplication *app = [NSWorkspace sharedWorkspace].frontmostApplication;
+    if (!sc || !app || app.processIdentifier == getpid()) return NO;
+    where = sc.frame;
+    CGFloat top = [NSScreen screens].firstObject.frame.size.height; // window bounds are measured from the top of the main screen
+    CGRect want = CGRectMake(sc.frame.origin.x, top - NSMaxY(sc.frame), sc.frame.size.width, sc.frame.size.height);
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return NO;
+    for (NSDictionary *w in (__bridge NSArray *)list) {
+        if ([w[(id)kCGWindowOwnerPID] intValue] != app.processIdentifier || [w[(id)kCGWindowLayer] intValue] != 0) continue;
+        CGRect b;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &b)) continue;
+        if (CGRectContainsRect(b, want)) { fills = YES; break; }
+    }
+    CFRelease(list);
+    return fills;
+}
 
 @implementation AppDelegate
 
@@ -1289,7 +1363,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
     if (g_reply_shot) [self performSelector:@selector(replyShot) withObject:nil afterDelay:2.0];
-    if (g_settings_open || g_settings_shot) { [self openSettings]; [self.settings showPage:g_settings_open == 2]; }
+    if (g_settings_open || g_settings_shot) { [self openSettings]; [self.settings showPage:g_settings_open >= 2]; if (g_settings_open == 3) [self.settings showState:ST_READY]; }
     if (g_settings_shot) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self.settings saveShot:@(g_settings_shot)];
         [NSApp terminate:nil];
@@ -1330,6 +1404,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         else [self sendPending];
     }
     [self updateOverlays:now];
+    g_ready_hot = 0;
+    for (int i = 0; i < g_room.n; i++) if (g_room.s[i].overlay == ST_READY || g_room.s[i].mo.loose_on) g_ready_hot = 1;
+    if (!self.panel.visible) [self.view hideReady];
     if (g_launcher_pid > 0 && g_tty >= 0 && now - self.sizeCheck > 0.5) { // no SIGWINCH outside the pane's process group
         struct winsize ws = {0};
         self.sizeCheck = now;
@@ -1367,6 +1444,7 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
         s->lock_to = i == hit && !self.view.moving && [sid_of(s) isEqualToString:self.hoverSid] && now - self.hoverSince > 2.0 ? 1 : 0;
     }
     [self watchForRush:now];
+    [self aimReady:room hit:hit now:now];
     [self.view satsTakeMouse:hit >= 0 ? sid_of(&room->s[hit]) : nil];
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
@@ -1383,6 +1461,31 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
     if (![sid isEqualToString:self.hoverSid]) { self.hoverSid = sid; self.hoverSince = now; }
     if (hit < 0 || now - self.hoverSince < 0.3) { [self.tip orderOut:nil]; return; } // a short pause before the tooltip
     [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
+    if (!room->s[hit].sub) room->s[hit].unread = 0; // its reply is in the tooltip, so it is seen: READY ends (once its pieces are home)
+    else if (room->s[hit].sub_done > 0) { room->s[hit].sub_seen = 1; room->s[hit].unread = 0; } // a finished subagent's: it goes once the pointer leaves
+}
+
+// READY: one core at a time throws at the pointer (the main one first), anywhere on its screens, but never while the
+// pointer is on a core, a reply is typed, Settings is open, or an app fills the pointer's screen (a game, a video)
+- (void)aimReady:(Room *)room hit:(int)hit now:(double)now {
+    int atk = -1;
+    for (int i = 0; i < room->n; i++) {
+        room->s[i].aim_on = 0;
+        if (room->s[i].overlay != ST_READY || NSIsEmptyRect([self.view coreRect:i])) continue;
+        if (atk < 0 || (g_single && [sid_of(&room->s[i]) isEqualToString:g_focus])) atk = i;
+    }
+    if (atk < 0) return;
+    Session *s = &room->s[atk];
+    NSRect r = [self.view coreOnScreen:atk];
+    float u = (float)r.size.width * SHELL_FRAC; // one shell radius at the core's size, in points
+    if (u < 2) return;
+    NSPoint m = [NSEvent mouseLocation];
+    // aimed at the middle of the arrow (its tip is the hot spot), and a hit anywhere on it counts
+    CGFloat mx = m.x + 5, my = m.y - 8;
+    s->aim_x = (float)((mx - NSMidX(r)) / u);
+    s->aim_y = (float)((NSMidY(r) - my) / u); // (the stage's y runs down)
+    s->aim_hit = (float)((0.5 * hypot(12, 19) + 7) / u);
+    s->aim_on = hit < 0 && !self.view.busy && !self.view.moving && !self.reply.open && !self.settings.visible && !app_fills_screen_at(m, now);
 }
 
 // Defence: only a rush at a core sets it off. The pointer has to start well away (over 2.2 shell radii
@@ -2136,6 +2239,12 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
         s->overlay = ov ? ov.intValue : away && own != ST_WAIT ? ST_STANDBY : 0;
         if (!ov && [self.speaker.speakingSid isEqualToString:sid_of(s)]) s->overlay = ST_SPEAK;
         if ([self.errorUntil[sid_of(s)] doubleValue] > now) s->overlay = ST_ERROR;
+        s->mo.hit_at = 0; // READY: a piece hit the pointer; it keeps on until you point at the core
+        if (!s->overlay) { // a reply nobody has seen: READY, until the pieces it threw are home (a subagent's reply just glows)
+            int base = session_shown(s, now);
+            if ((s->unread && !s->sub && (base == ST_IDLE || base == ST_SLEEP)) || s->mo.atk_busy) s->overlay = ST_READY;
+        }
+        if (s->game_on && s->overlay != ST_READY) { s->game_on = 0; s->game_end = now; } // READY over: the dodge run with it
         float lvl = 0;
         if (s->overlay == ST_SPEAK) lvl = self.speaker.level;
         else if (s->overlay == ST_LISTEN) lvl = self.listener.level;
@@ -2298,7 +2407,7 @@ static void usage(void) {
          "  --frame NAME       focus frame round a carried or locked-on core: segments (default) | lens | polar |\n"
          "                     diamond | lock | orbits | none (also right-click > Settings > Focus frame)\n"
          "  --egg              the easter egg every round of Skein, not now and then (to see it)\n"
-         "  --settings [motions]  open the Settings window at start, on its Motions page if asked (also right-click > Settings...)\n"
+         "  --settings [motions|ready]  open the Settings window at start, on its Motions page if asked (ready: on READY's row) (also right-click > Settings...)\n"
          "  --settings-shot FILE  open the Settings window, save it as a PNG after 2 s and quit\n"
          "  --reply-shot FILE  open a reply box, save it with its tooltip as a PNG and quit (for checking its look)\n"
          "  --debug            log each voice step to stderr (states and lengths, never what was said)\n"
@@ -2343,7 +2452,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
             else if (!strcmp(a, "--settings-shot") && v) { g_settings_shot = v; i++; }
             else if (!strcmp(a, "--egg")) g_egg_chance = 1;
-            else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } }
+            else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } else if (v && !strcmp(v, "ready")) { g_settings_open = 3; i++; } }
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;
             else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }
