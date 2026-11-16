@@ -116,6 +116,8 @@ button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .slist .it.on{border-color:var(--acc)}
 .slist .it i{width:6px;height:6px;border-radius:50%}
 .slist .it em{margin-left:auto;color:var(--dim);font-style:normal;font-size:11px}
+.slist.tight .it{height:28px}.slist.tight h4{margin:6px 8px 2px}
+.tile.rect{flex-direction:column;height:50px;gap:3px;padding:0 4px}
 .slist h4{margin:8px 8px 4px;font-size:10.5px;letter-spacing:.08em;color:#A9A9B2}
 .hrow{display:flex;align-items:center;gap:10px;min-height:38px;border-top:1px solid #2A2A30;font-size:12.5px}
 .hrow .pl{width:26px;height:26px;border-radius:50%;background:#2A2A30;display:flex;align-items:center;justify-content:center}
@@ -258,19 +260,20 @@ function motionsDetail(state, opt) {
   const box = $('div', 'card');
   const hd = $('div', 'mhd', `<i style="width:8px;height:8px;border-radius:50%;background:${(STATES.concat(PANEL_STATES).find(s => s[0] === state) || [0, '#999'])[1]}"></i><span class="n">${state}</span><span class="r"><span class="seg">${svg('play', 11)}&nbsp;Try it</span><span class="seg" style="background:transparent;color:var(--dim)">Reset</span></span>`);
   box.append(hd);
-  if (!opt.compact) box.append($('div', 'hint', `Click a motion to try it above; drag it up to use it in ${state}, down to stop.`));
+  if (opt.rect) hd.querySelector('.n').insertAdjacentHTML('afterend', `<span style="color:var(--dim);font-size:11px;margin-left:6px">click to try it · drag up to use, down to stop</span>`);
+  else if (!opt.compact) box.append($('div', 'hint', `Click a motion to try it above; drag it up to use it in ${state}, down to stop.`));
   if (state === 'Asleep') { box.append(holeBody(opt)); return box; }
   const used = USE[state] || [], more = ROUT.filter(r => !used.includes(r)).concat(ACTS.map(a => a + ' ·'));
-  const cols = opt.cols, big = !opt.compact;
+  const cols = opt.cols, big = !opt.compact, kind = opt.rect ? 'rect' : big ? 'big' : 'small';
   const zone = (t, sub) => $('div', 'zone', `${t}${sub ? ` <small>${sub}</small>` : ''}`);
-  const tiles = (arr, on) => { const g = $('div', 'tiles'); g.style.gridTemplateColumns = `repeat(${cols}, minmax(0,1fr))`; arr.forEach(n => g.append($('div', `tile ${big ? 'big' : 'small'}${on ? ' on' : ''}`, `${svg(n.endsWith('·') ? 'spark' : 'motions', 15)}<span>${n.replace(' ·', '')}</span>`))); return g; };
+  const tiles = (arr, on) => { const g = $('div', 'tiles'); g.style.gridTemplateColumns = `repeat(${cols}, minmax(0,1fr))`; arr.forEach(n => g.append($('div', `tile ${kind}${on ? ' on' : ''}`, `${svg(n.endsWith('·') ? 'spark' : 'motions', 15)}<span>${n.replace(' ·', '')}</span>`))); return g; };
   box.append(zone(`ROUTINES · ${used.length}`, 'one picked at random each time it starts'), tiles(used, true));
   box.append(zone('MORE', opt.compact ? 'drag one up to use it; click to try it' : ''), tiles(opt.more ? more.slice(0, opt.more) : more, false));
   return box;
 }
 function holeBody(opt) {
   const w = $('div');
-  const two = opt.compact && opt.cols >= 6;
+  const two = (opt.compact || opt.rect) && opt.cols >= 6;
   const a = $('div'), b = $('div');
   a.append($('div', 'zone', 'THE HOLE'));
   a.append(rowEl({k:'toggle', l:'Lensing', note:'the sky behind it, bent', on:true}), rowEl(sl('Tilt', 'its disc, as you see it', .4, ['Edge-on', 'Face-on'])));
@@ -280,15 +283,16 @@ function holeBody(opt) {
   w.append($('div', 'legend', '<span><b>Press</b> pulls the gas in</span><span><b>Hold</b> feeds it</span><span><b>Drag</b> tilts the disc</span><span><b>Wheel</b> pushes the gas</span>'));
   w.append($('div', 'zone', 'ROUTINES · 1'));
   const g = $('div', 'tiles'); g.style.gridTemplateColumns = `repeat(${opt.cols}, minmax(0,1fr))`;
-  ['Black hole'].forEach(n => g.append($('div', `tile ${opt.compact ? 'small' : 'big'} on`, `${svg('dot', 15)}<span>${n}</span>`)));
+  ['Black hole'].forEach(n => g.append($('div', `tile ${opt.rect ? 'rect' : opt.compact ? 'small' : 'big'} on`, `${svg('dot', 15)}<span>${n}</span>`)));
   w.append(g);
   return w;
 }
-function stateList(state) {
+function stateList(state, tight) {
   const e = $('div', 'card slist');
   const it = ([n, c]) => `<div class="it${n === state ? ' on' : ''}" data-state="${n}"><i style="background:${c}"></i>${n}<em>${(USE[n] || []).length || ''}</em></div>`;
   e.innerHTML = '<h4>CLAUDE CODE</h4>' + STATES.map(it).join('') + '<h4>PANEL</h4>' + PANEL_STATES.map(it).join('');
   e.style.padding = '4px 6px';
+  if (tight) e.classList.add('tight');
   return e;
 }
 
@@ -306,7 +310,7 @@ function makeWindow(lay, page, state, W, H) {
   pageEl.style.setProperty('--rh', lay === 'today' ? '48px' : '40px');
   const innerW = W - 56 - 30;
   if (lay === 'today') colMain.append(preview(page, state, 0, Math.round(Math.min(420, Math.max(200, H * 0.39))), page !== 'motions'));
-  if (lay === 'A') colMain.append(preview(page, state, 0, Math.max(160, Math.round(H * 0.26)), true));
+  if (lay === 'A') colMain.append(preview(page, state, 0, Math.max(160, Math.round(H * 0.26)), page !== 'motions'));
   colMain.append(pageEl);
   body.append(colMain);
   if (lay === 'B') { /* the preview, a column on the right; the chips under it */
@@ -323,6 +327,10 @@ function makeWindow(lay, page, state, W, H) {
     if (lay === 'today') {
       const g = $('div', 'cols'); const a = $('div'); a.style.width = '240px'; a.style.flexShrink = '0';
       a.append(stateList(state)); const b = $('div', 'col'); b.append(motionsDetail(state, {compact: false, cols: 7})); g.append(a, b); pageEl.append(g);
+    } else if (lay === 'A') { /* A: the state list kept at the side, tighter; the big tiles kept, shorter and more to a row */
+      const g = $('div', 'cols'); const a = $('div'); a.style.width = '196px'; a.style.flexShrink = '0';
+      a.append(stateList(state, true)); const b = $('div', 'col');
+      b.append(motionsDetail(state, {rect: true, cols: Math.max(4, Math.floor((pageW - 196 - 12 - 32) / 84))})); g.append(a, b); pageEl.append(g);
     } else {
       const cols = Math.max(3, Math.floor((pageW - 32) / (lay === 'B' ? 122 : 116)));
       pageEl.append(motionsDetail(state, {compact: true, cols}));
@@ -364,7 +372,7 @@ function btns(id, map, key) {
 }
 const NOTES = {
   today: 'The window as it is now. The preview takes about 40% of the height, rows are 48 px, and each card goes into whichever column is shorter, in order. Look, Motions and Shortcuts scroll at 1000×720.',
-  A: '<b>A · tighter.</b> The preview drops to about a quarter of the height, with the cores a little smaller. Rows go from 48 to 40 px. The cards are split between the columns so the taller column is as short as possible. Keys you can\'t change (Double-click, Ctrl+W, Esc…) become a two-column list instead of a full row each. On Motions the state list moves into the preview as chips, with the panel states after a divider, and the tiles shrink to one line each.',
+  A: '<b>A · tighter.</b> The preview drops to about a quarter of the height, with the cores a little smaller. Rows go from 48 to 40 px. The cards are split between the columns so the taller column is as short as possible. Keys you can\'t change (Double-click, Ctrl+W, Esc…) become a two-column list instead of a full row each. On Motions the state list stays at the side with tighter rows, the preview has no state chips, and the tiles stay rectangles with the icon above the name, a little shorter and more to a row. The hint line moves up next to the state\'s name.',
   B: '<b>B · preview at the side.</b> The preview becomes a 330 px column on the right running the full height, with the state chips under it. The page is a single column of cards with 40 px rows and the same compact key list. It has the most height per page, but narrower rows.',
 };
 function draw() {
@@ -375,7 +383,7 @@ function draw() {
   const st = document.getElementById('stage'); st.innerHTML = '';
   const [W, H] = SIZES[S.size];
   if (S.view === 'one') {
-    st.append($('p', 'notes', NOTES[S.lay] + ' Click a page in the sidebar, or a state chip on Motions (try Asleep).'));
+    st.append($('p', 'notes', NOTES[S.lay] + ' Click a page in the sidebar, or a state on Motions (try Asleep).'));
     const holder = $('div'); st.append(holder);
     const win = makeWindow(S.lay, S.page, S.state, W, H);
     const b = $('div'); holder.append(b, win);
