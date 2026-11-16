@@ -615,7 +615,7 @@ typedef struct {
     int act; float au, at, p, q, fo; /* the action playing, how far through (0..1, and seconds), its leans; fo: 1, down to 0 as it fades out */
     float sky, sky_off[2], ring_c[2], half[2], half_k, sky_lim[2]; /* half: the side of the shadow its ring shows on (half_k: how much, 0 edge-on) */ /* the stars behind it: how bright, how far the sky has drifted (radians); the ring's source, off the line */
     float side_lit[2], lit;      /* your side, pointed at */
-    float dir, hot, pxm, zmax, room; /* zmax: the picture's edge from the middle, M (room: in pixels); which way the disc turns (-1..1, the wheel can reverse it), how hot it runs, M a pixel */
+    float dir, hot, pxm, zmax, room; /* zmax: the picture's edge from the middle, M (room: in pixels); the side coming at you (1; the wheel's reverse only turns the gas back, never swaps it), how hot it runs, M a pixel */
 } BHView;
 BhTune BH_TUNE = {1, 1, 0.38f, 1.7f, 1, 1.02f, 0.62f, 3, 0.5f, 0.19f, 0.4f, 1, 8, 0, 9500,
                   1, 0.5f, 0.7f, 9500, 4, 0.2f, 24, 128, 160, 30, 60, 1, 1};
@@ -1393,7 +1393,7 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
     float tf = (float)t, flick = 1 + 0.05f * sinf(tf * 1.3f) + 0.03f * sinf(tf * 3.7f + 1);
     V.bright = 1.5f * flick * (1 + 0.25f * s->hover + 0.4f * s->carry);
     V.T = H->flow; V.heat = H->tde.heat; V.pxm = 1 / k;
-    { float sp = 1 + 1.2f * s->hover + 0.8f * s->carry + H->flow_v; V.dir = tanhf(sp * 1.5f); V.hot = 1 + 0.02f * fminf(fabsf(H->flow_v), 10); } /* pushed round backward: the other side comes at you */
+    V.dir = 1; V.hot = 1 + 0.02f * fminf(fabsf(H->flow_v), 10); /* pushed round backward, only the gas turns the other way: the bright side stays where it is (as the GPU's) */
     { float lk = sqrtf(s->look_x * s->look_x + s->look_y * s->look_y) + 1e-3f; V.side_lit[0] = s->look_x / lk; V.side_lit[1] = -s->look_y / lk; V.lit = 0.7f * s->hover * clamp01(lk * 1.5f); } /* pointed at: brighter on your side */
     bh_hole_axis(s, now, V.n);
     { float l; for (int q = 0; q < 3; q++) V.ea[q] = (q == 2) - V.n[2] * V.n[q]; l = sqrtf(V.ea[0] * V.ea[0] + V.ea[1] * V.ea[1] + V.ea[2] * V.ea[2]); for (int q = 0; q < 3; q++) V.ea[q] /= l; }
