@@ -529,7 +529,7 @@ static void settings_load(void) {
         g_smooth_custom = cu;
     if (json_num(buf, "threads", &v) && v >= 0 && v <= 8) g_threads = (int)v;
     if (json_num(buf, "holeGpu", &v)) g_gpu = v != 0;
-    if (json_num(buf, "holeLight", &v)) g_hole_light = v != 0;
+    /* (holeLight: CPU light is gone, the CPU's black hole is light enough; a saved one is the CPU) */
     if (json_num(buf, "setW", &v) && v >= 620 && v <= 6000) g_set_w = v; /* the Settings window itself */
     if (json_num(buf, "setH", &v) && v >= 480 && v <= 6000) g_set_h = v;
     if (json_num(buf, "setSide", &v)) g_set_side = v != 0;
@@ -4333,7 +4333,7 @@ static const float RATES[NRATES] = {2, 4, 6, 10, 15, 20, 30, 45, 60, 90, 120, 0}
 static const wchar_t *RATE_NAMES[NRATES] = {L"2", L"4", L"6", L"10", L"15", L"20", L"30", L"45", L"60", L"90", L"120", L"Max"};
 static const int THREADS[5] = {0, 1, 2, 4, 8};
 static const wchar_t *THREAD_NAMES[5] = {L"Auto", L"1", L"2", L"4", L"8"};
-static const wchar_t *HOLEGPU_NAMES[3] = {L"GPU", L"CPU", L"CPU light"};
+static const wchar_t *HOLEGPU_NAMES[2] = {L"GPU", L"CPU"};
 static float *rate_of(Smooth *m, int row) { return row == R_RIDLE ? &m->idle : row == R_RTHINK ? &m->think : row == R_RBUSY ? &m->busy : row == R_RREST ? &m->rest : &m->hand; }
 static int rate_stop(float v) { /* the slider's step nearest a rate */
     if (v <= 0) return NRATES - 1;
@@ -4896,9 +4896,9 @@ static int page_sections(int pg, SSec *s) {
         ROW(2, RK_SEG, R_THREADS, 5, L"Drawing threads", L"how many share drawing a big core; Auto: about one a physical core", THREAD_NAMES, NULL, NULL, "layers");
         {
             static wchar_t gnote[200];
-            if (gpu_init()) swprintf(gnote, 200, L"asleep, it is drawn on the graphics card: a sixth of the CPU");
-            else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it", gpu_why());
-            ROW(2, RK_SEG, R_HOLEGPU, 3, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
+            if (gpu_init()) swprintf(gnote, 200, L"GPU: the real thing, traced; CPU: its middle, and the gas as dots");
+            else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it, the gas as dots", gpu_why());
+            ROW(2, RK_SEG, R_HOLEGPU, 2, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
         }
         break;
     }
@@ -5263,7 +5263,7 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
     /* the list: each state with the icons of its routines and how many actions it has */
     /* Claude Code's states or the panel's: two tabs over the list, six states each */
     int grp = mot_grp(g_pv_st);
-    float lh = 8 + 28 + 8 + 6 * 30 + 6, y = y0;
+    float lh = 8 + 28 + 8 + 6 * 30 + 6, y = y0 + (cw >= 720 ? g_set_scroll : 0); /* (beside the editor it floats: it stays put while the page scrolls) */
     box(pn, x0, y, x0 + lw, y + lh, 12, S_CARD, 0, 0);
     y += 8;
     {
@@ -6701,7 +6701,7 @@ int main(int argc, char **argv) {
     }
     remember_launch();
     settings_load(); /* the Settings menu's choices win over the options */
-    if (g_nogpu_arg) { g_gpu = 0; g_hole_light = g_nogpu_arg == 2; } /* (--no-gpu / --cpu-light win: a check against the CPU) */
+    if (g_nogpu_arg) { g_gpu = 0; g_hole_light = 0; } /* (--cpu-light: the CPU, as --no-gpu; its light version is gone) */ /* (--no-gpu / --cpu-light win: a check against the CPU) */
     if (g_pv_light_arg > 0) g_pv_light = 1;
     if (!shape_make(&g_shape, g_shape_name)) { snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name); }
     pos_read();

@@ -858,12 +858,13 @@ typedef struct {
     unsigned long used;             /* when last drawn (to keep the latest) */
     unsigned *off; unsigned char *cnt, *hit, *star; float *ring, *ergo; short *dir; /* dir: where each ray leaves to (x 32767) */
     float *prof; int prow; /* the ring's profile (B2_RA x B2_RB), traced to angle prow */
+    float edge[B2_RA];     /* the shadow's edge at each angle (M): just inside the ring, smooth where the map's own is stepped */
     B2S *s; size_t ns, cap;
 } B2Map;
 static B2Map g_b2[B2_NI];
 /* rough maps for every tilt (B2_CN square, the ring's profile every B2_CPS-th radius): built first, so a turn or a drag
  * shows the tilt it is at straight away and never the nearest finished one (it jumped); the full map follows once it rests */
-#define B2_CN 48
+#define B2_CN 80
 #define B2_CPS 2
 static B2Map g_b2c[B2_NI];
 static int g_b2_last = -1, g_b2_still; /* the tilt asked for last, and for how many calls in a row */
@@ -873,10 +874,15 @@ static int g_b2_want = -1; /* the map asked for last */
 static unsigned char g_b2_tex[256 * 256]; /* blackhole-simulation's noise texture: random bytes (its hash) */
 static int g_b2_tex_ok;
 int BH_GPU_ON, BH_LIGHT;
-static float b2_res(void) { return BH_TUNE.b2_res; } /* (the map's size: the same in light, so switching never rebuilds the maps and shows the old engine meanwhile) */
+int BH_DOTS = 1; /* on the CPU: the shadow, its ring and the bent stars, and the gas as dots (draw_hole_dots): never traced, no maps */
+/* drawn by the CPU, the gas disc is smaller (in light, smaller still): less gas to shade. The map keeps its size and
+ * reach (a smaller reach put its square edge inside the window: the dark sky behind the hole stopped there) */
+static float b2_res(void) { return BH_TUNE.b2_res; }
+static float b2_ext(void) { return BH_TUNE.b2_ext; }
+static float b2_disk(void) { return BH_TUNE.b2_disk * (BH_LIGHT ? 0.5f : 0.6f); }
 static float b2_key_now(float *k) {
     const BhTune *t = &BH_TUNE;
-    float v[12] = {t->b2_spin, t->b2_lens, t->b2_temp, t->b2_height, t->b2_disk, t->b2_steps, b2_res(), t->b2_ext, t->b2_dist, 0, 0, 0};
+    float v[12] = {t->b2_spin, t->b2_lens, t->b2_temp, t->b2_height, b2_disk(), t->b2_steps, b2_res(), b2_ext(), t->b2_dist, 0, 0, 0};
     memcpy(k, v, sizeof v);
     return 0;
 }
@@ -945,7 +951,7 @@ static float b2_ray(B2Map *m, size_t pix, float inc, float u, float v) { /* (m N
     for (int q = 0; q < 3; q++) p[q] += vv[q] * (0.5f * MINS + fmaxf(0, D - 40)); /* (its blue-noise start, at its mean; then straight in to 40 M: out there the light is hardly bent) */
     float cr[3] = {ro[1] * vv[2] - ro[2] * vv[1], ro[2] * vv[0] - ro[0] * vv[2], ro[0] * vv[1] - ro[1] * vv[0]};
     int hit = sqrtf(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]) < rh * 0.9f, cross = 0, steps = (int)T->b2_steps, ns = 0;
-    float prevY = p[1], alpha_hi = 0, hgt = fminf(T->b2_height, 0.45f), outer = fmaxf(T->b2_disk, isco * 1.1f);
+    float prevY = p[1], alpha_hi = 0, hgt = fminf(T->b2_height, 0.45f), outer = fmaxf(b2_disk(), isco * 1.1f);
     size_t first = m ? m->ns : 0;
     for (int i = 0; i < steps && !hit; i++) {
         float pp[3] = {p[0], p[1], p[2]}, r = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
@@ -1024,7 +1030,7 @@ static void b2_build(B2Map *m, int idx, int n, int budget, int pstep) {
         m->prof = malloc((size_t)B2_RA * B2_RB * sizeof *m->prof); m->prow = 0;
         if (!m->off || !m->cnt || !m->hit || !m->star || !m->ring || !m->ergo || !m->dir || !m->prof) { b2_free(m); return; }
     }
-    float E = BH_TUNE.b2_ext, incr = idx * B2_STEP / 57.29578f;
+    float E = b2_ext(), incr = idx * B2_STEP / 57.29578f;
     int rows = (int)fmaxf(1, (float)budget / n);
     for (int k = 0; k < rows && m->row < n; k++, m->row++) {
         float v = E - (m->row + 0.5f) * 2 * E / n;
@@ -1039,12 +1045,28 @@ static void b2_build(B2Map *m, int idx, int n, int budget, int pstep) {
             for (int q = i; q < i + pstep && q < B2_RB; q++) P[q] = val;
         }
     }
-    if (m->prow >= B2_RA) { /* done: each bin takes its neighbours' brightest (the ring is thinner than a bin: never missed between two) */
+    if (m->prow >= B2_RA) { /* done: the shadow's edge from where the ring is brightest; then each bin takes its neighbours'
+                           * brightest (the ring is thinner than a bin: never missed between two) */
+        float pk[B2_RA], bw = (B2_RHI - B2_RLO) / B2_RB;
+        for (int a = 0; a < B2_RA; a++) {
+            const float *P = m->prof + a * B2_RB; int bi = 0;
+            for (int i = 1; i < B2_RB; i++) if (P[i] > P[bi]) bi = i;
+            pk[a] = B2_RLO + (bi + 0.5f) * bw - bw; /* (a bin inside the brightest) */
+        }
+        for (int a = 0; a < B2_RA; a++) m->edge[a] = (pk[(a + B2_RA - 1) % B2_RA] + 2 * pk[a] + pk[(a + 1) % B2_RA]) / 4;
         static float row[B2_RB];
         for (int a = 0; a < B2_RA; a++) {
             float *P = m->prof + a * B2_RB;
             for (int i = 0; i < B2_RB; i++) row[i] = fmaxf(P[i], fmaxf(i ? P[i - 1] : 0, i + 1 < B2_RB ? P[i + 1] : 0));
             memcpy(P, row, sizeof row);
+        }
+        for (int pass = 0; pass < 2; pass++) for (int i = 0; i < B2_RB; i++) { /* and round the ring, smoothed: from angle to angle it is not dashed */
+            float first = m->prof[i], prev = m->prof[(B2_RA - 1) * B2_RB + i];
+            for (int a = 0; a < B2_RA; a++) {
+                float cur = m->prof[a * B2_RB + i], next = a + 1 < B2_RA ? m->prof[(a + 1) * B2_RB + i] : first;
+                m->prof[a * B2_RB + i] = (prev + 2 * cur + next) / 4;
+                prev = cur;
+            }
         }
         m->ready = 1;
     }
@@ -1052,7 +1074,7 @@ static void b2_build(B2Map *m, int idx, int n, int budget, int pstep) {
 /* the maps: built for the view a hole shows now (and kept), a little each call */
 BhGpuImg BH_GPU_IMG;
 void bh2_tick(const float *axis) {
-    if (BH_TUNE.b2_engine < 0.5f || BH_GPU_ON) return;
+    if (BH_TUNE.b2_engine < 0.5f || BH_GPU_ON || BH_DOTS) return;
     if (!g_b2_tex_ok) { unsigned s = 0x2545F491u; for (int i = 0; i < 256 * 256; i++) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; g_b2_tex[i] = (unsigned char)(s >> 7); } g_b2_tex_ok = 1; }
     float key[12]; b2_key_now(key);
     if (memcmp(key, g_b2_key, sizeof key)) { for (int i = 0; i < B2_NI; i++) { b2_free(&g_b2[i]); b2_free(&g_b2c[i]); } memcpy(g_b2_key, key, sizeof key); }
@@ -1064,7 +1086,7 @@ void bh2_tick(const float *axis) {
     g_b2_want = want;
     if (want == g_b2_last) g_b2_still++; else { g_b2_last = want; g_b2_still = 0; }
     B2Map *c = &g_b2c[want];
-    if (!c->ready) { b2_build(c, want, B2_CN, 3000, B2_CPS); return; } /* the rough one, at once (a tick or two) */
+    if (!c->ready) { b2_build(c, want, B2_CN, 1500, B2_CPS); return; } /* the rough one, at once (a few ticks; the nearest built shows meanwhile) */
     B2Map *m = &g_b2[want];
     m->used = ++g_b2_clock;
     if (!m->ready && g_b2_still >= 8) { /* resting on this tilt: its full map, a little each call */
@@ -1076,13 +1098,13 @@ void bh2_tick(const float *axis) {
             for (int i = 0; i < B2_NI; i++) if (g_b2[i].off && &g_b2[i] != m) { kept++; if (lru < 0 || g_b2[i].used < g_b2[lru].used) lru = i; }
             if (kept >= B2_KEEP && lru >= 0) b2_free(&g_b2[lru]);
         }
-        b2_build(m, want, n, 360, 1);
+        b2_build(m, want, n, 400, 1); /* (a second or two) */
         return;
     }
     for (int d = 1; d < B2_NI; d++) for (int sg = -1; sg <= 1; sg += 2) { /* else the rough maps for the other tilts, the nearest first */
         int i = want + sg * d;
         if (i < 0 || i >= B2_NI || g_b2c[i].ready) continue;
-        b2_build(&g_b2c[i], i, B2_CN, 360, B2_CPS);
+        b2_build(&g_b2c[i], i, B2_CN, 150, B2_CPS); /* (slowly: a few minutes for them all, at little cost a tick) */
         return;
     }
 }
@@ -1171,6 +1193,187 @@ float bh_hole_E(const Session *s, int px) {
     float R = m * SHELL_FRAC * ws * (s->mo.scale > 0 ? s->mo.scale : 1);
     return px * 0.5f / fmaxf(1e-3f, bh_kpx(&s->mo, R));
 }
+/* The CPU's black hole, light: what the GPU's does, not how. Its gas and ring are worked out once a picture on a grid of
+ * points (about one every 2 pixels, at most 300 square, each when first needed) and every pixel blends the four round
+ * it, instead of each pixel looking up the ring's profile and tracing where its stars lie (that was nearly all of its
+ * time); its stars are fixed on the screen, drawn out round the hole as the GPU's are, laid into a picture of their own
+ * once for its size and then only read. */
+typedef struct { B2Shade *S; const B2Map *bm; float E, cr, sr, fu, fv; int n; float mpx; } B2Pt; /* mpx: M a pixel */
+static float *b2g; static unsigned char *b2g_done; static size_t b2g_cap; static int b2g_n; /* the grid: rgb + shadow, a point each */
+static void b2_point(const B2Pt *P, float X, float Y, float *out) {
+    float E = P->E, u = (X * P->cr - Y * P->sr) * P->fu, v = (X * P->sr + Y * P->cr) * P->fv; int n = P->n;
+    float fi = (u + E) / (2 * E) * n - 0.5f, fj = (E - v) / (2 * E) * n - 0.5f;
+    int i0 = (int)floorf(fi), j0 = (int)floorf(fj); float wi = fi - i0, wj = fj - j0;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    for (int q = 0; q < 4; q++) {
+        int ii = i0 + (q & 1), jj = j0 + (q >> 1);
+        if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+        size_t k = (size_t)jj * n + ii; float w = ((q & 1) ? wi : 1 - wi) * ((q >> 1) ? wj : 1 - wj);
+        b2_shade_px(P->S, k);
+        for (int c = 0; c < 3; c++) out[c] += P->S->col[k * 4 + c] * w;
+        if (!P->bm->hit[k]) out[3] += P->S->col[k * 4 + 3] * w; /* (only the gas: the shadow's edge is drawn below, smooth) */
+    }
+    float bb = sqrtf(u * u + v * v), fb = (bb - B2_RLO) / (B2_RHI - B2_RLO) * B2_RB - 0.5f, ring = 0;
+    int ib = (int)floorf(fb);
+    if (bb < B2_RLO) out[3] = 1; /* (well inside the shadow) */
+    if (ib >= 0 && ib < B2_RB - 1) { /* the shadow's edge, smooth over a pixel and a bit; the ring, behind whatever disc lies in front */
+        float th = atan2f(v, u); if (th < 0) th += 6.2831853f;
+        float fa = th / 6.2831853f * B2_RA - 0.5f, wb = fb - ib; int ia = (int)floorf(fa); float wa = fa - ia;
+        int a0 = (ia % B2_RA + B2_RA) % B2_RA, a1 = (a0 + 1) % B2_RA; const float *Pr = P->bm->prof;
+        float e = P->bm->edge[a0] * (1 - wa) + P->bm->edge[a1] * wa;
+        out[3] = fmaxf(out[3], clamp01((e - bb) / (1.3f * P->mpx) + 0.5f));
+        ring = (Pr[a0 * B2_RB + ib] * (1 - wb) + Pr[a0 * B2_RB + ib + 1] * wb) * (1 - wa) + (Pr[a1 * B2_RB + ib] * (1 - wb) + Pr[a1 * B2_RB + ib + 1] * wb) * wa;
+        int ir = (int)lrintf(fi), jr = (int)lrintf(fj); float trn = 1;
+        if (ir >= 0 && jr >= 0 && ir < n && jr < n) { size_t kk = (size_t)jr * n + ir; b2_shade_px(P->S, kk); trn = P->S->tr[kk]; }
+        float add = clamp01(ring * BH_TUNE.ring_a * trn * P->S->expo);
+        for (int q = 0; q < 3; q++) out[q] = 1 - (1 - out[q]) * (1 - add);
+    }
+}
+static inline const float *b2g_at(const B2Pt *P, int i, int j) {
+    int G = b2g_n; if (i < 0) i = 0; if (j < 0) j = 0; if (i >= G) i = G - 1; if (j >= G) j = G - 1;
+    size_t k = (size_t)j * G + i; float *o = b2g + k * 4;
+    if (!b2g_done[k]) { b2_point(P, -P->E + (i + 0.5f) * 2 * P->E / G, P->E - (j + 0.5f) * 2 * P->E / G, o); b2g_done[k] = 1; } /* (two bands on one point: the same values) */
+    return o;
+}
+static void b2g_sample(const B2Pt *P, float X, float Y, float *out) {
+    float E = P->E, fi = (X + E) / (2 * E) * b2g_n - 0.5f, fj = (E - Y) / (2 * E) * b2g_n - 0.5f;
+    int i0 = (int)floorf(fi), j0 = (int)floorf(fj); float wi = fi - i0, wj = fj - j0;
+    const float *a = b2g_at(P, i0, j0), *b = b2g_at(P, i0 + 1, j0), *c = b2g_at(P, i0, j0 + 1), *d = b2g_at(P, i0 + 1, j0 + 1);
+    for (int q = 0; q < 4; q++) out[q] = (a[q] * (1 - wi) + b[q] * wi) * (1 - wj) + (c[q] * (1 - wi) + d[q] * wi) * wj;
+}
+static float *b2st; static int b2st_half; /* the stars: a square of (2 half + 1) pixels round the hole's middle, rgb */
+static void b2st_build(int half) {
+    int W = 2 * half + 1;
+    float *L = realloc(b2st, (size_t)W * W * 3 * sizeof *L);
+    if (!L) return;
+    b2st = L; b2st_half = half;
+    memset(L, 0, (size_t)W * W * 3 * sizeof *L);
+    for (int Ly = 0; Ly < 2; Ly++) {
+        float cs = Ly ? 23 : 9, sg = Ly ? 0.8f : 0.55f;
+        int c0 = (int)floorf(-half / cs) - 1, c1 = (int)ceilf(half / cs) + 1;
+        for (int uy = c0; uy <= c1; uy++) for (int ux = c0; ux <= c1; ux++) {
+            float h = bh_hash(ux * 3 + 11 + Ly * 7, uy * 5 + 3);
+            if (h < (Ly ? 0.93f : 0.88f)) continue;
+            float px = (ux + 0.15f + 0.7f * bh_hash(ux, uy + 31)) * cs, py = (uy + 0.15f + 0.7f * bh_hash(ux + 47, uy)) * cs, c[3];
+            float r = sqrtf(px * px + py * py), st = 1.6f + 3.8f * b2_smooth(1.1f, 0.2f, r / fmaxf(1, half)); /* drawn out round the hole, more the nearer (as the GPU's) */
+            float tx = r > 0.5f ? -py / r : 1, ty = r > 0.5f ? px / r : 0, reach = 3 * sg * st;
+            b2_starcol(bh_hash(ux + 61, uy + 61) * 2.4f - 0.4f, c);
+            float gain = (Ly ? 1.6f : 0.7f) * (0.4f + h);
+            for (int y = (int)floorf(py - reach); y <= (int)ceilf(py + reach); y++) for (int x = (int)floorf(px - reach); x <= (int)ceilf(px + reach); x++) {
+                if (x < -half || y < -half || x > half || y > half) continue;
+                float dx = x + 0.5f - px, dy = y + 0.5f - py, dt = dx * tx + dy * ty, dn = -dx * ty + dy * tx, d2 = (dn * dn + dt * dt / (st * st)) / (sg * sg);
+                if (d2 > 9) continue;
+                float e = expf(-d2) * gain, *o = L + ((size_t)(y + half) * W + (x + half)) * 3;
+                for (int q = 0; q < 3; q++) o[q] += c[q] * e;
+            }
+        }
+    }
+}
+/* The CPU's black hole: the middle of it as the GPU's shows it, and the gas as dots. Each pixel: the shadow (crisp, a
+ * pixel's edge), the photon ring (thin, brighter on the side coming at you), and the stars behind it bent by a point lens
+ * (x (1 - te^2 / |x|^2): arcs hugging the ring), all at the screen's own resolution. The gas: dots on Kepler orbits in
+ * the disc's plane (the inner ones faster), each placed where its light really shows (bh_image: the far ones bent up over
+ * the shadow and under it), brighter and whiter on the side coming at you, drawn out a little along their way. The dots
+ * are placed once a picture, shared by all its bands; drawing them is a few thousand small soft spots. */
+enum { HD_MAX = 1200 };
+typedef struct { float x, y, r, g, b, rad, tx, ty, st; } HDot;
+static HDot g_hd[2 * HD_MAX]; static int g_hd_n;
+static void hd_place(const Session *s, const BHView *V, float ox, float oy, float k, float room, double now) {
+    int N = HD_MAX;
+    const HoleRS *H = &s->mo.rs.hole;
+    float rate = fabsf((1 + 1.2f * s->hover + 0.8f * s->carry) * (1 - 0.75f * s->quiet) + H->flow_v); /* (how fast the gas turns now: as motion.c turns H->flow) */
+    float expo = bh_hole_expo(s, now), rin = BH_RIN * 0.95f, rout = fmaxf(rin + 2, V->rout), *n = (float *)V->n;
+    g_hd_n = 0;
+    for (int i = 0; i < N; i++) {
+        float u = bh_hash(i, 7), ph0 = 6.2831853f * bh_hash(i, 13), zz = (bh_hash(i, 29) - 0.5f) * 0.5f, sz = 0.6f + 0.8f * bh_hash(i, 41), br = 0.45f + 1.1f * bh_hash(i, 53);
+        float r = rin + (rout - rin) * powf(u, 1.7f); /* (more of them inside) */
+        float om = 1 / (r * sqrtf(r)), ph = ph0 + 0.5f * sinf(3 * ph0 + r) + om * BH_TS * V->T; /* (loosely clumped; turning as the gas does: toward ec, so the side coming at you is the bright one) */
+        float mv = om * BH_TS * rate * r * k / 60; /* (how far it goes in a frame, pixels: a fast wheel draws it out into a streak, never a jump) */
+        float cp = cosf(ph), sp = sinf(ph), P[4];
+        for (int q = 0; q < 3; q++) P[q] = r * (cp * V->ea[q] + sp * V->ec[q]) + zz * r * 0.08f * n[q];
+        float vz = V->dir * (-sp * V->ea[2] + cp * V->ec[2]) * sqrtf(fminf(1, BH_RIN / r)) * 0.5f, gd = 1 / fmaxf(0.45f, 1 - vz); /* (coming at you: brighter, whiter) */
+        float fade = clamp01((r - rin) / 0.8f) * clamp01((rout - r) / (rout * 0.3f));
+        float I = br * gd * gd * sqrtf(gd) * powf(BH_RIN / r, 0.9f) * expo * V->bright * 0.42f * fade * (1 + V->heat * 2.5f * expf(-(r - 7) * (r - 7) / 30));
+        if (V->act == HA_FLARE) { float tt = V->at - BH_FLARE_SNAP; if (tt > 0) I *= 1 + 2.5f * V->fo * expf(-tt * 1.1f) * expf(-(r - 5 - 6 * tt) * (r - 5 - 6 * tt) / 2); }
+        if (I < 0.01f) continue;
+        Col cc = bh_temp(0.5f + 0.62f * sqrtf(BH_RIN / r) * gd * V->hot);
+        float t3[3]; for (int q = 0; q < 3; q++) t3[q] = -sp * V->ea[q] + cp * V->ec[q];
+        float tl = sqrtf(t3[0] * t3[0] + t3[1] * t3[1]) + 1e-4f, st = 1 + 0.6f * sqrtf(BH_RIN / r); /* (drawn out a little along its way: the inner ones more; more as it goes faster, below) */
+        float q2 = P[0] * P[0] + P[1] * P[1], near = q2 < 14 * 14 || P[2] < 0; /* (well clear of it and in front: where it lies; else where its light shows) */
+        for (int g = 0; g < 2; g++) {
+            float X = P[0], Y = P[1];
+            if (g && (r > 13 || P[2] > r * 0.5f)) continue; /* (the bent image: only the ones close round or behind) */
+            if ((near || g) && !bh_image(P, g, &X, &Y)) continue;
+            HDot *d = &g_hd[g_hd_n];
+            d->x = ox + X * k; d->y = oy - Y * k;
+            float ef = clamp01((room - 2 - hypotf(d->x - ox, d->y - oy)) / (room * 0.2f)), lit = 1 + V->lit * fmaxf(0, (X * V->side_lit[0] + Y * V->side_lit[1]) / (hypotf(X, Y) + 1e-3f));
+            float a = I * ef * lit * (g ? 0.4f : 1);
+            if (a < 0.01f) continue;
+            d->r = cc.r * a; d->g = cc.g * a; d->b = cc.b * a;
+            d->rad = fminf(1.8f, fmaxf(0.65f, (0.3f + 0.05f * k) * sz)) * (g ? 0.75f : 1);
+            float ms = mv / (2.5f * d->rad) * (g ? 1.6f : 1); /* (the bent image moves faster round the ring) */
+            if (g) { float l = hypotf(X, Y) + 1e-4f; d->tx = -Y / l; d->ty = -X / l; d->st = fminf(7, 1 + 1.8f * (st - 1) + ms); } /* (the bent one: along the ring) */
+            else { d->tx = t3[0] / tl; d->ty = -t3[1] / tl; d->st = fminf(7, st + ms); }
+            g_hd_n++;
+        }
+    }
+}
+static void draw_hole_dots(Canvas *c, const Session *s, const BHView *V, float ox, float oy, float k, float hb, float room, double now, float bdk, int bx0, int bx1, int by0, int by1) {
+    static atomic_flag lock = ATOMIC_FLAG_INIT;
+    static float key[6]; static const void *ks;
+    while (atomic_flag_test_and_set(&lock)) {}
+    float kk[6] = {(float)fmod(now, 1000.0), ox, oy, k, room, (float)BH_LIGHT};
+    if (ks != s || memcmp(kk, key, sizeof kk)) { /* the first band of a new picture: the dots placed, the stars for its size */
+        hd_place(s, V, ox, oy, k, room, now);
+        memcpy(key, kk, sizeof kk); ks = s;
+        int half = (int)ceilf(room) + 1;
+        if (V->sky > 0 && !BH_LIGHT && half != b2st_half) b2st_build(half);
+    }
+    atomic_flag_clear(&lock);
+    float rs = BH_BC * k, te = rs * 1.08f, rr = rs * 1.035f, rw = fmaxf(0.9f, 0.1f * k), expo = bh_hole_expo(s, now);
+    float ax = -V->ec[0] * V->dir, ay = V->ec[1] * V->dir, al = hypotf(ax, ay) + 1e-5f; /* (the side coming at you, on the screen: y down) */
+    int stars = V->sky > 0 && !BH_LIGHT && b2st, W = 2 * b2st_half + 1;
+    /* the disc's outline on the screen, for Backdrop's dark sky under it: an ellipse, its long axis along ec */
+    float ux = V->ec[0], uy = -V->ec[1], ul = hypotf(ux, uy) + 1e-5f, A = V->rout * k * 1.05f, B = fmaxf(rs * 1.6f, A * fabsf(V->n[2]) + rs * 0.9f);
+    ux /= ul; uy /= ul;
+    for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
+        float dx = x + 0.5f - ox, dy = y + 0.5f - oy, rt = sqrtf(dx * dx + dy * dy) + 1e-4f;
+        float ef = clamp01((room - 1 - rt) / (room * 0.12f));
+        float sh = clamp01((rs - rt) + 0.5f) * hb, d = (rt - rr) / rw, ring = rt < rs * 1.4f ? expf(-d * d) * BH_TUNE.ring_a * expo * hb * (0.75f + 0.6f * fmaxf(0, (dx * ax + dy * ay) / (rt * al))) : 0;
+        float col[3] = {ring, ring * 0.96f, ring * 0.88f};
+        if (stars && rt > rs) { /* the sky behind, bent round it */
+            float m = 1 - te * te / (rt * rt);
+            int sx = (int)floorf(dx * m), sy = (int)floorf(dy * m);
+            if (abs(sx) < b2st_half && abs(sy) < b2st_half) {
+                const float *st = b2st + ((size_t)(sy + b2st_half) * W + (sx + b2st_half)) * 3;
+                float rs_ = rt / room, sf = clamp01((0.95f - rs_) / 0.35f), sky = sf * sf * (3 - 2 * sf) * BH_TUNE.star_a * V->sky;
+                for (int q = 0; q < 3; q++) col[q] += st[q] * sky;
+            }
+        }
+        float *p = c->p + 3 * ((size_t)y * c->w + x);
+        if (sh > 0) for (int q = 0; q < 3; q++) p[q] *= 1 - sh;
+        for (int q = 0; q < 3; q++) p[q] += col[q] * ef;
+        if (c->dk && (sh > 0 || bdk > 0)) {
+            float dd = sh;
+            if (bdk > 0) { float du = (dx * ux + dy * uy) / A, dv = (-dx * uy + dy * ux) / B, e2 = du * du + dv * dv, pl = clamp01((1.32f - e2) / 0.97f); dd = fmaxf(dd, bdk * pl * pl * (3 - 2 * pl) * hb * ef); } /* (its square: no root) */
+            float *dk = c->dk + (size_t)y * c->w + x;
+            if (dd > *dk) *dk = dd;
+        }
+    }
+    for (int i = 0; i < g_hd_n; i++) { /* the gas: soft spots, drawn out along their way */
+        const HDot *d = &g_hd[i];
+        float L = 2.5f * d->rad * d->st, Wd = 2.5f * d->rad, hx = sqrtf(L * L * d->tx * d->tx + Wd * Wd * d->ty * d->ty), hy = sqrtf(L * L * d->ty * d->ty + Wd * Wd * d->tx * d->tx); /* (its box: just round its shape) */
+        int x0 = (int)fmaxf(bx0, floorf(d->x - hx)), x1 = (int)fminf(bx1, ceilf(d->x + hx) + 1), y0 = (int)fmaxf(by0, floorf(d->y - hy)), y1 = (int)fminf(by1, ceilf(d->y + hy) + 1);
+        if (x0 >= x1 || y0 >= y1) continue;
+        float i2 = 1 / (d->rad * d->rad), is2 = 1 / (d->st * d->st);
+        for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+            float qx = x + 0.5f - d->x, qy = y + 0.5f - d->y, t = qx * d->tx + qy * d->ty, nn = -qx * d->ty + qy * d->tx, d2 = (nn * nn + t * t * is2) * i2;
+            if (d2 > 6.25f) continue;
+            float w = expf(-d2) * hb, *p = c->p + 3 * ((size_t)y * c->w + x);
+            p[0] += d->r * w; p[1] += d->g * w; p[2] += d->b * w;
+        }
+    }
+}
 static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, float ox, float oy, float R, float ks, double t, double now, float room) {
     bh_lut();
     (void)ks;
@@ -1210,15 +1413,17 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
     if (act == HA_FEED || act == HA_LENS || act == HA_FLARE) ex = ey = room; /* (out to the picture's edge) */
     V.zmax = room / k; V.room = room;
     int b2_mir = 0, gpu = BH_GPU_IMG.rgba && BH_GPU_IMG.s == s && BH_GPU_IMG.n > 1;
-    B2Map *bm = !gpu && BH_TUNE.b2_engine > 0.5f ? b2_pick(V.n, &b2_mir) : NULL;
-    if (bm || gpu) ex = ey = room; /* (its disc is wider and thicker: the whole picture, faded before its edge) */
+    int dots = !gpu && BH_DOTS; /* (the CPU: the middle of it and the gas as dots) */
+    B2Map *bm = !gpu && !dots && BH_TUNE.b2_engine > 0.5f ? b2_pick(V.n, &b2_mir) : NULL;
+    if (bm || gpu || dots) ex = ey = room; /* (its disc is wider and thicker: the whole picture, faded before its edge) */
     int bx0 = (int)fmaxf(cl.x0, floorf(ox - ex)), bx1 = (int)fminf(cl.x1, ceilf(ox + ex) + 1);
     int by0 = (int)fmaxf(cl.y0, floorf(oy - ey)), by1 = (int)fminf(cl.y1, ceilf(oy + ey) + 1);
     if (bx0 >= bx1 || by0 >= by1) return;
     touch(c, bx0, by0, bx1, by1);
-    if (bm || gpu) { /* traced after blackhole-simulation (its map for this tilt, shaded now; or the GPU's picture) */
+    if (dots) draw_hole_dots(c, s, &V, ox, oy, k, hb, room, now, bdk, bx0, bx1, by0, by1);
+    else if (bm || gpu) { /* traced after blackhole-simulation (its map for this tilt, shaded now; or the GPU's picture) */
         int n = gpu ? BH_GPU_IMG.n : bm->n;
-        float E = gpu ? BH_GPU_IMG.E : BH_TUNE.b2_ext, rho = atan2f(V.n[0], V.n[1]), cr = cosf(rho), sr = sinf(rho), fu = 1, /* (the wheel only turns its gas, never mirrors it) */ fv = b2_mir ? -1.0f : 1.0f;
+        float E = gpu ? BH_GPU_IMG.E : b2_ext(), rho = atan2f(V.n[0], V.n[1]), cr = cosf(rho), sr = sinf(rho), fu = 1, /* (the wheel only turns its gas, never mirrors it) */ fv = b2_mir ? -1.0f : 1.0f;
         if (gpu) { fv = 1; fu = 1; cr = 1; sr = 0; } /* (its camera goes below the disc itself; its picture comes turned) */
         size_t nb = gpu ? 1 : (size_t)n * n;
         B2Shade S = {bm, NULL, NULL, NULL, -V.T * 1.2f * BH_TUNE.b2_speed, /* (its gas the way the GPU's goes: the way its Doppler boost says) */ BH_TUNE.b2_dens, bh_hole_expo(s, now), E, fminf(V.sky_lim[0], V.sky_lim[1]) * 0.96f, &V};
@@ -1269,6 +1474,12 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                 b2c_i0 = i0 < 0 ? 0 : i0; b2c_i1 = i1 > n ? n : i1;
                 atomic_store(&b2c_rows_done, 0); atomic_store(&b2c_next, b2c_i0);
                 memcpy(b2c_key, key, sizeof key); b2c_s = s; b2c_bm = bm;
+                int G = (int)fminf(300, fmaxf(64, 2 * E * k / 2.0f)); /* the grid: a point every 2 pixels or so (the edge and the ring are smooth of their own) */
+                if ((size_t)G * G > b2g_cap) { free(b2g); free(b2g_done); b2g = malloc((size_t)G * G * 4 * sizeof *b2g); b2g_done = malloc((size_t)G * G); b2g_cap = b2g && b2g_done ? (size_t)G * G : 0; }
+                b2g_n = b2g_cap ? G : 0;
+                if (b2g_n) memset(b2g_done, 0, (size_t)G * G);
+                int half = (int)ceilf(room) + 1;
+                if (V.sky > 0 && !BH_LIGHT && half != b2st_half) b2st_build(half);
             }
             int i0 = b2c_i0, i1 = b2c_i1;
             atomic_flag_clear(&b2c_lock);
@@ -1311,9 +1522,15 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
         for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
             float X = (x + 0.5f - ox) / k, Y = -(y + 0.5f - oy) / k, L4[4];
             if (fabsf(X) > E || fabsf(Y) > E) continue;
-            B2_AT(X, Y, L4);
+            const float *star = NULL;
+            if (gpu || !b2g_n) B2_AT(X, Y, L4);
+            else {
+                B2Pt P_ = {&S, bm, E, cr, sr, fu, fv, n, 1 / k};
+                b2g_sample(&P_, X, Y, L4);
+                if (V.sky > 0 && !BH_LIGHT && b2st) { int sx_ = (int)floorf(x + 0.5f - ox), sy_ = (int)floorf(y + 0.5f - oy); if (abs(sx_) <= b2st_half && abs(sy_) <= b2st_half) { star = b2st + ((size_t)(sy_ + b2st_half) * (2 * b2st_half + 1) + (sx_ + b2st_half)) * 3; if (star[0] + star[1] + star[2] < 0.004f) star = NULL; } }
+            }
             float sh = L4[3];
-            if (L4[0] + L4[1] + L4[2] < 0.002f && sh < 0.002f && (gpu || V.sky <= 0 || X * X + Y * Y > S.star_r * S.star_r)) {
+            if (L4[0] + L4[1] + L4[2] < 0.002f && sh < 0.002f && !star && (gpu || b2g_n || V.sky <= 0 || X * X + Y * Y > S.star_r * S.star_r)) {
                 /* (nothing here but maybe the glow: the cheap way) */
                 float fi = (x + 0.5f - gx0) / gs, fj = (y + 0.5f - gy0) / gs; int i = (int)fi, j = (int)fj; float wi = fi - i, wj = fj - j, g = 0;
                 if (i >= 0 && j >= 0 && i < gw - 1 && j < gh - 1) g = (gl[j * GM + i] * (1 - wi) + gl[j * GM + i + 1] * wi) * (1 - wj) + (gl[(j + 1) * GM + i] * (1 - wi) + gl[(j + 1) * GM + i + 1] * wi) * wj;
@@ -1323,7 +1540,12 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                 p[0] += gb; p[1] += gb * 0.55f; p[2] += gb * 0.22f;
                 continue;
             }
-            if (!gpu) { /* the ring, crisp: its profile at this exact point, behind whatever disc lies in front; and the stars where
+            if (!gpu && b2g_n) { /* (light: the ring is in the grid; a star laid over where the gas lets it through) */
+                if (star) {
+                    float rs_ = sqrtf(X * X + Y * Y) * k / room, sf = clamp01((0.95f - rs_) / 0.35f), sky = sf * sf * (3 - 2 * sf) * BH_TUNE.star_a * (1 - clamp01(sh));
+                    for (int q = 0; q < 3; q++) L4[q] = 1 - (1 - L4[q]) * (1 - clamp01(star[q] * sky));
+                }
+            } else if (!gpu) { /* the ring, crisp: its profile at this exact point, behind whatever disc lies in front; and the stars where
                * this ray leaves to, behind it too */
                 float u_ = (X * cr - Y * sr) * fu, v_ = (X * sr + Y * cr) * fv, bb = sqrtf(u_ * u_ + v_ * v_), ring = 0;
                 float fb = (bb - B2_RLO) / (B2_RHI - B2_RLO) * B2_RB - 0.5f;
