@@ -2507,31 +2507,61 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
             for (int i = 0; i < nk; i++) { int r = keep[i]; for (int k = 0; k < cells[r]; k++) { int w = cell_put(dc, 0, 0, cell[r][k], r == head, 0); if (w > cw[k]) cw[k] = w; } }
             for (int k = 0; k < ncol; k++) total += cw[k] + (k ? gapc : 0);
             int sw = text_w(dc, F_BODY, L" ", 1), edge = g_chat_mono ? text_w(dc, F_BODY, L"\x2502 ", 2) : 0;
-            if (g_chat_mono && total + 2 * edge <= maxw - x0) { /* a terminal table: box-drawing borders, padded to the columns */
+            /* too wide for the box: the narrow columns keep their width, the wide ones share what is left, and
+             * their cells wrap inside them (the row as tall as its tallest cell) */
+            int fitw = maxw - x0 - (g_chat_mono ? 2 * edge : 0), squeezed = 0;
+            if (total > fitw && ncol > 0) {
+                int room = fitw - (ncol - 1) * gapc, left = ncol, fixed[12] = {0};
+                for (int again = 1; again && left;) {
+                    again = 0;
+                    int share = room / left;
+                    for (int k = 0; k < ncol; k++) if (!fixed[k] && cw[k] <= share) { fixed[k] = 1; room -= cw[k]; left--; again = 1; }
+                }
+                if (left) { int share = (int)fmax(room / left, 8 * sw); for (int k = 0; k < ncol; k++) if (!fixed[k]) cw[k] = share; }
+                total = 0;
+                for (int k = 0; k < ncol; k++) total += cw[k] + (k ? gapc : 0);
+                squeezed = 1;
+            }
+            if (g_chat_mono && total <= fitw) { /* a terminal table: box-drawing borders, padded to the columns */
                 const COLORREF BORDER = RGB(110, 116, 130);
                 /* the borders as thin lines (box-drawing characters left gaps where the rows met), the column
                  * lines where the characters' bars were, so the columns line up as before; each row padded */
-                int barw = text_w(dc, F_BODY, L"\x2502", 1), th = (int)fmax(1, g_dpi), pad = lh / 4, rowh = lh + 2 * pad;
-                int xb[13], top = y + pad;
+                int barw = text_w(dc, F_BODY, L"\x2502", 1), th = (int)fmax(1, g_dpi), pad = lh / 4;
+                int xb[13], top = y + pad, rt = top;
                 xb[0] = x0 + barw / 2;
                 for (int k = 0; k < ncol; k++) xb[k + 1] = xb[k] + barw + ((cw[k] + sw - 1) / sw + 2) * sw;
                 int tw = xb[ncol] - xb[0] + th;
                 lay_shape(SH_RULE, xb[0], top, tw, BORDER);
                 for (int i = 0; i < nk; i++) {
-                    int r = keep[i], rt = top + i * rowh;
-                    for (int k = 0; k < ncol && k < cells[r]; k++) cell_put(dc, xb[k] + barw / 2 + sw, rt + pad + asc, cell[r][k], r == head, 1);
-                    lay_shape(SH_RULE, xb[0], rt + rowh, tw, BORDER); /* under every row; the last one is the bottom */
+                    int r = keep[i], bottom = rt + pad + lh;
+                    for (int k = 0; k < ncol && k < cells[r]; k++) {
+                        int cx = xb[k] + barw / 2 + sw;
+                        if (!squeezed) { cell_put(dc, cx, rt + pad + asc, cell[r][k], r == head, 1); continue; }
+                        int xx = cx, ye = lay_inline(dc, cell[r][k], cell[r][k] + wcslen(cell[r][k]), &xx, cx, rt + pad, lh, asc, cx + cw[k], r == head ? 3 : 0, MD_BODY, 0) + lh;
+                        if (ye > bottom) bottom = ye;
+                    }
+                    rt = bottom + pad;
+                    lay_shape(SH_RULE, xb[0], rt, tw, BORDER); /* under every row; the last one is the bottom */
                 }
-                for (int k = 0; k <= ncol; k++) lay_shape(SH_VLINE, xb[k], top, nk * rowh + th, BORDER);
+                for (int k = 0; k <= ncol; k++) lay_shape(SH_VLINE, xb[k], top, rt - top + th, BORDER);
                 if (xb[ncol] + th > g_lay_w) g_lay_w = xb[ncol] + th;
-                y = top + nk * rowh + pad + th;
+                y = rt + pad + th;
                 blank = 0;
                 ln = nl ? nl + 1 : NULL;
                 continue;
             }
             for (int i = 0; i < nk; i++) {
                 int r = keep[i], x = x0;
-                if (total <= maxw - x0) { /* aligned columns */
+                if (squeezed && total <= fitw) { /* aligned columns, the wide ones wrapped */
+                    int bottom = y + lh;
+                    for (int k = 0; k < cells[r]; k++) {
+                        int xx = x, ye = lay_inline(dc, cell[r][k], cell[r][k] + wcslen(cell[r][k]), &xx, x, y, lh, asc, x + cw[k], r == head ? 3 : 0, MD_BODY, 0) + lh;
+                        if (ye > bottom) bottom = ye;
+                        x += cw[k] + gapc;
+                    }
+                    y = bottom;
+                    if (r == head) { lay_shape(SH_RULE, x0, y - (int)(3 * g_dpi), total, MD_RULE); y += (int)(2 * g_dpi); }
+                } else if (total <= maxw - x0) { /* aligned columns */
                     for (int k = 0; k < cells[r]; k++) {
                         cell_put(dc, x, y + asc, cell[r][k], r == head, 1);
                         x += cw[k] + gapc;
@@ -6500,8 +6530,8 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
         wheel_spin(s, notches);
-        g_hover_since = wall(); /* (scrolling on it is not resting on it) */
-        if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
+        if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches); /* its box open: the wheel scrolls it, and it stays */
+        else g_hover_since = wall(); /* (scrolling on it is not resting on it: no box opens mid-scroll) */
         return 0;
     }
     case WM_MOUSEHWHEEL: { /* sideways (a touchpad swipe): the core spins about its other axis */
