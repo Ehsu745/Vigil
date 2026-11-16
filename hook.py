@@ -37,7 +37,7 @@ KNOWN = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
 MAX_TEXT = 4000
 MAX_PROMPT = 2000
 TURNS = 5                  # turns kept: prompt, reply and steps; the last is the one going on
-STEPS = 8                  # steps kept per turn (the count and the tally keep the rest)
+STEPS = 16                 # steps kept per turn, Claude's words between them too (the count and the tally keep the rest)
 MSG_BUDGET = 24000         # the oldest turns go first when the file grows past this
 STALE = 24 * 3600          # msg files of sessions that never sent SessionEnd
 TRANSCRIPT_TAIL = 262144   # how much of the transcript the fallback reads, from the end
@@ -107,7 +107,9 @@ def step_detail(tool, ti):
     """What a step works on, short: a command's first line, a file's name (never its folder), a pattern."""
     if not isinstance(ti, dict):
         return ""
-    if tool == "Bash":
+    if tool == "Bash":  # what Claude says the command does, else its first line
+        if isinstance(ti.get("description"), str) and ti["description"].strip():
+            return one_line(ti["description"])
         cmd = ti.get("command")
         return one_line(cmd.strip().split("\n")[0] if isinstance(cmd, str) else "")
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead"):
@@ -194,7 +196,33 @@ def notice_step(p):
     if not p.startswith("<task-notification"):
         return None
     m = re.search(r"<summary>(.*?)</summary>", p, re.S)
-    return ["Task", " ".join((m.group(1) if m else "background task").split())[:80]]
+    return ["@notice", " ".join((m.group(1) if m else "background task").split())[:80]]
+
+
+def latest_said(path):
+    """Claude's newest words in the turn going on (the text before a tool call, as the terminal shows it), or ""."""
+    if not path or not os.path.isfile(path):
+        return ""
+    with open(path, "rb") as f:
+        f.seek(max(0, os.path.getsize(path) - TRANSCRIPT_TAIL))
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get("isSidechain") or e.get("isMeta"):
+            continue
+        m = e.get("message")
+        if not isinstance(m, dict):
+            continue
+        if e.get("type") == "user" and prompt_text(m):
+            return ""  # back to your prompt: nothing said since
+        if e.get("type") == "assistant" and isinstance(m.get("content"), list):
+            t = "\n".join(x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text").strip()
+            if t:
+                return t
+    return ""
 
 
 def backfill(path):
@@ -275,6 +303,12 @@ def on_turn(sid, ev, d):
         if ev == "PreToolUse":
             step = [tool, step_detail(tool, d.get("tool_input"))]
             s = t.get("s") if isinstance(t.get("s"), list) else []
+            try:  # what Claude said before this call, once
+                said = one_line(latest_said(d.get("transcript_path")), 300)
+            except Exception:
+                said = ""
+            if said and not any(x[0] == "@say" and x[1] == said for x in s if isinstance(x, list) and len(x) > 1):
+                s = s + [["@say", said]]
             t["s"] = (s + [step])[-STEPS:]
             t["n"] = int(t.get("n") or 0) + 1
             c = t.get("c") if isinstance(t.get("c"), dict) else {}

@@ -2042,7 +2042,7 @@ static const char *js_next(const char **c) {
 
 /* The last few turns as Claude Code's terminal shows them: the prompt, its steps (a tool and what it works on),
  * the reply; the hook keeps up to 5 in "turns" (the last one is going on), and the step running now in "run". */
-enum { MT_MAX = 5, MT_STEPS = 8 };
+enum { MT_MAX = 5, MT_STEPS = 16 }; /* (hook.py's TURNS, STEPS) */
 typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; } MTurn;
 static MTurn g_mt[MT_MAX];
 static int g_mt_n;
@@ -2536,7 +2536,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
-        if (*ln >= 1 && *ln <= 6) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
+        if (*ln >= 1 && *ln <= 9) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
             int kind = *ln, pad = lh / 4;
             in_code = 0;
             if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
@@ -2613,6 +2613,16 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 while (n > 0 && x + text_w(dc, F_BODY, ln + 1, n) > maxw) n--;
                 lay_put(x, y + asc, F_BODY, MD_MARK, ln + 1, n, text_w(dc, F_BODY, ln + 1, n), 0);
                 y += lh; blank = 0; marked = 0;
+            } else if (kind == 8) { /* what Claude said between its steps: "● Testing the hook…", as the terminal shows it */
+                if (!blank) y += gap / 2;
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
+                lay_put(lead, y + asc, F_BODY, MD_BOLD, L"\x25CF", 1, text_w(dc, F_BODY, L"\x25CF", 1), 0);
+                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_BODY, 0) + lh;
+                blank = 0; marked = 0;
+            } else if (kind == 9) { /* the steps under it, folded ("Ran 2 shell commands"), or a task's notice: dim, in under the words */
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
+                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_MARK, 0) + lh;
+                blank = 0; marked = 0;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
@@ -3079,7 +3089,7 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
-        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 6) *(*o)++ = *c;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 9) *(*o)++ = *c;
         *(*o)++ = '\n';
         if (*c) c++;
     }
@@ -3092,6 +3102,51 @@ static int harness_p(const char *p) {
     while (*p == ' ' || *p == '\n' || *p == '\r') p++;
     for (int i = 0; i < 7; i++) if (!strncmp(p, H[i], strlen(H[i]))) return 1;
     return 0;
+}
+/* the steps folded as the terminal folds them: "Ran 2 shell commands, read 3 files" */
+static void steps_line(char **o, const MTurn *t, int k0, int k1) {
+    static const char *TOOLS[] = {"Bash", "Read", "Grep", "Glob", "Edit", "MultiEdit", "NotebookEdit", "Write", "WebFetch", "WebSearch", "Task", "Agent", "Skill"};
+    static const int CAT[] = {0, 1, 2, 2, 3, 3, 3, 4, 5, 6, 7, 7, 8};
+    static const char *ONE[] = {"ran %d shell command", "read %d file", "searched for %d pattern", "edited %d file", "wrote %d file", "fetched %d page", "searched the web %d time", "ran %d agent", "used %d skill"};
+    int cnt[9] = {0}, order[24], no = 0, other[8] = {0}, on = 0;
+    const char *oname[8];
+    for (int k = k0; k < k1; k++) {
+        int c = -1;
+        for (int j = 0; j < 13; j++) if (!strcmp(t->tool[k], TOOLS[j])) c = CAT[j];
+        if (c >= 0) { if (!cnt[c]++) order[no++] = c; continue; }
+        int f = -1;
+        for (int j = 0; j < on; j++) if (!strcmp(oname[j], t->tool[k])) f = j;
+        if (f < 0 && on < 8) { oname[on] = t->tool[k]; f = on++; order[no++] = 100 + f; }
+        if (f >= 0) other[f]++;
+    }
+    if (!no) return;
+    char line[300], *e = line;
+    for (int i = 0; i < no && e < line + 240; i++) {
+        if (i) e += sprintf(e, ", ");
+        if (order[i] < 100) { int c = order[i]; e += sprintf(e, ONE[c], cnt[c]); if (cnt[c] != 1) e += sprintf(e, "s"); }
+        else { int f = order[i] - 100; e += other[f] > 1 ? sprintf(e, "used %.40s %d times", oname[f], other[f]) : sprintf(e, "used %.40s", oname[f]); }
+    }
+    line[0] = (char)toupper((unsigned char)line[0]);
+    conv_put(o, 9, line, 1);
+}
+/* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
+ * step running now last (3) */
+static void conv_steps(char **o, const MTurn *t, int st) {
+    char line[400];
+    int tools = 0, run = t->ns && g_run_tool && t->tool[t->ns - 1][0] != '@', end = run ? t->ns - 1 : t->ns;
+    for (int k = 0; k < t->ns; k++) tools += t->tool[k][0] != '@';
+    if (t->n > tools) { snprintf(line, sizeof line, "%d earlier step%s", t->n - tools, t->n - tools == 1 ? "" : "s"); conv_put(o, 4, line, 1); }
+    int k0 = 0;
+    for (int k = 0; k <= end; k++) {
+        if (k < end && t->tool[k][0] != '@') continue;
+        steps_line(o, t, k0, k);
+        if (k == end) break;
+        if (!strcmp(t->tool[k], "@say")) conv_put(o, 8, t->what[k] ? t->what[k] : "", 1);
+        else if (!strcmp(t->tool[k], "@notice")) { snprintf(line, sizeof line, "Background task: %s", t->what[k] ? t->what[k] : ""); conv_put(o, 9, line, 1); }
+        k0 = k + 1;
+    }
+    if (run) { snprintf(line, sizeof line, "%s\t%s", t->tool[t->ns - 1], t->what[t->ns - 1] ? t->what[t->ns - 1] : ""); conv_put(o, 3, line, 1); }
+    if (!t->ns && (st == ST_THINK || st == ST_WORK)) conv_put(o, 3, "Thinking", 1);
 }
 static char *chat_conv(int st) {
     if (!g_mt_n) return NULL;
@@ -3108,22 +3163,15 @@ static char *chat_conv(int st) {
         int live = i == g_mt_n - 1 && !t->r;
         int wrap = harness_p(t->p);
         if (i > i0 && !wrap) conv_put(&o, 5, " ", 1);
-        if (wrap) { /* its notice, one step line: the summary if it has one */
+        if (wrap) { /* its notice, one dim line: the summary if it has one */
             const char *a = strstr(t->p, "<summary>"), *b = a ? strstr(a, "</summary>") : NULL;
-            char line[120];
-            if (a && b) snprintf(line, sizeof line, "Task\t%.*s", (int)fmin(90, b - a - 9), a + 9);
-            else snprintf(line, sizeof line, "Task\tbackground task");
-            conv_put(&o, 2, line, 1);
+            char line[140];
+            if (a && b) snprintf(line, sizeof line, "Background task: %.*s", (int)fmin(100, b - a - 9), a + 9);
+            else snprintf(line, sizeof line, "Background task");
+            conv_put(&o, 9, line, 1);
         } else if (t->p) conv_put(&o, 1, t->p, 1);
-        if (live) { /* going on: the last steps one by one, the running one last */
-            char line[300];
-            if (t->n > t->ns) { snprintf(line, sizeof line, "%d earlier step%s", t->n - t->ns, t->n - t->ns == 1 ? "" : "s"); conv_put(&o, 4, line, 1); }
-            for (int k = 0; k < t->ns; k++) {
-                snprintf(line, sizeof line, "%s\t%s", t->tool[k], t->what[k] ? t->what[k] : "");
-                conv_put(&o, k == t->ns - 1 && g_run_tool ? 3 : 2, line, 1);
-            }
-            if (!t->ns && (st == ST_THINK || st == ST_WORK)) conv_put(&o, 3, "Thinking", 1);
-        } else if (t->tally) conv_put(&o, 4, t->tally, 1);
+        if (live) conv_steps(&o, t, st); /* going on: Claude's words, the steps under each folded to a line, the running one */
+        else if (t->tally) conv_put(&o, 4, t->tally, 1);
         if (t->r) conv_put(&o, 0, t->r, 0);
     }
     if (st == ST_WAIT && g_msg_notice) conv_put(&o, 6, g_msg_notice, 1);
