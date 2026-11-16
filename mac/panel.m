@@ -2484,10 +2484,12 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         const char *shape = "geo2", *events = getenv("DODECA_EVENTS"), *home = getenv("HOME") ? getenv("HOME") : ".";
         char events_default[1024];
+        HOLE_CLASSIC = 1; // Asleep's black hole as it was before the traced one: the traced one is too slow on the CPU here
         for (int i = 1; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
             if (!strcmp(a, "--demo")) { g_demo_n = 3; if (v && v[0] >= '1' && v[0] <= '6' && !v[1]) { g_demo_n = v[0] - '0'; i++; } }
             else if (!strcmp(a, "--exit-when-empty")) g_exit_empty = 1;
+            else if (!strcmp(a, "--traced-hole")) HOLE_CLASSIC = 0; // the traced black hole (Windows'), to compare
             else if (!strcmp(a, "--always")) g_always = 1;
             else if (!strcmp(a, "--fit-pane")) g_fit_pane = 1;
             else if (!strcmp(a, "--all-spaces")) g_all_spaces = 1;
