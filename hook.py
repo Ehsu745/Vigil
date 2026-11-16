@@ -173,6 +173,9 @@ def fit(turns):
 BACKFILL_MAX = 4 << 20     # how far back in the transcript the first fill reads at most
 
 
+HARNESS = ("<command-", "<local-command", "<system-reminder>", "<bash-", "<task-notification", "Caveat:", "[Request interrupted")
+
+
 def prompt_text(m):
     """A typed prompt in a transcript user line ("" for tool results, commands and the harness's own lines)."""
     c = m.get("content")
@@ -181,9 +184,17 @@ def prompt_text(m):
     if not isinstance(c, str):
         return ""
     t = c.strip()
-    if not t or t.startswith(("<command-", "<local-command", "<system-reminder>", "<bash-", "<task-notification", "Caveat:", "[Request interrupted")):
+    if not t or t.startswith(HARNESS):
         return ""
     return t
+
+
+def notice_step(p):
+    """A background task's notice as a step of the turn it came in ("" for the harness's other lines)."""
+    if not p.startswith("<task-notification"):
+        return None
+    m = re.search(r"<summary>(.*?)</summary>", p, re.S)
+    return ["Task", " ".join((m.group(1) if m else "background task").split())[:80]]
 
 
 def backfill(path):
@@ -248,7 +259,12 @@ def on_turn(sid, ev, d):
     if ev == "UserPromptSubmit":
         p = d.get("prompt")
         p = p[:MAX_PROMPT] if isinstance(p, str) else ""
-        if not (turns and turns[-1].get("p") == p and not turns[-1].get("r")):  # (already in the transcript)
+        if p.lstrip().startswith(HARNESS):  # the harness's own line (a background task's notice): no turn of its own;
+            step = notice_step(p.lstrip())  # the notice is a step of the turn going on, which keeps your prompt
+            if step and turns:
+                s = turns[-1].get("s") if isinstance(turns[-1].get("s"), list) else []
+                turns[-1]["s"] = (s + [step])[-STEPS:]
+        elif not (turns and turns[-1].get("p") == p and not turns[-1].get("r")):  # (already in the transcript)
             turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}})
         fields["run"] = None
     else:

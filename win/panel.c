@@ -32,6 +32,7 @@
 #include <windowsx.h>
 #include <wincodec.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <ole2.h>
 #include <richedit.h>
 #include <commdlg.h>
@@ -182,12 +183,79 @@ static const wchar_t *TILT_NAMES[5] = {L"Still", L"Slow", L"Normal", L"Fast", L"
 static const double AWAYS[8] = {60, 120, 300, 600, 900, 1800, 3600, 0}; /* (seconds; 0: never) */
 static const float CHATSIZES[4] = {0.75f, 1.0f, 1.35f, 1.75f};
 static const unsigned CHAT_BGS[5] = {0x18191E, 0x262626, 0x16233F, 0x2B1C3B, 0x15302A}; /* dark, so the text keeps its contrast */
-static const wchar_t *CHAT_BG_NAMES[6] = {L"Ink", L"Graphite", L"Navy", L"Plum", L"Pine", L"Custom"};
 static const unsigned SHADE_COLS[5] = {0x000000, 0x0A1128, 0x1C0A26, 0x071D14, 0x2A1206}; /* black, navy, plum, pine, ember */
 static const wchar_t *SHADE_NAMES[6] = {L"Black", L"Navy", L"Plum", L"Pine", L"Ember", L"Custom"};
 static unsigned shadex(void) { return g_shade_col == 5 ? g_shade_custom : SHADE_COLS[g_shade_col]; } /* 0xRRGGBB */
 static const wchar_t *WHEEL_NAMES[5] = {L"Roll", L"Roll back", L"Turn", L"Turn back", L"Off"};
-static unsigned chat_bgx(void) { return g_chat_bg == 5 ? g_chat_custom : CHAT_BGS[g_chat_bg]; } /* 0xRRGGBB */
+/* The chat box's colours by role, as a theme gives them. Vigil's own is Box colour and Text colour with the rest as
+ * they always were (light text darkened on a light box: ink). Follow Claude Code reads the CLI's /theme from
+ * ~/.claude.json in WSL; Terminal (and Claude Code's ANSI themes) takes the Windows Terminal scheme's colours. Both
+ * are read on the reader thread (theme_poll). */
+typedef struct { unsigned bg, text, dim, accent, bold, code, link, ok, warn; } ChatPal; /* (rules, quotes, code blocks: worked out from these) */
+enum { TH_VIGIL, TH_FOLLOW, TH_DARK, TH_LIGHT, TH_CBLIND, TH_TERM, TH_MIDNIGHT, TH_PAPER, TH_CONTRAST, TH_N }; /* (saved by number: new ones go last) */
+static const wchar_t *THEME_NAMES[TH_N] = {L"Vigil", L"Follow Claude Code", L"Claude Dark", L"Claude Light", L"Colour-blind", L"Terminal", L"Midnight", L"Paper", L"High contrast"};
+static const wchar_t *ROLE_NAMES[9] = {L"Background", L"Text", L"Dim", L"Accent", L"Bold", L"Code", L"Link", L"Done", L"Notice"};
+#define CAMPBELL_PAL {0x0C0C0C, 0xCCCCCC, 0x767676, 0xE74856, 0xF2F2F2, 0x3B78FF, 0x61D6D6, 0x16C60C, 0xF9F1A5}
+static const ChatPal THEMES[TH_N] = { /* background, text, dim, accent (title, edge, running step, lit dots), bold, code, link, done, notice */
+    [TH_VIGIL]    = {0x18191E, 0xE6E8F0, 0x8E94A4, 0xF5902A, 0xFFFFFF, 0x7FD8C4, 0x6FB3FF, 0x6EC88C, 0xFFB877},
+    [TH_DARK]     = {0x212121, 0xD0D0D0, 0x949494, 0xD7875F, 0xF5F5F5, 0xAFD7FF, 0x87AFFF, 0x5FAF5F, 0xFFD700}, /* (as the CLI shows in WSL: rounded to the 256 colours) */
+    [TH_LIGHT]    = {0xFAFAFA, 0x1F1F1F, 0x6B6B6B, 0xC4623F, 0x000000, 0x5769F7, 0x1F5FD1, 0x2C7A39, 0x966C1E},
+    [TH_CBLIND]   = {0x212121, 0xD0D0D0, 0x949494, 0xD7875F, 0xF5F5F5, 0xAFD7FF, 0x87AFFF, 0x5FAFFF, 0xFFD700},
+    [TH_TERM]     = CAMPBELL_PAL,
+    [TH_MIDNIGHT] = {0x0F1730, 0xDCE6FF, 0x7C8BB0, 0x5FB6FF, 0xFFFFFF, 0xFFB86B, 0x9AD1FF, 0x5FE3B0, 0xFFD27A},
+    [TH_PAPER]    = {0xF4EBD9, 0x3B3226, 0x8A7C66, 0xB5562B, 0x1E1810, 0x2E6E68, 0x2F5D8A, 0x4E7D3A, 0x9A6A12},
+    [TH_CONTRAST] = {0x000000, 0xFFFFFF, 0xBBBBBB, 0xFFE14D, 0xFFFFFF, 0x4DFFD2, 0x4DD2FF, 0x33FF66, 0xFF8C1A},
+};
+static unsigned mixx(unsigned a, unsigned b, int pct) { /* a toward b by pct (0xRRGGBB) */
+    unsigned o = 0;
+    for (int sh = 0; sh <= 16; sh += 8) { int x = a >> sh & 255, y = b >> sh & 255; o |= (unsigned)(x + (y - x) * pct / 100) << sh; }
+    return o;
+}
+static int g_theme = TH_FOLLOW;      /* Settings > Replies > Theme: THEME_NAMES, or TH_N + i: your own theme i */
+#define MY_MAX 8
+static ChatPal g_mine[MY_MAX];          /* your own themes (Settings > Replies > Theme > +), kept as myThemes / myThemeNames */
+static wchar_t g_my_name[MY_MAX][24];
+static int g_renaming;                /* the chosen theme's name being typed (Settings > YOUR THEME > Rename); g_ren_was to go back to */
+static wchar_t g_ren_was[24];
+static int g_pick_role = -1, g_cdrag; /* the colour being changed in the theme card (its picker open), and the picker's part held (K_CSV, K_CHUE) */
+static int g_pick_arg = -1;
+static float g_pk_h, g_pk_s, g_pk_v;   /* its hue (0-1), saturation and brightness */
+static unsigned hsv_x(float h, float sa, float v) { /* 0xRRGGBB */
+    float r, g, b, f = (h - floorf(h)) * 6;
+    int i = (int)f;
+    float q = f - i, P = v * (1 - sa), Q = v * (1 - sa * q), T = v * (1 - sa * (1 - q));
+    switch (i % 6) { case 0: r = v; g = T; b = P; break; case 1: r = Q; g = v; b = P; break; case 2: r = P; g = v; b = T; break;
+                     case 3: r = P; g = Q; b = v; break; case 4: r = T; g = P; b = v; break; default: r = v; g = P; b = Q; }
+    return (unsigned)lroundf(r * 255) << 16 | (unsigned)lroundf(g * 255) << 8 | (unsigned)lroundf(b * 255);
+}
+static void x_hsv(unsigned c, float *h, float *sa, float *v) {
+    float r = (c >> 16 & 255) / 255.f, g = (c >> 8 & 255) / 255.f, b = (c & 255) / 255.f, mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), d = mx - mn;
+    *v = mx; *sa = mx > 0 ? d / mx : 0;
+    if (d <= 0) return; /* grey: the hue stays where it was */
+    float hh = mx == r ? (g - b) / d : mx == g ? 2 + (b - r) / d : 4 + (r - g) / d;
+    *h = hh / 6 < 0 ? hh / 6 + 1 : hh / 6;
+}
+static int g_my_n;
+static ChatPal g_term_pal[2] = {CAMPBELL_PAL, CAMPBELL_PAL}; /* Windows Terminal's scheme, written by the reader thread into the one not in use */
+static volatile LONG g_term_cur, g_cli_theme = TH_DARK; /* which of them is in use; what Follow Claude Code comes to */
+extern int g_sl_dirty;               /* (the Settings window's still layer drawn again) */
+static volatile LONG g_theme_new;    /* the reader thread found other colours: the box and Settings are drawn again (tick) */
+static volatile LONG g_theme_kick = 1; /* the reader thread looks at the theme files again now (else every 5 s) */
+static void theme_kick(void) { g_theme_kick = 1; }
+static int theme_now(void) { return g_theme == TH_FOLLOW ? (int)g_cli_theme : g_theme; }
+static const ChatPal *pal_of(int t) { return t >= TH_N ? &g_mine[min(t - TH_N, MY_MAX - 1)] : t == TH_TERM ? &g_term_pal[g_term_cur & 1] : &THEMES[t]; }
+/* Follow Claude Code: the CLI paints no background of its own, and its plain and bold text are the terminal's, so those
+ * come from the Windows Terminal scheme; the rest from the CLI's theme */
+static const ChatPal *pal(void) {
+    if (g_theme != TH_FOLLOW || g_cli_theme == TH_TERM) return pal_of(theme_now());
+    static ChatPal f;
+    const ChatPal *t = &g_term_pal[g_term_cur & 1];
+    f = THEMES[g_cli_theme];
+    f.bg = t->bg; f.text = t->text; f.bold = t->bold;
+    return &f;
+}
+static const wchar_t *theme_name(int t) { return t >= TH_N ? g_my_name[min(t - TH_N, MY_MAX - 1)] : THEME_NAMES[t]; }
+static unsigned chat_bgx(void) { return pal()->bg; } /* 0xRRGGBB */
 static COLORREF chat_bg(void) { unsigned v = chat_bgx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
 static int box_light(void) { unsigned v = chat_bgx(); return 0.299f * (v >> 16 & 255) + 0.587f * (v >> 8 & 255) + 0.114f * (v & 255) > 140; }
 static COLORREF chat_field(void) { /* the typing field: a step lighter on a dark box, a step darker on a light one */
@@ -198,10 +266,9 @@ static COLORREF chat_field(void) { /* the typing field: a step lighter on a dark
 /* text on the box: as it is on a dark box; on a light one the same hue, dark, so it keeps its contrast */
 static COLORREF ink(COLORREF c) { return box_light() ? RGB(GetRValue(c) * 3 / 10, GetGValue(c) * 3 / 10, GetBValue(c) * 3 / 10) : c; }
 static const unsigned TEXT_COLS[5] = {0, 0xF2F2F5, 0xF5D9A0, 0x9FE8C2, 0x9CCBFF};
-static const wchar_t *TEXT_NAMES[6] = {L"Auto", L"White", L"Cream", L"Mint", L"Sky", L"Custom"};
 static unsigned inkx(unsigned v);
 /* the reply's own text (and what is typed): the chosen colour, or on Auto the usual light text, dark on a light box */
-static unsigned text_bodyx(void) { return g_text_col == 5 ? g_text_custom : g_text_col ? TEXT_COLS[g_text_col] : inkx(0xE6E8F0); }
+static unsigned text_bodyx(void) { return pal()->text; }
 static COLORREF text_body(void) { unsigned v = text_bodyx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
 static unsigned inkx(unsigned v) { return box_light() ? ((v >> 16 & 255) * 3 / 10) << 16 | ((v >> 8 & 255) * 3 / 10) << 8 | (v & 255) * 3 / 10 : v; }
 /* the wheel over a core: it spins one way or another (Settings > Scroll on a core). A sideways scroll (a tilt wheel, or
@@ -427,7 +494,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, chat_size; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_mono, chat_bg, wheel_spin, text_col; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -439,7 +506,7 @@ static void remember_launch(void) {
     g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom; g_launch.threads = g_threads;
     g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.backdrop = g_backdrop; g_launch.bd_w = g_bd_w; g_launch.bd_a = g_bd_a; g_launch.bd_core = BACKDROP_CORE; g_launch.shade_col = g_shade_col; g_launch.shade_custom = g_shade_custom; g_launch.away = g_away_after; g_launch.chat_middle = g_chat_middle; g_launch.chat_mono = g_chat_mono;
-    g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom;
+    g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom; g_launch.theme = g_theme;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
     snprintf(g_launch.hk[0], 32, "%s", g_mode_hotkey); snprintf(g_launch.hk[1], 32, "%s", g_hk_hide); snprintf(g_launch.hk[2], 32, "%s", g_hk_reply); snprintf(g_launch.hk[3], 32, "%s", g_hk_set);
@@ -452,13 +519,14 @@ static void restore_launch(void) {
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads;
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_others = g_launch.others;
     g_labels = g_launch.labels; g_backdrop = g_launch.backdrop; g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); g_shade_col = g_launch.shade_col; g_shade_custom = g_launch.shade_custom; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
-    g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom;
+    g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom; g_theme = g_launch.theme;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
     snprintf(g_mode_hotkey, 32, "%s", g_launch.hk[0]); snprintf(g_hk_hide, 32, "%s", g_launch.hk[1]); snprintf(g_hk_reply, 32, "%s", g_launch.hk[2]); snprintf(g_hk_set, 32, "%s", g_launch.hk[3]);
     g_move_mod = g_launch.move_mod; g_send_ctrl = g_launch.send_ctrl;
 }
 
+static char *json_str(const char *j, const char *field);
 static int json_num(const char *j, const char *key, float *v) {
     char k[40];
     snprintf(k, sizeof k, "\"%s\"", key);
@@ -517,8 +585,35 @@ static void settings_load(void) {
     if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_chat_bg = (int)v;
     if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_chat_custom = (unsigned)v;
     if (json_num(buf, "textColor", &v) && v >= 0 && v < 6) g_text_col = (int)v;
+    { /* your own themes: 9 colours each, their names joined by | */
+        const char *c = strstr(buf, "\"myThemes\"");
+        g_my_n = 0;
+        if (c && (c = strchr(c, '['))) {
+            unsigned *f = (unsigned *)g_mine;
+            int n = 0;
+            for (c++; n < MY_MAX * 9; n++) { char *e; unsigned long x = strtoul(c, &e, 10); if (e == c) break; f[n] = (unsigned)x & 0xFFFFFF; c = e; while (*c == ',' || *c == ' ') c++; }
+            g_my_n = n / 9;
+        }
+        char *names = json_str(buf, "myThemeNames"), *nm = names;
+        for (int i = 0; i < g_my_n; i++) {
+            char *bar = nm ? strchr(nm, '|') : NULL;
+            if (bar) *bar = 0;
+            if (!nm || !MultiByteToWideChar(CP_UTF8, 0, nm, -1, g_my_name[i], 24)) swprintf(g_my_name[i], 24, L"My theme %d", i + 1);
+            nm = bar ? bar + 1 : NULL;
+        }
+        free(names);
+    }
     if (json_num(buf, "textCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_text_custom = (unsigned)v;
     if (json_num(buf, "wheelSpin", &v) && v >= 0 && v < 5) g_wheel_spin = (int)v;
+    if (!strstr(buf, "\"myThemes\"") && (g_chat_bg || g_text_col) && g_my_n < MY_MAX) { /* Box colour and Text colour, from before themes: your own theme now */
+        ChatPal p = THEMES[TH_VIGIL];
+        p.bg = g_chat_bg == 5 ? g_chat_custom : CHAT_BGS[g_chat_bg];
+        if (g_text_col) p.text = g_text_col == 5 ? g_text_custom : TEXT_COLS[g_text_col];
+        g_mine[g_my_n] = p;
+        wcscpy(g_my_name[g_my_n], L"Vigil (mine)");
+        g_my_n++;
+    }
+    if (json_num(buf, "chatTheme", &v) && v >= 0 && v < TH_N + g_my_n) g_theme = (int)v;
     if (json_num(buf, "away", &v) && v >= 0) g_away_after = v;
     char sh[16], *c = strstr(buf, "\"shape\"");
     if (c && sscanf(c, "\"shape\" : \"%15[a-z0-9]\"", sh) == 1) snprintf(g_shape_name, sizeof g_shape_name, "%s", sh);
@@ -567,6 +662,16 @@ static void settings_save(void) {
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
             g_font, g_core, g_scale, g_glow, g_gravity, g_chat_size, g_others, g_labels, g_chat_middle, g_chat_mono, g_chat_bg, g_chat_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
+    fprintf(f, ", \"chatTheme\": %d, \"myThemes\": [", g_theme);
+    for (int i = 0; i < g_my_n * 9; i++) fprintf(f, "%s%u", i ? ", " : "", ((const unsigned *)g_mine)[i]);
+    fprintf(f, "], \"myThemeNames\": \"");
+    for (int i = 0; i < g_my_n; i++) {
+        char nm[80];
+        WideCharToMultiByte(CP_UTF8, 0, g_my_name[i], -1, nm, sizeof nm, NULL, NULL);
+        for (char *q = nm; *q; q++) if (*q == '"' || *q == '\\' || *q == '|') *q = ' ';
+        fprintf(f, "%s%s", i ? "|" : "", nm);
+    }
+    fprintf(f, "\"");
     fprintf(f, ", \"mapRoutines\": [");
     for (int i = 0; i < ST_N; i++) fprintf(f, "%s%lu", i ? ", " : "", (unsigned long)MOTION_MAP[i].rt);
     fprintf(f, "], \"holeTilt\": %g, \"holeActs\": %lu, \"holeActsN\": %d, \"readyAttacks\": %lu, \"mapActions\": [", HOLE_TILT, (unsigned long)HOLE_ACTS, HA_N, (unsigned long)READY_ATKS);
@@ -2259,7 +2364,17 @@ static int text_w(HDC dc, int f, const wchar_t *t, int n) { return mix_text(dc, 
 static int wide_char(wchar_t c) { return c >= 0x2E80 && !(c >= 0xFF61 && c <= 0xFFDC); } /* CJK and full-width: a line may break before any */
 
 static const COLORREF MD_BODY = RGB(230, 232, 240), MD_BOLD = RGB(255, 255, 255), MD_CODE = RGB(173, 179, 255), MD_BLOCK = RGB(184, 189, 204),
-                      MD_MARK = RGB(150, 156, 172), MD_LINK = RGB(125, 170, 255), MD_QUOTE = RGB(170, 176, 192), MD_RULE = RGB(70, 74, 86);
+                      MD_MARK = RGB(150, 156, 172), MD_LINK = RGB(125, 170, 255), MD_QUOTE = RGB(170, 176, 192), MD_RULE = RGB(70, 74, 86),
+                      MD_OK = RGB(110, 200, 140), MD_RUN = RGB(255, 170, 90), MD_WARN = RGB(255, 184, 119); /* (done step, running step, the notice) */
+/* a run's colour on the box: a role (MD_*) in the theme's colour; anything else (syntax colours) as ink() has it */
+static COLORREF tint(COLORREF c) {
+    if (c == MD_BODY) return text_body();
+    const ChatPal *p = pal();
+    unsigned bg = chat_bgx(), tx = text_bodyx();
+    unsigned v = c == MD_BOLD ? p->bold : c == MD_CODE ? p->code : c == MD_BLOCK ? mixx(tx, p->dim, 25) : c == MD_MARK ? p->dim : c == MD_LINK ? p->link
+           : c == MD_QUOTE ? mixx(tx, p->dim, 50) : c == MD_RULE ? mixx(bg, p->dim, 35) : c == MD_OK ? p->ok : c == MD_RUN ? p->accent : c == MD_WARN ? p->warn : 0xFFFFFFFFu;
+    return v == 0xFFFFFFFFu ? ink(c) : RGB(v >> 16 & 255, v >> 8 & 255, v & 255);
+}
 
 /* one line's words with their inline styles, wrapped at maxw from x (wrapped lines start at hang); y is the
  * top of the line, lh its height, asc its ascent. Returns the top of the last line used; *px where it ended. */
@@ -2324,6 +2439,7 @@ static int lay_inline(HDC dc, const wchar_t *c, const wchar_t *end, int *px, int
 }
 
 /* A code block line with simple syntax colours, as a terminal shows it: comments, strings, numbers, keywords. */
+static int g_code_hl; /* the code block's fence names a language: its lines are coloured (an untagged one is plain, as in the terminal) */
 static int lay_code(HDC dc, const wchar_t *c, const wchar_t *end, int x0, int y, int lh, int asc, int maxw) {
     static const wchar_t *KW[] = {L"if", L"else", L"for", L"while", L"return", L"function", L"const", L"let", L"var", L"def", L"class",
         L"import", L"from", L"export", L"static", L"int", L"void", L"char", L"float", L"double", L"struct", L"enum", L"typedef", L"true",
@@ -2337,7 +2453,7 @@ static int lay_code(HDC dc, const wchar_t *c, const wchar_t *end, int x0, int y,
         const wchar_t *r = q + 1;
         COLORREF col = MD_BLOCK;
         if ((q[0] == L'/' && q + 1 < end && q[1] == L'/') || (q[0] == L'#' && (q == c || q[-1] == L' ')) || (q[0] == L'-' && q + 1 < end && q[1] == L'-' && q == c)) { r = end; col = COM; }
-        else if (*q == L'"' || *q == L'\'' || *q == L'`') { const wchar_t qc = *q; while (r < end && *r != qc) { if (*r == L'\\') r++; r++; } if (r < end) r++; col = STR; }
+        else if ((*q == L'"' || *q == L'\'' || *q == L'`') && (q == c || !iswalnum(q[-1]))) { /* (not the ' of didn't) */ const wchar_t qc = *q; while (r < end && *r != qc) { if (*r == L'\\') r++; r++; } if (r < end) r++; col = STR; }
         else if (iswdigit(*q)) { while (r < end && (iswalnum(*r) || *r == L'.')) r++; col = NUM; }
         else if (iswalpha(*q) || *q == L'_') {
             while (r < end && (iswalnum(*r) || *r == L'_')) r++;
@@ -2345,6 +2461,7 @@ static int lay_code(HDC dc, const wchar_t *c, const wchar_t *end, int x0, int y,
         } else while (r < end && !iswalnum(*r) && !wcschr(L"\"'`#/_ ", *r)) r++;
         if (*q == L' ') { r = q; while (r < end && *r == L' ') r++; x += (int)(r - q) * cw; q = r; continue; }
         if (r > end) r = end;
+        if (!g_code_hl) col = MD_BLOCK;
         int n = (int)(r - q), w = text_w(dc, F_MONO, q, n);
         if (x + w > maxw && x > x0) { y += lh; x = x0 + 2 * cw; } /* a long line goes on, indented a little */
         lay_put(x, y + asc, F_MONO, col, q, n, w, 0);
@@ -2430,9 +2547,11 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 PromptAt *pa = g_pr_n < 8 ? &g_pr[g_pr_n++] : NULL;
                 if (pa) pa->line[0] = 0;
                 y += pad;
+                int lines = 0, more = 0; /* past 3 lines it folds, as the terminal does: "… +N lines" */
                 for (; ln && *ln == 1;) {
                     nl = wcschr(ln, L'\n'); end = nl ? nl : ln + wcslen(ln);
                     while (end > ln && (end[-1] == L'\r' || end[-1] == L' ')) end--;
+                    if (lines++ >= 3) { more++; ln = nl ? nl + 1 : NULL; continue; }
                     if (first) {
                         lay_put(lead, y + asc, F_BODY, MD_MARK, L">", 1, text_w(dc, F_BODY, L">", 1), 0);
                         if (pa) { int n = (int)(end - ln - 1); if (n > 199) n = 199; wcsncpy(pa->line, ln + 1, (size_t)n); pa->line[n] = 0; }
@@ -2441,6 +2560,12 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                     y = lay_inline(dc, ln + 1, end, &x, lead + gw, y, lh, asc, maxw - pad, 0, MD_BODY, 0) + lh;
                     first = 0;
                     ln = nl ? nl + 1 : NULL;
+                }
+                if (more) {
+                    wchar_t mm[40];
+                    int n = swprintf(mm, 40, L"\x2026 +%d line%ls", more, more == 1 ? L"" : L"s");
+                    lay_put(lead + gw, y + asc, F_BODY, MD_MARK, mm, n, text_w(dc, F_BODY, mm, n), 0);
+                    y += lh;
                 }
                 y += pad;
                 g_runs[fi].n = y - top;
@@ -2454,7 +2579,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 if (tab >= end) tab = NULL;
                 te = tab ? tab : end;
                 int x = lead;
-                COLORREF dot = kind == 3 ? RGB(255, 170, 90) : RGB(110, 200, 140);
+                COLORREF dot = kind == 3 ? MD_RUN : MD_OK;
                 int dw = text_w(dc, F_BODY, L"\x25CF ", 2);
                 lay_put(0, y + asc, F_BODY, dot, L"\x25CF", 1, dw, 0);
                 x = dw;
@@ -2491,7 +2616,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
-                y = lay_inline(dc, ln + 1, end, &x, lead, y, lh, asc, maxw, 0, RGB(255, 184, 119), 0) + lh;
+                y = lay_inline(dc, ln + 1, end, &x, lead, y, lh, asc, maxw, 0, MD_WARN, 0) + lh;
                 blank = 0;
             }
             ln = nl ? nl + 1 : NULL;
@@ -2500,7 +2625,17 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
         const wchar_t *c = ln;
         int sp = 0;
         while (c < end && (*c == L' ' || *c == L'\t')) { sp += *c == L'\t' ? 4 : 1; c++; }
-        if (end - c >= 3 && !wcsncmp(c, L"```", 3)) { in_code = !in_code; ln = nl ? nl + 1 : NULL; continue; }
+        if (end - c >= 3 && !wcsncmp(c, L"```", 3)) { /* a fence: coloured only when it names a language that is code */
+            in_code = !in_code;
+            if (in_code) {
+                const wchar_t *lg = c + 3;
+                while (lg < end && *lg == L' ') lg++;
+                int n = (int)(end - lg);
+                g_code_hl = n > 0 && !(n == 4 && !wcsncmp(lg, L"text", 4)) && !(n == 3 && !wcsncmp(lg, L"txt", 3)) && !(n == 5 && !wcsncmp(lg, L"plain", 5))
+                         && !(n == 8 && !wcsncmp(lg, L"markdown", 8)) && !(n == 2 && !wcsncmp(lg, L"md", 2));
+            }
+            ln = nl ? nl + 1 : NULL; continue;
+        }
         if (c == end && !in_code) { if (!blank) y += gap; blank = 1; ln = nl ? nl + 1 : NULL; continue; }
         int x0 = lead + sp / 2 * unit;
         if (g_chat_mono && !marked) { lay_put(0, y + asc, F_BODY, MD_BOLD, L"\x25CF", 1, text_w(dc, F_BODY, L"\x25CF", 1), 0); marked = 1; } /* ●, then a space, as Claude Code writes it */
@@ -2735,15 +2870,15 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
         if (rn->f == SH_RULE || rn->f == SH_BAR || rn->f == SH_VLINE) { /* a rule, a quote's bar, a table's line down */
             RECT sr = rn->f == SH_RULE ? (RECT){x, by, x + rn->w, by + th}
                     : rn->f == SH_VLINE ? (RECT){x, by, x + th, by + rn->n} : (RECT){x, by, x + (int)(3 * g_dpi), by + rn->n};
-            HBRUSH br = CreateSolidBrush(ink(rn->c));
+            HBRUSH br = CreateSolidBrush(tint(rn->c));
             FillRect(dc, &sr, br);
             DeleteObject(br);
             continue;
         }
-        SetTextColor(dc, rn->c == MD_BODY || rn->c == MD_BOLD ? text_body() : ink(rn->c)); /* the text in the chosen colour; code, links and quotes keep theirs */
+        SetTextColor(dc, tint(rn->c)); /* the text in the chosen colour; code, links and quotes in the theme's */
         mix_text(dc, lay_font(rn->f), g_lay_text + rn->at, rn->n, 1, x, by);
         if (rn->deco) { /* a link's underline, a strike through */
-            HBRUSH br = CreateSolidBrush(ink(rn->c));
+            HBRUSH br = CreateSolidBrush(tint(rn->c));
             if (rn->deco & DECO_UNDER) { RECT ur = {x, by + 2 * th, x + rn->w, by + 3 * th}; FillRect(dc, &ur, br); }
             if (rn->deco & DECO_STRIKE) { int sy = by - g_fasc[rn->f] * 3 / 10; RECT sr = {x, sy, x + rn->w, sy + th}; FillRect(dc, &sr, br); }
             DeleteObject(br);
@@ -2766,8 +2901,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkMode(dc, TRANSPARENT);
         int pad = chat_pad();
         RECT t = {chat_bar() + pad, pad, r.right - pad, pad + g_chat_title_h};
-        int ar = GetRValue(g_chat_accent), ag = GetGValue(g_chat_accent), ab = GetBValue(g_chat_accent);
-        SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10))); /* lifted toward white */
+        SetTextColor(dc, g_chat_accent); /* the title in the theme's accent */
         SelectObject(dc, g_chat_tf);
         if (g_chat_title) DrawTextW(dc, g_chat_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         int top = t.bottom + chat_gap(), sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
@@ -2792,12 +2926,12 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             SetTextAlign(dc, TA_TOP | TA_LEFT);
             SelectObject(dc, g_chat_bf);
             int x = view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), y = (gap_rc.top + gap_rc.bottom - g_chat_line) / 2, lit = g_gap_lit;
-            SetTextColor(dc, ink(MD_MARK));
+            SetTextColor(dc, tint(MD_MARK));
             TextOutW(dc, x, y, what, (int)wcslen(what));
             SIZE sz; GetTextExtentPoint32W(dc, what, (int)wcslen(what), &sz);
             x += sz.cx;
             for (int i = 0; i < HIST_PUSH; i++) { /* \x25CF lit in the session's colour, \x25CB still to go */
-                SetTextColor(dc, i < lit ? g_chat_accent : ink(MD_MARK));
+                SetTextColor(dc, i < lit ? g_chat_accent : tint(MD_MARK));
                 TextOutW(dc, x, y, i < lit ? L"\x25CF" : L"\x25CB", 1);
                 GetTextExtentPoint32W(dc, L"\x25CF ", 2, &sz);
                 x += sz.cx;
@@ -2828,7 +2962,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 DrawTextW(dc, line, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
             }
             RECT edge = {view.left, strip.bottom, view.right, strip.bottom + (int)fmax(1, g_dpi)};
-            HBRUSH eb = CreateSolidBrush(ink(MD_RULE));
+            HBRUSH eb = CreateSolidBrush(tint(MD_RULE));
             FillRect(dc, &edge, eb);
             DeleteObject(eb);
             g_pin_rc = strip;
@@ -2838,7 +2972,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (sb) { /* where in the reply the box is */
             int th = g_chat_view_h * g_chat_view_h / g_chat_body_h, ty = top + (g_chat_view_h - th) * g_chat_scroll / (g_chat_body_h - g_chat_view_h);
             RECT track = {r.right - pad - (int)(3 * g_dpi), top, r.right - pad, top + g_chat_view_h}, thumb = {track.left, ty, track.right, ty + th};
-            HBRUSH tb = CreateSolidBrush(RGB(48, 50, 58)), hb = CreateSolidBrush(RGB(140, 145, 160));
+            HBRUSH tb = CreateSolidBrush(tint(MD_RULE)), hb = CreateSolidBrush(tint(MD_MARK));
             FillRect(dc, &track, tb); FillRect(dc, &thumb, hb);
             DeleteObject(tb); DeleteObject(hb);
         }
@@ -2950,6 +3084,15 @@ static void conv_put(char **o, int mark, const char *t, int lines) {
         if (*c) c++;
     }
 }
+/* a prompt that is the harness's own line (a background task's notice and the like: hook.py's HARNESS), kept as a
+ * turn by an older hook: shown as a step of the turn before it, never as your prompt */
+static int harness_p(const char *p) {
+    static const char *H[] = {"<command-", "<local-command", "<system-reminder>", "<bash-", "<task-notification", "Caveat:", "[Request interrupted"};
+    if (!p) return 0;
+    while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+    for (int i = 0; i < 7; i++) if (!strncmp(p, H[i], strlen(H[i]))) return 1;
+    return 0;
+}
 static char *chat_conv(int st) {
     if (!g_mt_n) return NULL;
     size_t cap = 4096 + (g_msg_notice ? strlen(g_msg_notice) * 2 : 0);
@@ -2958,12 +3101,20 @@ static char *chat_conv(int st) {
         cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
     }
     char *out = malloc(cap), *o = out;
-    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until let in */
+    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until let in (with your prompt: back past the harness's) */
+    while (!g_chat_hist && i0 > 0 && harness_p(g_mt[i0].p)) i0--;
     for (int i = i0; i < g_mt_n; i++) {
         MTurn *t = &g_mt[i];
         int live = i == g_mt_n - 1 && !t->r;
-        if (i > i0) conv_put(&o, 5, " ", 1);
-        if (t->p) conv_put(&o, 1, t->p, 1);
+        int wrap = harness_p(t->p);
+        if (i > i0 && !wrap) conv_put(&o, 5, " ", 1);
+        if (wrap) { /* its notice, one step line: the summary if it has one */
+            const char *a = strstr(t->p, "<summary>"), *b = a ? strstr(a, "</summary>") : NULL;
+            char line[120];
+            if (a && b) snprintf(line, sizeof line, "Task\t%.*s", (int)fmin(90, b - a - 9), a + 9);
+            else snprintf(line, sizeof line, "Task\tbackground task");
+            conv_put(&o, 2, line, 1);
+        } else if (t->p) conv_put(&o, 1, t->p, 1);
         if (live) { /* going on: the last steps one by one, the running one last */
             char line[300];
             if (t->n > t->ns) { snprintf(line, sizeof line, "%d earlier step%s", t->n - t->ns, t->n - t->ns == 1 ? "" : "s"); conv_put(&o, 4, line, 1); }
@@ -3014,8 +3165,6 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     static unsigned last_turn;
     unsigned turn_key = (unsigned)g_mt_n * 2654435761u;
     if (g_mt_n && g_mt[g_mt_n - 1].p) for (const char *c = g_mt[g_mt_n - 1].p; *c; c++) turn_key = turn_key * 31 + (unsigned char)*c;
-    Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; /* single core: the session's own colour, else its state colour */
-    COLORREF acc = RGB((int)(fminf(1, c.r) * 255), (int)(fminf(1, c.g) * 255), (int)(fminf(1, c.b) * 255));
     static RECT last_beside;
     static int last_middle = -1, last_input = -1, last_rows;
     int other = strcmp(g_chat_sid, s->sid) != 0, body_new = !g_chat_body || wcscmp(wb, g_chat_body);
@@ -3029,6 +3178,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     last_middle = g_chat_middle;
     free(g_chat_title); free(g_chat_body);
     g_chat_title = wt; g_chat_body = wb;
+    COLORREF acc = tint(MD_RUN); /* the theme's accent: the core shows the state, the box need not */
     if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
     if (!changed) return;
     chat_fonts();
@@ -3635,8 +3785,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SelectObject(dc, op); SelectObject(dc, ob);
         DeleteObject(pen); DeleteObject(bg); DeleteObject(bar); DeleteObject(field);
         SetBkMode(dc, TRANSPARENT);
-        int ar = GetRValue(g_chat_accent), ag = GetGValue(g_chat_accent), ab = GetBValue(g_chat_accent);
-        SetTextColor(dc, ink(RGB(ar + (255 - ar) * 3 / 10, ag + (255 - ag) * 3 / 10, ab + (255 - ab) * 3 / 10)));
+        SetTextColor(dc, g_chat_accent);
         SelectObject(dc, g_input_tf);
         int i = index_of(g_input_sid);
         wchar_t title[120] = L"Reply";
@@ -4412,11 +4561,122 @@ static double g_polled;
 static CRITICAL_SECTION g_evq_cs;
 static Event g_evq[2048];
 static int g_evq_n, g_evq_on;
+/* Follow Claude Code and Terminal, on the reader thread: the CLI's /theme in ~/.claude.json (in WSL, next to the
+ * events folder) and the colour scheme of Windows Terminal's WSL profile, each read again only when its file changes */
+static char *slurp_if_new(const char *path, FILETIME *seen, size_t most) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa) || !CompareFileTime(&fa.ftLastWriteTime, seen)) return NULL;
+    *seen = fa.ftLastWriteTime;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = malloc(most + 1);
+    size_t n = fread(buf, 1, most, f);
+    fclose(f);
+    buf[n] = 0;
+    return buf;
+}
+/* the JSON object round c: its '{' and the '}' that closes it (braces inside strings are not looked for) */
+static int obj_around(const char *buf, const char *c, const char **s0, const char **s1) {
+    int d = 0;
+    for (*s0 = NULL; c > buf; c--) {
+        if (*c == '}') d++;
+        else if (*c == '{' && d-- == 0) { *s0 = c; break; }
+    }
+    if (!*s0) return 0;
+    d = 0;
+    for (c = *s0; *c; c++) {
+        if (*c == '{') d++;
+        else if (*c == '}' && --d == 0) { *s1 = c; return 1; }
+    }
+    return 0;
+}
+/* "key": "#RRGGBB" between s0 and s1 */
+static int hex_in(const char *s0, const char *s1, const char *key, unsigned *v) {
+    char k[40];
+    snprintf(k, sizeof k, "\"%s\"", key);
+    for (const char *c = s0; (c = strstr(c, k)) && c < s1; c++) {
+        const char *q = c + strlen(k);
+        while (*q == ' ' || *q == ':' || *q == '\t') q++;
+        if (q[0] == '"' && q[1] == '#' && sscanf(q + 2, "%6x", v) == 1) return 1;
+    }
+    return 0;
+}
+/* the scheme name of the object s0..s1 ("colorScheme": a name, or {"dark": name, ...}), into out */
+static int scheme_in(const char *s0, const char *s1, char *out, int n) {
+    const char *c = strstr(s0, "\"colorScheme\"");
+    if (!c || c > s1) return 0;
+    c += 13;
+    while (*c == ' ' || *c == ':' || *c == '\t') c++;
+    if (*c == '{') { const char *d = strstr(c, "\"dark\""); if (!d || d > s1) return 0; c = d + 6; while (*c == ' ' || *c == ':') c++; }
+    if (*c != '"') return 0;
+    int i = 0;
+    for (c++; *c && *c != '"' && i < n - 1; c++) out[i++] = *c;
+    out[i] = 0;
+    return i > 0;
+}
+static void theme_poll(void) {
+    static FILETIME cli_seen, wt_seen;
+    char path[1200];
+    snprintf(path, sizeof path, "%s", g_dir);
+    char *cut = strrchr(path, '\\');
+    if (g_dir[0] && cut) { /* the CLI's theme: dark, light, dark-daltonized, light-daltonized, dark-ansi, light-ansi (none: dark) */
+        snprintf(cut, sizeof path - (size_t)(cut - path), "\\.claude.json");
+        char *buf = slurp_if_new(path, &cli_seen, 32u << 20);
+        if (buf) {
+            char *t = json_str(buf, "theme");
+            int th = !t ? TH_DARK : strstr(t, "ansi") ? TH_TERM : !strncmp(t, "light", 5) ? TH_LIGHT : strstr(t, "daltonized") ? TH_CBLIND : TH_DARK;
+            if (InterlockedExchange(&g_cli_theme, th) != th) g_theme_new = 1;
+            free(t); free(buf);
+        }
+    }
+    char la[MAX_PATH]; /* (asked of Windows: a program started from WSL may not have LOCALAPPDATA) */
+    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, la))) { const char *e = getenv("LOCALAPPDATA"); if (!e) return; snprintf(la, sizeof la, "%s", e); }
+    static const char *WT[3] = {"Packages\\Microsoft.WindowsTerminal_8wekyb3d8bbwe\\LocalState", "Packages\\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\\LocalState", "Microsoft\\Windows Terminal"};
+    for (int k = 0; k < 3; k++) {
+        snprintf(path, sizeof path, "%s\\%s\\settings.json", la, WT[k]);
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) continue;
+        char *buf = slurp_if_new(path, &wt_seen, 4u << 20);
+        if (!buf) return; /* (unchanged) */
+        char name[64] = "Campbell";
+        const char *s0, *s1, *c;
+        int found = 0;
+        for (c = buf; !found && (c = strstr(c, "\"source\"")); c++) /* the WSL profile's own scheme */
+            if (!strncmp(strchr(c + 8, '"') ? strchr(c + 8, '"') + 1 : "", "Windows.Terminal.Wsl", 20) && obj_around(buf, c, &s0, &s1)) found = scheme_in(s0, s1, name, sizeof name);
+        for (c = buf; !found && (c = strstr(c, "\"commandline\"")); c++) { /* or a profile that starts wsl.exe and has a scheme of its own */
+            const char *e = strchr(c + 14, '"'), *q = e ? strchr(e + 1, '"') : NULL;
+            if (e && q && (strstr(e, "wsl") && strstr(e, "wsl") < q) && obj_around(buf, c, &s0, &s1)) found = scheme_in(s0, s1, name, sizeof name);
+        }
+        if (!found && (c = strstr(buf, "\"defaults\"")) && (c = strchr(c, '{')) && obj_around(buf, c + 1, &s0, &s1)) scheme_in(s0, s1, name, sizeof name);
+        ChatPal p = CAMPBELL_PAL;
+        char key[80];
+        snprintf(key, sizeof key, "\"name\": \"%s\"", name);
+        if ((c = strstr(buf, key)) && obj_around(buf, c, &s0, &s1)) {
+            unsigned v;
+            if (hex_in(s0, s1, "background", &v)) p.bg = v;
+            if (hex_in(s0, s1, "foreground", &v)) p.text = v;
+            if (hex_in(s0, s1, "brightWhite", &v)) p.bold = v;
+            if (hex_in(s0, s1, "brightBlack", &v)) p.dim = v;
+            if (hex_in(s0, s1, "brightBlue", &v)) p.code = v;
+            if (hex_in(s0, s1, "brightCyan", &v)) p.link = v;
+            if (hex_in(s0, s1, "brightGreen", &v)) p.ok = v;
+            if (hex_in(s0, s1, "brightRed", &v)) p.accent = v; /* (Claude Code's ANSI themes draw Claude in bright red) */
+            if (hex_in(s0, s1, "brightYellow", &v)) p.warn = v;
+        }
+        LONG nx = (g_term_cur + 1) & 1;
+        if (memcmp(&g_term_pal[g_term_cur & 1], &p, sizeof p)) g_theme_new = 1;
+        g_term_pal[nx] = p;
+        InterlockedExchange(&g_term_cur, nx);
+        free(buf);
+        return;
+    }
+}
+
 static DWORD WINAPI reader_main(LPVOID arg) {
     (void)arg;
     static Event got[1024];
-    for (;;) {
+    for (int beat = 0;; beat++) {
         Sleep(250); /* (4 looks a second, as before) */
+        if (g_theme_kick || beat % 20 == 0) { g_theme_kick = 0; theme_poll(); } /* the themes' files: every 5 s, or at once when asked */
         int n = tail_poll(&g_tail, got, 1024), done = 0;
         while (done < n) { /* never drops one: a full queue (the drawing thread held up) waits for room */
             EnterCriticalSection(&g_evq_cs);
@@ -4477,6 +4737,12 @@ static int set_open(void);
 static double tick_interval(void);
 static void tick(void) {
     g_tick_n++;
+    if (g_theme_new) { /* the CLI's theme or the terminal's scheme changed (theme_poll): drawn again */
+        g_theme_new = 0;
+        g_sl_dirty = 1;
+        if (g_chat) InvalidateRect(g_chat, NULL, FALSE);
+        if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); }
+    }
     LARGE_INTEGER q0, q1, qf;
     QueryPerformanceCounter(&q0);
     double now = wall();
@@ -4542,7 +4808,7 @@ static double tick_interval(void) {
  * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
 #include "lucide.h"
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
-       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS };
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG };
 /* Settings > Performance: pictures a second for each kind of moment (0: the monitor's refresh rate), the steps a
  * slider stops at; and how many threads draw */
 #define NRATES 12
@@ -4558,7 +4824,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE };
 enum { PG_LOOK, PG_CLUSTER, PG_REPLIES, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Replies", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -4577,7 +4843,7 @@ static Col hexc(unsigned v) { Col c = {(v >> 16 & 255) / 255.0f, (v >> 8 & 255) 
 static COLORREF hexr(unsigned v) { return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
 
 static Pane g_sl, g_so;             /* the window's still layer (redrawn when something changes) and what is shown */
-static int g_sl_dirty = 1;
+int g_sl_dirty = 1; /* (declared before tick, which sets it too) */
 static HFONT g_sf_title, g_sf_card, g_sf_text, g_sf_label, g_sf_small, g_sf_aa, g_sf_aam, g_sf_cap;
 static SetHit g_hits[400];
 static int g_hits_n, g_hot = -1, g_slide = -1, g_slide_row = -1, g_tracking, g_close_armed; /* armed: pressed on the close button */
@@ -4650,9 +4916,11 @@ static int set_current(int row) {
         case R_AWAY: if (i < 8 && g_away_after == AWAYS[i]) return i; break;
         case R_HOLEGPU: return g_gpu ? 0 : g_hole_light ? 2 : 1;
         case R_CHATSIZE: if (i < 4 && g_chat_size == CHATSIZES[i]) return i; break;
-        case R_CHATBG: return g_chat_bg;
+        case R_CHATBG: return g_theme == TH_VIGIL ? g_chat_bg : -1; /* (a theme's own: none of them) */
         case R_WHEEL: return g_wheel_spin;
-        case R_TEXTCOL: return g_text_col;
+        case R_TEXTCOL: return g_theme == TH_VIGIL ? g_text_col : -1;
+        case R_THEME: return g_theme;
+        case R_ROLE: case R_CSUG: return -1;
         case R_MODE: return !g_single;
         case R_SMOOTH: return g_smooth;
         case R_RIDLE: case R_RTHINK: case R_RBUSY: case R_RREST: case R_RHAND: { Smooth m = *smooth_now(); return rate_stop(*rate_of(&m, row)); }
@@ -4741,6 +5009,40 @@ static int pick_colour(unsigned *target) {
     *target = (unsigned)GetRValue(cc.rgbResult) << 16 | (unsigned)GetGValue(cc.rgbResult) << 8 | GetBValue(cc.rgbResult);
     return 1;
 }
+/* your own copy of the theme in use ("<its name> copy", or "My theme N"), chosen; 0 when there is no room */
+static int theme_copy(void) {
+    if (g_my_n >= MY_MAX) return 0;
+    g_mine[g_my_n] = *pal();
+    wchar_t base[24];
+    if (g_theme >= TH_N) swprintf(base, 24, L"My theme");
+    else swprintf(base, 24, L"%.17ls", theme_name(g_theme == TH_FOLLOW ? (int)g_cli_theme : g_theme));
+    for (int no = 1;; no++) {
+        wchar_t t[24];
+        if (no == 1 && g_theme < TH_N) swprintf(t, 24, L"%ls copy", base); else swprintf(t, 24, L"%ls %d", base, no);
+        int used = 0;
+        for (int i = 0; i < g_my_n; i++) if (!wcscmp(t, g_my_name[i])) used = 1;
+        if (!used) { wcscpy(g_my_name[g_my_n], t); break; }
+    }
+    g_theme = TH_N + g_my_n++;
+    return 1;
+}
+/* the picker's colour into the theme's role, everywhere it shows */
+static void cpick_apply(void) {
+    int k = g_theme - TH_N;
+    if (k < 0 || k >= g_my_n || g_pick_role < 0) return;
+    ((unsigned *)&g_mine[k])[g_pick_role] = hsv_x(g_pk_h, g_pk_s, g_pk_v);
+    if (g_chat) InvalidateRect(g_chat, NULL, FALSE);
+    if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); }
+    g_sl_dirty = 1;
+}
+/* the name being typed: kept (an empty one goes back), or back as it was */
+static void ren_end(int keep) {
+    int k = g_theme - TH_N;
+    if (k >= 0 && k < g_my_n && (!keep || !g_my_name[k][0])) memcpy(g_my_name[k], g_ren_was, sizeof g_ren_was);
+    g_renaming = 0;
+    g_sl_dirty = 1;
+    if (keep) settings_save();
+}
 static void set_choose(int row, int val) {
     int palette = (row == R_CHATBG || row == R_TEXTCOL || row == R_SHADECOL) && val == 5;
     if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && !palette) return; /* (a switch: flipped whatever it is) */
@@ -4761,9 +5063,39 @@ static void set_choose(int row, int val) {
     case R_AWAY: if (val >= 0 && val < 8) g_away_after = AWAYS[val]; break;
     case R_HOLEGPU: g_gpu = val == 0; g_hole_light = val == 2; break;
     case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
-    case R_CHATBG: g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_CHATBG: g_theme = TH_VIGIL; g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
-    case R_TEXTCOL: g_text_col = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_ROLE: { /* the theme card: a colour opened in the picker (a built-in theme copied first), Make a copy, Delete, Rename */
+        if (val == 11 || (val < 9 && g_theme < TH_N)) { if (g_renaming) ren_end(1); if (!theme_copy()) return; theme_kick(); if (val == 11) { g_pick_role = -1; break; } }
+        int k = g_theme - TH_N;
+        if (k < 0 || k >= g_my_n) return;
+        if (val == 10) { /* Rename: typed into the label (set_proc), Done or Enter keeps it */
+            if (g_renaming) ren_end(1); else { g_renaming = 1; memcpy(g_ren_was, g_my_name[k], sizeof g_ren_was); }
+            break;
+        }
+        if (g_renaming) ren_end(1);
+        if (val < 9) { /* the picker opens on that colour (or closes) */
+            g_pick_role = g_pick_role == val ? -1 : val;
+            if (g_pick_role >= 0) x_hsv(((unsigned *)&g_mine[k])[val], &g_pk_h, &g_pk_s, &g_pk_v);
+            break;
+        }
+        for (int i = k; i < g_my_n - 1; i++) { g_mine[i] = g_mine[i + 1]; memcpy(g_my_name[i], g_my_name[i + 1], sizeof g_my_name[i]); } /* Delete */
+        g_my_n--; g_theme = TH_FOLLOW; g_pick_role = -1;
+        if (g_chat) InvalidateRect(g_chat, NULL, FALSE);
+        if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); }
+        break;
+    }
+    case R_CSUG: /* that colour as a built-in theme has it */
+        if (g_pick_role < 0) return;
+        x_hsv(((const unsigned *)pal_of(val))[g_pick_role], &g_pk_h, &g_pk_s, &g_pk_v);
+        cpick_apply();
+        break;
+    case R_THEME:
+        if (g_renaming) ren_end(1);
+        g_pick_role = -1;
+        if (val == TH_N + g_my_n) { if (!theme_copy()) return; val = g_theme; } /* +: a copy of the theme in use to change */
+        g_theme = val; theme_kick(); if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
+    case R_TEXTCOL: g_theme = TH_VIGIL; g_text_col = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_MODE: toggle_mode(); break;
     case R_SMOOTH: g_smooth = val; break;
     case R_RIDLE: case R_RTHINK: case R_RBUSY: case R_RREST: case R_RHAND: /* a rate of its own: the preset becomes Custom, starting from it */
@@ -5049,7 +5381,7 @@ static int hk_caps(const char *spec, wchar_t caps[5][12]) {
 }
 
 /* ---- a page: section cards of rows; two columns when there is room */
-enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS };
+enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS, RK_THEME, RK_ROLES };
 typedef struct { int kind, row, n; const wchar_t *label, *hint; const wchar_t *const *names; const wchar_t *lo, *hi; const char *icon; } SRow;
 typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
 static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAMES[4] = {L"XS", L"S", L"M", L"L"},
@@ -5060,6 +5392,16 @@ static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAM
                      *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *BACKDROP_NAMES[3] = {L"Off", L"On", L"Auto"}, *BDW_NAMES[4] = {L"Thin", L"Medium", L"Thick", L"Heavy"}, *BDA_NAMES[4] = {L"Light", L"Medium", L"Strong", L"Max"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
 static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
                                       L"at least 30 pictures a second; busy states 60", L"every picture at the monitor's refresh rate: the most CPU", L"your own rates: set them below"};
+/* Theme's hint: the theme pointed at (or chosen), and what Follow Claude Code comes to */
+static const wchar_t *theme_hint(void) {
+    static wchar_t h[96];
+    int t = g_theme;
+    for (int i = 0; i <= TH_N + g_my_n; i++) if (is_hot(K_PICK, R_THEME, i)) t = i;
+    if (t == TH_N + g_my_n) swprintf(h, 96, L"a new theme, from the one in use");
+    else if (t == TH_FOLLOW) swprintf(h, 96, L"Follow Claude Code \x00B7 now %ls", THEME_NAMES[g_cli_theme]);
+    else swprintf(h, 96, L"%ls", theme_name(t));
+    return h;
+}
 static int page_sections(int pg, SSec *s) {
     int n = 0;
 #define ROW(sec, ...) (s[sec].r[s[sec].n++] = (SRow){__VA_ARGS__})
@@ -5092,9 +5434,17 @@ static int page_sections(int pg, SSec *s) {
         ROW(0, RK_FONTS, R_CHATFONT, 2, L"Font", NULL, NULL, NULL, NULL, NULL);
         ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
         ROW(1, RK_SLIDER, R_CHATSIZE, 4, L"Box size", L"how far it grows before it scrolls", BOX_SIZES, NULL, NULL, NULL);
-        ROW(1, RK_SWATCH, R_CHATBG, 6, L"Box colour", NULL, CHAT_BG_NAMES, NULL, NULL, NULL);
-        ROW(1, RK_SWATCH, R_TEXTCOL, 6, L"Text colour", NULL, TEXT_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_THEME, R_THEME, TH_N, L"Theme", theme_hint(), THEME_NAMES, NULL, NULL, NULL);
         ROW(1, RK_SEG, R_CHATAT, 2, L"Opens", NULL, OPEN_NAMES, NULL, NULL, NULL);
+        { /* the theme's colours: your own to change; a built-in one changed through a copy */
+            int mine = g_theme >= TH_N;
+            static wchar_t typing[32];
+            s[2].title = mine ? L"YOUR THEME" : L"THEME COLOURS"; n = 3;
+            swprintf(typing, 32, L"%ls|", theme_name(g_theme));
+            ROW(2, RK_ROLES, R_ROLE, 10, g_renaming ? typing : theme_name(g_theme),
+                g_renaming ? L"type its name \x00B7 Enter keeps \x00B7 Esc goes back" : mine ? L"click a colour to change it" : L"built in: a colour you change makes your own copy",
+                ROLE_NAMES, NULL, NULL, NULL);
+        }
         break;
     case PG_KEYS:
         s[0].title = L"ANYWHERE"; s[1].title = L"ON A CORE"; s[2].title = L"IN THE REPLY LINE"; n = 3;
@@ -5143,6 +5493,8 @@ static float ctrl_w(const SRow *r) {
     case RK_SHAPES: return 4 * 50 - 6;
     case RK_FONTS: return 2 * 110 - 6;
     case RK_SWATCH: return 6 * 32 - 6;
+    case RK_THEME: return 0; /* (under the name: its hint gets the whole width) */
+    case RK_ROLES: return 0; /* (under the name: the name and hint get the whole width) */
     case RK_HOTKEY: return 160;
     case RK_CAPS: return tw_of(r->lo, g_sf_label) + 14;
     }
@@ -5155,6 +5507,8 @@ static float row_h(const SRow *r, float colw) {
         if (seg_w(r) + 16 + text > colw - 32) h += 34;
     }
     if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 46;
+    if (r->kind == RK_THEME) h += 38 + (TH_N + g_my_n + (g_my_n < MY_MAX) - 1) / 9 * 32; /* under the name, nine tiles a line */
+    if (r->kind == RK_ROLES) h += 40 + 3 * 30 + (g_pick_role >= 0 && g_theme >= TH_N ? 150 : 0); /* under the name: three lines of colours, Delete and Rename, the picker */
     return h;
 }
 /* keys that cannot be changed (RK_CAPS) are not rows but a list of two columns at the card's foot */
@@ -5258,6 +5612,85 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
             hit(a, cy - 13, a + 26, cy + 13, K_PICK, r->row, i);
         }
         break;
+    case RK_THEME: { /* each theme as a small box: its text over its background, its accent and done colours under it; + makes your own */
+        int count = TH_N + g_my_n + (g_my_n < MY_MAX);
+        cy += 38; /* under the name and its hint */
+        for (int i = 0; i < count; i++) {
+            float a = rx - (9 - i % 9) * 32 + 6, y = cy + i / 9 * 32;
+            int sel = set_current(r->row) == i, hot = is_hot(K_PICK, r->row, i);
+            if (i == TH_N + g_my_n) { /* + */
+                box(pn, a, y - 13, a + 26, y + 13, 7, S_CHIP, hot ? S_EDGE_HOT : S_EDGE, 1);
+                tx(a, y - 13, a + 26, y + 13, L"+", g_sf_label, hot ? S_TEXT : S_MUTED, DT_CENTER);
+            } else {
+                const ChatPal *p = i == TH_FOLLOW && g_theme == TH_FOLLOW ? pal() : pal_of(i == TH_FOLLOW ? (int)g_cli_theme : i);
+                box(pn, a, y - 13, a + 26, y + 13, 7, p->bg, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
+                tx(a, y - 15, a + 26, y + 7, i == TH_FOLLOW ? L">_" : L"Aa", g_sf_small, p->text, DT_CENTER);
+                box(pn, a + 6, y + 6, a + 12, y + 9, 1.5f, p->accent, p->accent, 0);
+                box(pn, a + 14, y + 6, a + 20, y + 9, 1.5f, p->ok, p->ok, 0);
+            }
+            hit(a, y - 13, a + 26, y + 13, K_PICK, r->row, i);
+        }
+        break;
+    }
+    case RK_ROLES: { /* the theme's nine colours, three a line; Delete and Rename (your own) or Make a copy; the picker under them */
+        const unsigned *f = (const unsigned *)pal();
+        int mine = g_theme >= TH_N;
+        float x0 = rx - (3 * 112 - 6);
+        cy += 40; /* under the name and its hint, which get the whole width */
+        for (int i = 0; i < 9; i++) {
+            float a = x0 + i % 3 * 112, y = cy + i / 3 * 30;
+            int hot = is_hot(K_PICK, r->row, i), sel = mine && g_pick_role == i;
+            box(pn, a, y - 11, a + 22, y + 11, 6, f[i], sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
+            tx(a + 30, y - 10, a + 106, y + 10, ROLE_NAMES[i], g_sf_small, hot || sel ? S_TEXT : S_MUTED, DT_LEFT);
+            hit(a, y - 12, a + 106, y + 12, K_PICK, r->row, i);
+        }
+        float y = cy + 3 * 30;
+        for (int k = mine ? 0 : 2; k < (mine ? 2 : 3); k++) { /* Delete theme, Rename; or Make a copy */
+            int v = k == 2 ? 11 : 9 + k, hot = is_hot(K_PICK, r->row, v), on = k == 1 && g_renaming;
+            const wchar_t *t = k == 2 ? (g_my_n < MY_MAX ? L"Make a copy" : L"Full: delete one of yours") : k ? (on ? L"Done" : L"Rename") : L"Delete theme";
+            float a = x0 + (k == 2 ? 0 : k * 112);
+            tx(a, y - 10, a + 200, y + 10, t, g_sf_small, hot || on ? S_TEXT : S_MUTED, DT_LEFT);
+            hit(a, y - 12, a + (k == 2 ? 200 : 106), y + 12, K_PICK, r->row, v);
+        }
+        if (!mine || g_pick_role < 0) break;
+        /* the picker: saturation across and brightness down at the hue, the hue under it; the colour and its hex at the
+         * side, and the same colour as each built-in theme has it, a click away */
+        float py = y + 22, sx0 = x0, sx1 = x0 + 200, sy0 = py, sy1 = py + 104, hy0 = sy1 + 10, hy1 = hy0 + 14;
+        RECT sq = SR(sx0, sy0, sx1, sy1), hs = SR(sx0, hy0, sx1, hy1);
+        for (int k = 0; k < 2; k++) {
+            RECT q = k ? hs : sq;
+            if (g_clipping) { RECT c; if (!IntersectRect(&c, &q, &g_clip)) continue; q = c; }
+            RECT full = k ? hs : sq;
+            for (int Y = max(0, (int)q.top); Y < min(pn->H, (int)q.bottom); Y++)
+                for (int X = max(0, (int)q.left); X < min(pn->W, (int)q.right); X++) {
+                    float u = (X - full.left) / (float)max(1, full.right - full.left - 1), w = (Y - full.top) / (float)max(1, full.bottom - full.top - 1);
+                    pn->px[Y * pn->W + X] = 0xFF000000u | hsv_x(k ? u : g_pk_h, k ? 1 : u, k ? 1 : 1 - w);
+                }
+        }
+        frame(pn, sx0, sy0, sx1, sy1, 0, S_EDGE, 1);
+        frame(pn, sx0, hy0, sx1, hy1, 0, S_EDGE, 1);
+        float mx = sx0 + g_pk_s * (sx1 - sx0), my = sy0 + (1 - g_pk_v) * (sy1 - sy0), hx = sx0 + g_pk_h * (sx1 - sx0);
+        unsigned cur = hsv_x(g_pk_h, g_pk_s, g_pk_v);
+        box(pn, mx - 6, my - 6, mx + 6, my + 6, 6, cur, 0xFFFFFF, 2);
+        box(pn, hx - 3, hy0 - 3, hx + 3, hy1 + 3, 2, hsv_x(g_pk_h, 1, 1), 0xFFFFFF, 1.5f);
+        hit_px(sq, K_CSV, R_ROLE, 0, 0, 0, 0);
+        hit_px(hs, K_CHUE, R_ROLE, 0, 0, 0, 0);
+        float ax = sx1 + 14;
+        box(pn, ax, sy0, ax + 116, sy0 + 34, 7, cur, S_EDGE, 1);
+        wchar_t hex[16];
+        swprintf(hex, 16, L"#%06X  %ls", cur, ROLE_NAMES[g_pick_role]);
+        tx(ax, sy0 + 38, ax + 200, sy0 + 56, hex, g_sf_small, S_TEXT, DT_LEFT);
+        tx(ax, sy0 + 60, ax + 200, sy0 + 76, L"as the themes have it", g_sf_small, S_MUTED, DT_LEFT);
+        for (int i = 0, j = 0; i < TH_N; i++) {
+            if (i == TH_FOLLOW) continue;
+            float a = ax + j % 4 * 30, b = sy0 + 80 + j / 4 * 24;
+            unsigned c = ((const unsigned *)pal_of(i))[g_pick_role];
+            box(pn, a, b, a + 24, b + 18, 5, c, is_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
+            hit(a, b, a + 24, b + 18, K_PICK, R_CSUG, i);
+            j++;
+        }
+        break;
+    }
     case RK_HOTKEY: {
         int i = r->row, rec = g_krec == i;
         if (rec) { /* waiting for the keys */
@@ -5298,7 +5731,8 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     int cols = cw >= 820 ? 2 : 1;
     float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
     int side = 0; /* which column each card goes in (bit k: the right): the split whose taller column is the shortest, in order within each */
-    if (cols == 2) {
+    if (cols == 2 && pg == PG_REPLIES && n == 3) side = 1 << 2; /* TEXT and BOX on the left, the theme's colours on the right */
+    else if (cols == 2) {
         float best = 1e9f;
         for (int m = 0; m < 1 << n; m += 2) { /* (the first card always on the left) */
             float h2[2] = {0, 0};
@@ -5609,12 +6043,24 @@ static void set_build(void) {
         SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
         float th = tm.tmHeight / (float)g_sdpi;
         SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
-        float bh = tm.tmHeight / (float)g_sdpi, sh = fminf(112, 22 + th + 6 + bh * 2), bx1 = cx1 - 14, bx0 = fmaxf(cx0 + 160, bx1 - 300);
+        float bh = tm.tmHeight / (float)g_sdpi, sh = 22 + th + 6 + bh * 3, bx1 = cx1 - 14, bx0 = fmaxf(cx0 + 160, bx1 - 320);
         float t0 = bandT + 12;
-        box(pn, bx0, t0, bx1, t0 + sh, 8, chat_bgx(), 0, 0);
-        box(pn, bx0, t0, bx0 + 3, t0 + sh, 1.5f, S_OR, 0, 0);
-        tx(bx0 + 14, t0 + 10, bx1 - 8, t0 + 10 + th, L"vigil \x00B7 Done", g_chat_tf, inkx(0xFFB877), DT_LEFT | DT_END_ELLIPSIS);
-        tx(bx0 + 14, t0 + 10 + th + 6, bx1 - 8, t0 + sh - 8, L"The satellites slide round the orbit and trail behind.", g_chat_bf, text_bodyx(), DT_WORDBREAK | DT_END_ELLIPSIS);
+        const ChatPal *p = pal();
+        box(pn, bx0, t0, bx1, t0 + sh, 8, p->bg, 0, 0);
+        box(pn, bx0, t0, bx0 + 3, t0 + sh, 1.5f, p->accent, 0, 0);
+        tx(bx0 + 14, t0 + 10, bx1 - 8, t0 + 10 + th, L"vigil \x00B7 Done", g_chat_tf, p->accent, DT_LEFT | DT_END_ELLIPSIS);
+        float y = t0 + 10 + th + 6, x = bx0 + 14; /* a line of each kind: text, a step, code and a link */
+        tx(x, y, bx1 - 8, y + bh, L"The satellites trail behind.", g_chat_bf, p->text, DT_LEFT | DT_END_ELLIPSIS);
+        y += bh;
+        struct { const wchar_t *t; unsigned c; } parts[2][4] = {{{L"\x25CF ", p->ok}, {L"Edit", p->bold}, {L"(panel.c)", p->dim}, {L"", 0}},
+                                                                {{L"Run ", p->text}, {L"make", p->code}, {L" \x00B7 ", p->dim}, {L"docs", p->link}}};
+        for (int l = 0; l < 2; l++, y += bh) {
+            x = bx0 + 14;
+            for (int k = 0; k < 4 && parts[l][k].t[0]; k++) {
+                tx(x, y, bx1 - 8, y + bh, parts[l][k].t, g_chat_bf, parts[l][k].c, DT_LEFT);
+                x += tw_of(parts[l][k].t, g_chat_bf);
+            }
+        }
         ovr_add(bx0, t0, bx1, t0 + sh, 8);
     }
     /* the top bar: the page's name and hint, its reset, close (the bar drags the window) */
@@ -5966,6 +6412,16 @@ static void set_slide_to(int h, int x) {
     set_choose(sh->row, v);
 }
 
+/* the picker held at p: the square sets saturation and brightness, the strip the hue */
+static void cpick_at(POINT p) {
+    for (int i = 0; i < g_hits_n; i++) if (g_hits[i].kind == g_cdrag) {
+        RECT r = g_hits[i].r;
+        float u = clampf((p.x - r.left) / (float)max(1, r.right - r.left - 1), 0, 1), w = clampf((p.y - r.top) / (float)max(1, r.bottom - r.top - 1), 0, 1);
+        if (g_cdrag == K_CHUE) g_pk_h = fminf(u, 0.9999f); else { g_pk_s = u; g_pk_v = 1 - w; }
+        cpick_apply();
+        return;
+    }
+}
 static void krec_stop(void) { g_krec = -1; hotkeys_apply(); g_sl_dirty = 1; }
 static void set_close(void) { if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag = 0; g_slide = -1; g_sizing = 0; if (g_krec >= 0) krec_stop(); }
 
@@ -6015,6 +6471,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (g_slide >= 0) { int h = slide_hit(); if (h >= 0) { g_slide = h; set_slide_to(h, p.x); } return 0; }
+        if (g_cdrag) { cpick_at(p); return 0; }
         if (g_md_row >= 0) { /* a motion tile carried */
             if (!g_md_moved && abs(p.x - g_md_from.x) + abs(p.y - g_md_from.y) > 6) g_md_moved = 1;
             g_md_at = p;
@@ -6044,11 +6501,13 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         int h = set_hit_at(p);
         if (g_krec >= 0 && (h < 0 || g_hits[h].kind != K_KREC)) krec_stop(); /* a click elsewhere: recording stops */
+        if (g_renaming && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE)) ren_end(1); /* and a name being typed is kept */
         if (h >= 0) {
             SetHit *sh = &g_hits[h];
             switch (sh->kind) {
             case K_PICK: set_choose(sh->row, sh->val); break;
             case K_TOGGLE: set_choose(sh->row, 0); break;
+            case K_CSV: case K_CHUE: g_cdrag = sh->kind; SetCapture(w); cpick_at(p); break;
             case K_SLIDE: g_slide = h; g_slide_row = g_hits[h].row; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
             case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
             case K_PAGE: g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
@@ -6101,6 +6560,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int h = set_hit_at(p), close = g_close_armed && h >= 0 && g_hits[h].kind == K_CLOSE;
         if (g_sizing) { g_sizing = 0; settings_save(); g_sl_dirty = 1; settings_tick(wall()); } /* let go: drawn in full at once */
         if (g_pv_drag || g_slide >= 0 || g_close_armed) { g_pv_drag = 0; g_slide = -1; g_close_armed = 0; g_sl_dirty = 1; }
+        if (g_cdrag) { g_cdrag = 0; settings_save(); g_sl_dirty = 1; }
         if (g_pv_turn) { /* let go: thrown, it spins on, as on the desktop */
             Session *pm = &g_pv_room.s[0];
             int thrown = pm->held && wall() - g_pv_turn_t < 0.1;
@@ -6112,7 +6572,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (close) set_close();
         return 0;
     }
-    case WM_CAPTURECHANGED: g_pv_drag = 0; g_pv_turn = 0; g_pv_room.s[0].pressing = g_pv_room.s[0].held = 0; g_close_armed = 0; if (g_md_row >= 0) { g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1; } if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
+    case WM_CAPTURECHANGED: if (g_cdrag) { g_cdrag = 0; settings_save(); } g_pv_drag = 0; g_pv_turn = 0; g_pv_room.s[0].pressing = g_pv_room.s[0].held = 0; g_close_armed = 0; if (g_md_row >= 0) { g_md_row = -1; g_md_moved = 0; g_sl_dirty = 1; } if (g_sizing) { g_sizing = 0; settings_save(); } if (g_slide >= 0) { g_slide = -1; g_sl_dirty = 1; } return 0;
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_NCRBUTTONDOWN: case WM_NCRBUTTONUP: case WM_CONTEXTMENU:
         chat_hide(); return 0; /* a right-click here is the window's own: no menu, nothing for the cores under it */
     case WM_MOUSEWHEEL: { /* over the preview: zoom; over the page: scroll it */
@@ -6131,7 +6591,23 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SYSKEYDOWN: case WM_KEYDOWN:
         if (g_krec >= 0) { krec_key(wp); return 0; }
+        if (g_renaming && msg == WM_KEYDOWN) { /* the theme's name: Enter keeps, Esc goes back, Backspace takes one off (letters come as WM_CHAR) */
+            int k = g_theme - TH_N;
+            size_t n = k >= 0 && k < g_my_n ? wcslen(g_my_name[k]) : 0;
+            if (wp == VK_RETURN) ren_end(1);
+            else if (wp == VK_ESCAPE) ren_end(0);
+            else if (wp == VK_BACK && n) { g_my_name[k][n - 1] = 0; g_sl_dirty = 1; }
+            return 0;
+        }
         if (wp == VK_ESCAPE) { set_close(); return 0; }
+        break;
+    case WM_CHAR:
+        if (g_renaming && wp >= 32 && wp != 127) {
+            int k = g_theme - TH_N;
+            size_t n = k >= 0 && k < g_my_n ? wcslen(g_my_name[k]) : 23;
+            if (n < 23 && wp != '|' && wp != '"' && wp != '\\') { g_my_name[k][n] = (wchar_t)wp; g_my_name[k][n + 1] = 0; g_sl_dirty = 1; }
+            return 0;
+        }
         break;
     case WM_SYSCHAR: if (g_krec >= 0) return 0; break; /* (no beep, no menu, for Alt+key) */
     case WM_CLOSE: set_close(); return 0;
@@ -6930,6 +7406,7 @@ int main(int argc, char **argv) {
             g_open_settings = 1; i++;
         }
         else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
+        else if (!strcmp(a, "--settings-pick") && v) { g_pick_arg = atoi(v); i++; } /* (the theme card's picker open on that colour, 0-8, when the theme is your own: for a screenshot) */
         else if (!strcmp(a, "--settings-scroll") && v) { g_scroll_arg = (float)atof(v); i++; } /* (the page scrolled down that far: to see all of it in a screenshot) */
         else if (!strcmp(a, "--settings-state") && v) { /* the state its preview (and Motions) shows: idle, think, work, wait, cheer, sleep, ... */
             for (int k = 0; k < ST_N; k++) if (!_strnicmp(v, STATE_NAME[k], 4)) g_pv_st = k;
@@ -7016,6 +7493,7 @@ int main(int argc, char **argv) {
     double shot_at = wall() + 2;
     for (;;) {
         tick();
+        if (g_pick_arg >= 0 && g_pick_arg < 9 && g_theme >= TH_N) { g_pick_role = g_pick_arg; x_hsv(((const unsigned *)pal())[g_pick_role], &g_pk_h, &g_pk_s, &g_pk_v); g_pick_arg = -1; g_sl_dirty = 1; }
         if (g_scroll_arg > 0 && wall() > shot_at - 1.5) { g_set_scroll_to = g_scroll_arg; g_scroll_arg = 0; g_sl_dirty = 1; }
         if (g_set_shot[0] && g_shot_act) { /* (a sequence: the action played once the hole has grown) */
             static double play_at; static int k;
