@@ -4809,9 +4809,9 @@ static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHE
 static const wchar_t *MOT_STATE_NAMES[ST_N] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep",
                                               L"Ready", L"Speaking", L"Listening", L"Transcribing", L"Away", L"Error"};
 static const char *MOT_RT_ICON[RT_N] = {"rotateCw", "eye", "puzzle", "blend", "rotateCw", "swords", "cog", "orbit", "dna", "keyboard", "hammer", "grid", "arrows", "minimize",
-                                    "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap", "crosshair"};
-static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw"};
-_Static_assert(RT_N == 28 && W_N == 17, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
+                                    "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap", "crosshair", "swords"};
+static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw", "triangle"};
+_Static_assert(RT_N == 29 && W_N == 18, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
 static int mot_grp(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return i >= 6; return 0; } /* 0 Claude Code's, 1 the panel's */
 static int g_mot_last[2] = {ST_IDLE, ST_READY}; /* the state last shown in each tab */
 static const wchar_t *state_wname(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return L"?"; }
