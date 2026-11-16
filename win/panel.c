@@ -1412,6 +1412,49 @@ static int sat_play(Room *room, int i, Orbit *ob, float tx, float ty, float rx, 
     }
     return 0;
 }
+/* The hole always eats from the star: round a main core asleep as a black hole (hk: how far it is one) a satellite turns
+ * into a star (Session.star, drawn by render.c), unless it is a black hole itself, and the hole draws the thin stream
+ * of gas it loses (main->feed, bh_gas_points). cx, cy: the main core's middle; zpx: how far toward you the satellite's
+ * place on its orbit is; big: the main core's square, all in pixels */
+/* the black hole's disc plane as drawn now: he1, he2 across it (x right, y up, z toward you), he1 where it crosses the screen */
+static void hole_plane(const Session *mh, double now, float *he1, float *he2) {
+    float hax[3] = {0, 1, 0};
+    bh_hole_axis(mh, now, hax);
+    he1[0] = 1; he1[1] = 0; he1[2] = 0;
+    float l = hypotf(hax[1], hax[0]);
+    if (l > 1e-3f) { he1[0] = hax[1] / l; he1[1] = -hax[0] / l; }
+    he2[0] = hax[1] * he1[2] - hax[2] * he1[1]; he2[1] = hax[2] * he1[0] - hax[0] * he1[2]; he2[2] = hax[0] * he1[1] - hax[1] * he1[0];
+}
+/* a satellite's place on its orbit round the black hole, in the disc's plane: k of m, rx the orbit's radius (pixels),
+ * clk the orbits' clock, wide 0..1 (you away: out wide); P3 its direction, *Rk its radius */
+static void hole_orbit(const float *he1, const float *he2, int k, int m, float rx, double clk, float wide, float *P3, float *Rk, float *G3) {
+    *Rk = rx * (0.9f + 0.1f * (k % 3)) * (1 + 0.45f * wide);
+    float wk = 0.5f * powf(rx / *Rk, 1.5f);
+    double ph = clk * wk + 2 * M_PI * k / (m > 0 ? m : 1);
+    float c = (float)cos(ph), sn = (float)sin(ph), sg = BH_TUNE.b2_spin < 0 ? -1.0f : 1.0f;
+    for (int q = 0; q < 3; q++) P3[q] = c * he1[q] + sn * he2[q];
+    /* the way its gas leaves it (the start of bh_gas_points' spiral arm: in, and on round the way the disc turns) */
+    for (int q = 0; q < 3; q++) G3[q] = -0.85f * P3[q] + sg * 2.0f * (-sn * he1[q] + c * he2[q]);
+}
+static void sat_star(Session *main, Session *sat, const Orbit *ob, float cx, float cy, float zpx, const float *G3, float big, float hk, float dt) {
+    float want = is_hole(sat) ? 0 : hk;
+    sat->star += (want - sat->star) * (1 - expf(-dt * 2.5f));
+    if (fabsf(want - sat->star) < 0.005f) sat->star = want;
+    float ux = (ob->px - cx) / big, uy = -(ob->py - cy) / big, ud = hypotf(ux, uy), give = sat->star * fminf(1, fmaxf(0, (1.15f - ud) / 0.25f));
+    { /* its tail: the way its gas leaves it on the screen (on its orbit), else toward the hole; turning smoothly */
+        float tx = -ux, ty = uy, l; /* (y down) */
+        if (G3 && !ob->free && hypotf(G3[0], G3[1]) > 0.2f) { tx = G3[0]; ty = -G3[1]; }
+        l = hypotf(tx, ty);
+        if (l > 1e-4f) {
+            tx /= l; ty /= l;
+            float f = 1 - expf(-dt * 6), nx = sat->star_tx + (tx - sat->star_tx) * f, ny = sat->star_ty + (ty - sat->star_ty) * f, nl = hypotf(nx, ny);
+            if (nl > 1e-3f) { sat->star_tx = nx / nl; sat->star_ty = ny / nl; } else { sat->star_tx = tx; sat->star_ty = ty; }
+        }
+    }
+    if (give < 0.03f || main->nfeed >= MAX_FEED || ob->latched || ob->swallow_at > 0) return; /* (out of its reach, or on the pointer) */
+    float *F = main->feed[main->nfeed++];
+    F[0] = ux; F[1] = uy; F[2] = zpx / big; F[3] = give; F[4] = (float)fmod(sat->phase, 6.2831853);
+}
 static void draw_single(Room *room, int n, double now) {
     int fi = 0;
     for (int i = 0; i < n; i++) if (!strcmp(room->s[i].sid, g_focus)) fi = i;
@@ -1436,12 +1479,9 @@ static void draw_single(Room *room, int n, double now) {
     static float hk_e; static double hclk;
     const Session *mh = fi < n ? &room->s[fi] : NULL;
     hk_e += ((mh && is_hole(mh) ? 1.0f : 0.0f) - hk_e) * (1 - expf(-dt * 1.2f));
-    float hax[3] = {0, 1, 0}, he1[3] = {1, 0, 0}, he2[3] = {0, 0, -1}, wide = mh ? mh->quiet : 0;
+    float he1[3] = {1, 0, 0}, he2[3] = {0, 0, -1}, wide = mh ? mh->quiet : 0;
     if (hk_e > 0.01f) {
-        bh_hole_axis(mh, now, hax);
-        float l = hypotf(hax[1], hax[0]);
-        if (l > 1e-3f) { he1[0] = hax[1] / l; he1[1] = -hax[0] / l; he1[2] = 0; } /* (the line where its disc crosses the screen) */
-        he2[0] = hax[1] * he1[2] - hax[2] * he1[1]; he2[1] = hax[2] * he1[0] - hax[0] * he1[2]; he2[2] = hax[0] * he1[1] - hax[1] * he1[0];
+        hole_plane(mh, now, he1, he2);
         hclk += dt * (1 - 0.7f * wide);
     }
     /* while the main core is carried nothing draws the small ones to their places: only gravity holds them to the
@@ -1450,9 +1490,10 @@ static void draw_single(Room *room, int n, double now) {
     Orbit *ring_of[MAX_SESS];
     int rn = 0;
     for (int i = 0; i < n; i++) if (i != fi && i != dragged) { Orbit *o = orbit_of(room->s[i].sid); if (o->init && !o->free) ring_of[rn++] = o; }
+    for (int i = 0; i < n; i++) { room->s[i].nfeed = 0; if (i == fi) room->s[i].star = 0; }
     for (int i = 0, k = 0; i < n; i++) {
         Orbit *ob = orbit_of(room->s[i].sid);
-        float tx, ty, tw, bob = 0;
+        float tx, ty, tw, bob = 0, zpx = 0, G3[3] = {0, 0, 0};
         double a = 0;
         if (i == fi) { tx = g_mx; ty = g_my; tw = big; }
         else {
@@ -1460,11 +1501,10 @@ static void draw_single(Room *room, int n, double now) {
             bob = (float)(3 * g_dpi * sin(orbit * 0.8 + i * 1.7));
             tx = g_mx + rx * (float)cos(a); ty = g_my - ry * (float)sin(a) + bob; tw = small;
             if (hk_e > 0.01f) { /* round the black hole, in its disc */
-                float Rk = rx * (0.9f + 0.1f * (k % 3)) * (1 + 0.45f * wide), wk = 0.5f * powf(rx / Rk, 1.5f);
-                double ph = hclk * wk + 2 * M_PI * k / (n - 1);
-                float c = (float)cos(ph), sn = (float)sin(ph), P3[3];
-                for (int q = 0; q < 3; q++) P3[q] = c * he1[q] + sn * he2[q];
+                float Rk, P3[3];
+                hole_orbit(he1, he2, k, n - 1, rx, hclk, wide, P3, &Rk, G3);
                 tx += (g_mx + Rk * P3[0] - tx) * hk_e; ty += (g_my - Rk * P3[1] - ty) * hk_e;
+                zpx = Rk * P3[2] * hk_e;
                 g_sat_behind[i] = hk_e > 0.5f && P3[2] < 0;
             } else g_sat_behind[i] = 0;
             k++;
@@ -1500,6 +1540,7 @@ static void draw_single(Room *room, int n, double now) {
             if (fd > 0.02f) { float f = fminf(1, fd * 3); ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx *= 1 - f; ob->vy *= 1 - f; } /* (whipped round: on the spiral, never flung off) */
             else if (d > ok.BREAK) ob->free = 1; /* pulled too far: it lets go, and flies on with the speed it had */
         }
+        if (i != fi && g_others) sat_star(&room->s[fi], &room->s[i], ob, g_mx, g_my, zpx, hk_e > 0.5f ? G3 : NULL, big, hk_e, dt);
         /* its window: the core, room round it for the focus frame, drawn at its exact place (part pixels too) */
         int w4 = ((int)ob->w / 4) * 4;
         Pane *sp = &g_pane[i];
@@ -1600,6 +1641,7 @@ static void draw(double now) {
         draw_single(room, n, now);
     } else {
         pane_hide(&g_cluster);
+        for (int i = 0; i < n; i++) { room->s[i].star = 0; room->s[i].nfeed = 0; } /* (stars only round the main core) */
         draw_all(room, n, now);
     }
     RENDER_PART = 0;
@@ -4402,6 +4444,7 @@ static const char *HOLE_ICON[HA_N] = {"", "unfold", "sparkles", "sunDim", "scanE
 static const char *ATK_ICON[] = {"", "rocket", "hammer", "orbit", "triangle"};
 _Static_assert(sizeof ATK_ICON / sizeof *ATK_ICON == RA_N, "one icon per READY attack (a missing one crashes the Motions page)");
 static int own_rdy(void) { return g_pv_st == ST_READY; } /* row 2 of the Motions page: READY's attacks, else the black hole's actions */
+static int pv_away_hole(void) { return g_pv_st == ST_STANDBY && ((MOTION_MAP[ST_SLEEP].rt >> RT_HOLE) & 1); } /* the preview's Away: a quiet black hole */
 
 static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
@@ -4791,6 +4834,10 @@ static const char *mot_about(int row, int id) { return row == 0 ? ROUTINES[id].a
 static uint32_t mot_set(int row) { return row == 0 ? MOTION_MAP[g_pv_st].rt : row == 1 ? MOTION_MAP[g_pv_st].act : own_rdy() ? READY_ATKS : HOLE_ACTS; }
 static void mot_play(int row, int id) {
     Session *m = &g_pv_room.s[0];
+    if (row != 2 && pv_away_hole()) { /* Away with the main core a quiet black hole: the satellites are the ones in Away */
+        for (int i = 1; i < 4; i++) { if (row == 0) motion_play(&g_pv_room.s[i], id); else whim_play(&g_pv_room.s[i], id, wall()); }
+        return;
+    }
     if (row == 0) motion_play(m, id);
     else if (row == 2 && own_rdy()) ready_play(m, id);
     else if (row == 2) hole_play(m, id); /* (it becomes a black hole first if it is not one) */
@@ -5514,13 +5561,22 @@ static void settings_tick(double now) {
     float dt = (float)fmin(0.1, now - g_pv_last);
     g_pv_last = now;
     int shown[4] = {g_pv_st, ST_WORK, ST_IDLE, ST_THINK};
+    /* Away, as the desktop shows it: the main core asleep as a black hole goes quiet (when Asleep uses the hole), the
+     * awake ones round it are in Away */
+    int away_hole = pv_away_hole();
+    static int was_away_hole;
+    if (away_hole) { shown[0] = ST_SLEEP; shown[1] = shown[2] = shown[3] = ST_STANDBY; }
+    if (away_hole && !was_away_hole && g_pv_room.s[0].mo.rt != RT_HOLE) motion_play(&g_pv_room.s[0], RT_HOLE);
+    was_away_hole = away_hole;
     for (int i = 0; i < 4; i++) {
         Session *s = &g_pv_room.s[i];
         s->state = shown[i] == ST_SLEEP ? ST_IDLE : shown[i];
         s->overlay = shown[i] == ST_IDLE ? 0 : shown[i];
         s->last = now;
         s->aura_a = g_others ? TOUCH.aura : 0;
+        s->quiet_to = 0;
     }
+    if (away_hole && is_hole(&g_pv_room.s[0])) g_pv_room.s[0].quiet_to = 1;
     /* resting on a motion tile: it plays after a moment, once */
     if (g_krec >= 0 || (g_kmsg_until > 0 && now > g_kmsg_until)) { if (now > g_kmsg_until) g_kmsg_until = 0; g_sl_dirty = 1; }
     if (fabsf(g_set_scroll_to - g_set_scroll) > 0.3f) { /* the page glides to where the wheel sent it (quick, no overshoot) */
@@ -5590,14 +5646,29 @@ static void settings_tick(double now) {
     Orbit *ring[3];
     int rn = 0;
     for (int i = 1; i < 4; i++) if (g_pv_ob[i].init && !g_pv_ob[i].free) ring[rn++] = &g_pv_ob[i];
+    /* the main core asleep as a black hole: the satellites orbit it in its disc's plane, as on the desktop (draw_single) */
+    static float hkp; static double pclk;
+    float pe1[3] = {1, 0, 0}, pe2[3] = {0, 0, -1}, pz[4] = {0}, pg[4][3] = {{0}};
+    hkp += ((is_hole(m) ? 1.0f : 0.0f) - hkp) * (1 - expf(-dt * 1.2f));
+    if (hkp > 0.01f) { hole_plane(m, now, pe1, pe2); pclk += dt * (1 - 0.7f * m->quiet); }
     for (int i = 1; i < 4; i++) {
         Orbit *ob = &g_pv_ob[i];
         double a = M_PI / 2 + 2 * M_PI * (i - 1) / 3 + g_pv_orbit * 0.10;
         float bob = (float)(3 * g_dpi * sin(g_pv_orbit * 0.8 + i * 1.7));
         float tx = g_pv_mx + rx * (float)cos(a), ty = g_pv_my - ry * (float)sin(a) + bob;
+        if (hkp > 0.01f) {
+            float Rk, P3[3];
+            hole_orbit(pe1, pe2, i - 1, 3, rx, pclk, m->quiet, P3, &Rk, pg[i]);
+            tx += (g_pv_mx + Rk * P3[0] - tx) * hkp; ty += (g_pv_my - Rk * P3[1] - ty) * hkp;
+            pz[i] = Rk * P3[2] * hkp;
+        }
         if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = small; ob->init = 1; ob->free = 0; }
         ob->w += (small - ob->w) * (1 - expf(-dt * 7));
-        if (ob->free) { /* loose: it bounces round the preview until the core comes close or it has lain still a while */
+        if (!ob->free && hkp > 0.5f) { /* round a black hole: drawn to its place on its orbit (critically damped) */
+            const float W = 5;
+            ob->vx += (W * W * (tx - ob->px) - 2 * W * ob->vx) * dt; ob->vy += (W * W * (ty - ob->py) - 2 * W * ob->vy) * dt;
+            ob->px += ob->vx * dt; ob->py += ob->vy * dt;
+        } else if (ob->free) { /* loose: it bounces round the preview until the core comes close or it has lain still a while */
             fly_step(ob, dt);
             float hs = ob->w / 2;
             if (ob->px < hs) { ob->px = hs; ob->vx = fabsf(ob->vx) * BOUNCE; }
@@ -5611,18 +5682,24 @@ static void settings_tick(double now) {
             else if (d > ok.BREAK) ob->free = 1, ob->rest = 0;
         }
     }
+    /* round the black hole the satellites are stars, each losing gas to it (sat_star) */
+    m->nfeed = 0; m->star = 0;
+    for (int i = 1; i < 4; i++) if (g_others) sat_star(m, &g_pv_room.s[i], &g_pv_ob[i], g_pv_mx, g_pv_my, pz[i], hkp > 0.5f ? pg[i] : NULL, big, hkp, dt); else g_pv_room.s[i].star = 0;
     /* the cluster's picture: the band's colour, the small cores, the main one and its frame on top */
     pane_size(&g_pv, pw, ph);
     uint32_t bg = 0xff000000u | (g_pv_light ? PV_LIGHT : S_BAND);
     for (size_t j = 0; j < (size_t)pw * ph; j++) g_pv.px[j] = bg;
     g_blit_add = !g_pv_light; /* (on the light background the pictures are laid over it, as Windows does on the desktop) */
-    for (int i = 1; i < 4 && g_others; i++) {
+    for (int i = 1; i < 4 && g_others; i++) { /* (their pictures; laid in behind the main core, or in front of it) */
         int w4 = ((int)g_pv_ob[i].w / 4) * 4;
         if (w4 < 8) continue;
         if (pics_now) pic_make(&g_pv_pic[i], &g_pv_room.s[i], w4, now, 1);
-        else if (g_pv_pic[i].img) w4 = g_pv_pic[i].px; else continue; /* (the last picture, at its size) */
-        blit_pic_at(&g_pv, g_pv_ob[i].px - w4 / 2.0f, g_pv_ob[i].py - w4 / 2.0f, &g_pv_pic[i]);
     }
+#define PV_SATS(FRONT) for (int i = 1; i < 4 && g_others; i++) { \
+        if ((pz[i] > 0.5f) != (FRONT) || !g_pv_pic[i].img || ((int)g_pv_ob[i].w / 4) * 4 < 8) continue; \
+        int w4_ = g_pv_pic[i].px; \
+        blit_pic_at(&g_pv, g_pv_ob[i].px - w4_ / 2.0f, g_pv_ob[i].py - w4_ / 2.0f, &g_pv_pic[i]); }
+    PV_SATS(0)
     int w4 = ((int)big / 4) * 4;
     m->pad = hole_pad(m);
     if (m->pad > 1) w4 = ((int)(w4 * m->pad) / 4) * 4; /* a black hole: room round it (the core the same size) */
@@ -5630,6 +5707,8 @@ static void settings_tick(double now) {
     else w4 = g_pv_pic[0].px;
     float fx = g_pv_mx - w4 / 2.0f, fy = g_pv_my - w4 / 2.0f;
     blit_pic_at(&g_pv, fx, fy, &g_pv_pic[0]);
+    PV_SATS(1)
+#undef PV_SATS
     if (m->mo.loose_on) { /* READY: its pieces and sparks anywhere on the preview, as the layer does on the desktop */
         static Canvas cv;
         static uint8_t *rgba;

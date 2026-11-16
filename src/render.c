@@ -1840,6 +1840,41 @@ int bh_gas_points(const Session *s, double now, float (*P)[4], float (*Q)[2], in
             GAS_VIEW(q3, life * (0.8f + 1.2f * hot), 1 - 0.6f * hot, 0.35f);
         }
     }
+    if (s->nfeed > 0) { /* the stars round it (satellites, Session.feed): each loses a thin stream of gas that curls ahead the
+                         * way the disc turns, sinks to its plane and joins its outer edge, heating from a star's white to orange;
+                         * clumps run down it */
+        brk = 1;
+        float ws = s->w_scale > 0 ? s->w_scale : 1, mpc = 1 / fmaxf(1e-4f, bh_kpx(&s->mo, SHELL_FRAC * ws * (s->mo.scale > 0 ? s->mo.scale : 1))); /* M a core square */
+        float sg = BH_TUNE.b2_spin < 0 ? -1.0f : 1.0f, gq = hb * (1 - 0.6f * s->quiet);
+        enum { FN = 9 };
+        for (int f = 0; f < s->nfeed && f < MAX_FEED && n + FN <= max; f++) {
+            const float *F = s->feed[f];
+            if (F[3] < 0.02f) continue;
+            /* where it starts: a point whose light (its direct image, bent by the hole) lands on the star as the
+             * satellite's window shows it; the bending is radial, so a few radial corrections find it */
+            float S3[3] = {F[0] * mpc, F[1] * mpc, F[2] * mpc}, tr = hypotf(S3[0], S3[1]), dx = 0, dy = 0, dz = 0;
+            for (int it = 0; it < 4 && tr > 1e-3f; it++) {
+                float ix, iy;
+                if (!bh_image(S3, 0, &ix, &iy)) break;
+                float ir = hypotf(ix, iy);
+                if (ir < 1e-3f) break;
+                S3[0] *= tr / ir; S3[1] *= tr / ir;
+            }
+            for (int q = 0; q < 3; q++) { dx += S3[q] * ea[q]; dy += S3[q] * ec[q]; dz += S3[q] * nn[q]; }
+            /* a spiral arm: from the star round to the disc's inner part, closing in evenly (a log spiral), so it reads
+             * as a curl at any tilt, not a short bar */
+            float r0 = hypotf(dx, dy), a0 = atan2f(dy, dx), r1 = 6.8f, lr = logf(r1 / fmaxf(r0, r1 + 0.1f));
+            float room = clamp01((r0 - r1 - 0.5f) / 3); /* (close in: little left to fall, it fades rather than going out) */
+            if (room < 0.01f) continue;
+            for (int i = 0; i < FN; i++) {
+                float u = (i + 0.35f) / (FN - 0.65f), e = u * u * (3 - 2 * u), r = r0 * expf(lr * u), a = a0 + sg * 2.0f * u, h = dz * (1 - e);
+                float d[3] = {r * cosf(a), r * sinf(a), h};
+                float clump = 0.7f + 0.3f * sinf(u * 11 - (float)now * 2.6f + F[4]), in = clamp01(u / 0.25f);
+                GAS_DISC(d, F[3] * room * gq * in * clump * (0.9f + 0.9f * u), 0.12f + 0.45f * u, 0.45f - 0.12f * u);
+            }
+            brk = 1;
+        }
+    }
 #undef GAS_DISC
 #undef GAS_VIEW
     return n;
@@ -1922,6 +1957,29 @@ static const float (*icosa(void))[3] { /* the 12 corners of an icosahedron on th
     return (const float (*)[3])v;
 }
 
+/* a satellite round a black hole is a star being torn: a comet of gas, a white-hot head in its colour and a tail
+ * flowing off it the way its gas leaves (Session.star_tx, star_ty), breathing with its state; the hole carries the
+ * stream on into its disc (bh_gas_points: feed). All of it inside its picture (cut at the edge, it showed as a square) */
+static void draw_star(Canvas *c, Clip cl, const Session *s, const Look *L, float ox, float oy, float m, float room, double t, float lift) {
+    float st = s->star;
+    float tw = 0.9f + 0.06f * sinf((float)t * 2.3f) + 0.04f * sinf((float)t * 5.7f + 1.3f), br = 1 + L->depth * sinf((float)t * L->hz * 6.2831853f);
+    float a = st * tw * br * lift, r = m * 0.1f * (0.5f + 0.5f * st), rim = room - 1.5f;
+    float dx = s->star_tx, dy = s->star_ty, dl = hypotf(dx, dy);
+    if (dl < 1e-3f) { dx = 1; dy = 0; } else { dx /= dl; dy /= dl; }
+    Col hot = mix(L->halo, WHITE, 0.45f);
+    blob(c, cl, ox, oy, fminf(r * 3.4f, rim), L->halo, 0.22f * a, L->halo, 0.06f * a, 0.2f); /* the coma */
+    float len = fmaxf(0, rim - r * 2.2f) * st; /* the tail: gas thinning and spreading as it goes, clumps running down it */
+    for (int i = 1; i <= 14; i++) {
+        float u = i / 14.0f, w = r * (0.8f + 1.3f * u), d = len * u;
+        if (d + w > rim) w = rim - d;
+        if (w < 0.5f) break;
+        float fl = 0.75f + 0.25f * sinf(u * 10 - (float)t * 4.5f), al = a * 0.2f * (1 - u) * (1 - u) * fl;
+        Col cc = mix(hot, L->halo, u);
+        blob(c, cl, ox + dx * d, oy + dy * d, w, cc, al, L->halo, al * 0.35f, 0.35f);
+    }
+    blob(c, cl, ox - dx * r * 0.2f, oy - dy * r * 0.2f, r * 1.25f, WHITE, fminf(1.2f, a), hot, 0.7f * a, 0.45f); /* the head */
+}
+
 static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, double now, float glow, float core_frac, int label) {
     double t = now - s->created + s->phase; /* small numbers keep sin() precise */
     Look lit_look = s->cur; /* pointed at: a brighter shell */
@@ -1960,6 +2018,8 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     if (!label || th - label_h < 12) label_h = 0;
     float m = fminf((float)tw, (float)(th - label_h)), room = m * 0.5f - 1; /* room: from the middle to the picture's edge */
     if (s->pad > 1) m /= s->pad;
+    float sk = 1 - fminf(1, fmaxf(0, s->star)); /* turning into a star: the shell draws in and fades */
+    ws *= 0.2f + 0.8f * sk;
     float unit = m * SHELL_FRAC / CIRCUM * ws, k = m / 600.0f;
     /* READY as the Core Bestiary draws it: there the stage zooms out to 30% for READY while line widths, node dots and
      * sparks stay the stage's size (k = side / 520), so against the core they are 4.6 times what the other states use
@@ -1967,6 +2027,11 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     int ready_look = session_shown(s, now) == ST_READY;
     if (ready_look) k *= SHELL_FRAC * 600.0f / 47.0f;
     float ox = cl.x0 + tw * 0.5f + s->w_off_x * CIRCUM * unit + c->sx, oy = cl.y0 + (th - label_h) * 0.5f + s->w_off_y * CIRCUM * unit + c->sy;
+    if (sk < 0.99f && g_part != 2) {
+        if (c->ry1 > c->ry0) { if (cl.y0 < c->ry0) cl.y0 = c->ry0; if (cl.y1 > c->ry1) cl.y1 = c->ry1; } /* (a band of rows) */
+        draw_star(c, cl, s, L, ox, oy, m, room, t,glow * (1 + HOVER.bright * s->hover) * (1 + flash) * (1 + 0.8f * s->glow_boost));
+        if (sk < 0.01f) return; /* a star through and through: no shell */
+    }
 
     /* the core */
     float gl = fminf(1, L->glitch + s->shake * s->shake * CARRY.shake_glitch + (motion_crazy(s, now) ? 0.9f : 0));
@@ -1975,7 +2040,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     float burst = (float)(1 - (now - s->burst_at) / 1.4);
     if (burst < 0) burst = 0;
     float voice = (1 - L->lc) + L->lc * (0.35f + 1.3f * s->level); /* speaking: brightness follows the voice */
-    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice * (1 + CARRY.lift * s->carry) * wb * mb * (1 - 0.85f * s->mo.hole) + burst * 0.8f;
+    float inten = L->core * breathe * flick * glow * (1 + HOVER.bright * s->hover) * (1 + flash) * voice * (1 + CARRY.lift * s->carry) * wb * mb * (1 - 0.85f * s->mo.hole) * sk + burst * 0.8f;
     float rc = core_frac * INRADIUS * unit;
     float gx = ox + (s->look_x * HOVER.gaze + s->jig_x) * CIRCUM * unit, gy = oy + (s->look_y * HOVER.gaze + s->jig_y) * CIRCUM * unit; /* the core looks at the cursor, and sloshes when carried */
     /* small cores (satellites, under ~150 px as shown): their many edges crowd into a few pixels and pile up into a
@@ -1986,7 +2051,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     Aura au;
     { /* to just inside the picture's edge, so nothing is cut off there either */
         float half = fminf((float)tw, (float)(th - label_h)) * 0.5f - 1, R = CIRCUM * unit * (s->mo.scale > 0 ? s->mo.scale : 1);
-        aura_make(&au, ox, oy, R, fminf(R * 1.36f, half), L->eh, 0.07f * L->edge * strobe * crowd * glow);
+        aura_make(&au, ox, oy, R, fminf(R * 1.36f, half), L->eh, 0.07f * L->edge * strobe * crowd * glow * sk);
     }
     if (g_part == 2) cl = (Clip){0, 0, c->w, c->h}; /* the layer: the core's place from the clip, its pieces anywhere */
     if (c->ry1 > c->ry0) { if (cl.y0 < c->ry0) cl.y0 = c->ry0; if (cl.y1 > c->ry1) cl.y1 = c->ry1; } /* a band of rows: every primitive keeps to cl */
@@ -2039,7 +2104,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
     }
     int any = 0;
     for (int t = 0; t < sh->nt && !any; t++) any = moved(mo, t);
-    float edge = L->edge * strobe * crowd, thin = 0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
+    float edge = L->edge * strobe * crowd * sk, thin =0.9f * (sh->df > 0.6f ? sh->df : 0.6f) * thick;
     float Rpx = CIRCUM * P.unit, ks = Rpx / (ready_look ? 47.0f : 156.0f); /* the mock's pixel sizes, for a shell of this size (READY: see above) */
     float bd = s->backdrop > 0.01f ? 0.75f * s->backdrop * BACKDROP_A : 0, br = fmaxf(1.6f, 0.055f * Rpx) * BACKDROP_W; /* the backdrop's band along the lines (shade_seg): how dark, how far it reaches */
     if (bd > 0 && BACKDROP_CORE && g_part != 2) { float cc[3] = {ox, oy, CIRCUM}; shade_seg(c, cl, cc, cc, 0.55f * Rpx, 0.7f * bd); } /* and behind the bright centre, a small soft disc */

@@ -185,6 +185,7 @@ const unsigned char *gpu_hole(const Session *s, int n, float E, double now, int 
     pglUniform2f(U_("u_mouse"), 0.5f, my); /* (their turn: 0.5 is none, so the gas and the hand agree on left and right) */
     { float rho = atan2f(ax[0], ax[1]); /* its roll (the wheel only turns its gas, never mirrors it) */
       pglUniform1f(U_("u_roll_c"), cosf(rho)); pglUniform1f(U_("u_roll_s"), sinf(rho)); pglUniform1f(U_("u_flip"), 1); }
+    pglUniform3f(U_("u_sky"), ax[0], ax[1], ax[2]); /* (its axis on the screen: the stars stay put, drawn out the way it is turned) */
     pglUniform1i(U_("u_noiseTex"), 1); pglUniform1i(U_("u_blueNoiseTex"), 2);
     { float echo = act == HA_FLARE ? flare * expf(-(at - BH_FLARE_SNAP - 0.5f) * (at - BH_FLARE_SNAP - 0.5f) / 0.18f) : 0; /* (the flare's light, lensed round, lights the photon ring a moment later) */
       pglUniform1f(U_("u_ring_gain"), T->ring_a * (1 + 3 * echo)); } pglUniform1f(U_("u_star_gain"), !mini && (HOLE_ACTS >> HA_LENS & 1) ? T->star_a : 0); pglUniform1f(U_("u_star_r"), 0.95f);
