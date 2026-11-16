@@ -2088,6 +2088,8 @@ static wchar_t *g_chat_title, *g_chat_body;
 static COLORREF g_chat_accent;
 static HFONT g_chat_tf, g_chat_bf, g_chat_mf; /* title, body, monospaced */
 static int g_chat_title_h, g_chat_body_h, g_chat_view_h, g_chat_line, g_chat_scroll;
+static int g_chat_hist;              /* the earlier turns are shown: off each time the box opens, on by scrolling on past its top */
+static int g_hist_land;              /* they were just let in: the view stays on the latest turn's prompt */
 static int g_chat_auto = 1;          /* the box follows the conversation: the newest turn from its prompt, or its end while it runs */
 static int g_pin = -1, g_pin_hot;    /* the prompt pinned at the top while its turn is scrolled through; the pointer on it shows it whole */
 static RECT g_pin_rc;
@@ -2412,7 +2414,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
-        if (*ln >= 1 && *ln <= 6) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
+        if (*ln >= 1 && *ln <= 7) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
             int kind = *ln, pad = lh / 4;
             in_code = 0;
             if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
@@ -2481,6 +2483,10 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 while (n > 0 && x + text_w(dc, F_BODY, ln + 1, n) > maxw) n--;
                 lay_put(x, y + asc, F_BODY, MD_MARK, ln + 1, n, text_w(dc, F_BODY, ln + 1, n), 0);
                 y += lh; blank = 0; marked = 0;
+            } else if (kind == 7) { /* how many earlier turns are left out, centred at the top */
+                int n = (int)(end - ln - 1), w = text_w(dc, F_BODY, ln + 1, n);
+                lay_put(w < maxw ? (maxw - w) / 2 : 0, y + asc, F_BODY, MD_MARK, ln + 1, n, w, 0);
+                y += lh + gap / 2; blank = 1;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
@@ -2667,6 +2673,7 @@ static void chat_hide(void) {
     if (input_open()) return; /* a reply being typed keeps its box */
     if (g_chat && IsWindowVisible(g_chat)) ShowWindow(g_chat, SW_HIDE);
     g_chat_sid[0] = 0;
+    g_chat_hist = 0; /* opened again: the latest turn only */
     void chat_forget_side(void);
     chat_forget_side(); /* shown again: the side is chosen afresh */
 }
@@ -2683,9 +2690,19 @@ static void chat_refont(void) {
     chat_hide();
 }
 
-/* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch */
+/* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; at the top,
+ * going on up for 3 notches (no pause over 0.6 s) lets the earlier turns in above the latest */
 static void chat_scroll(float notches) {
-    if (!g_chat || !IsWindowVisible(g_chat) || g_chat_body_h <= g_chat_view_h) return;
+    if (!g_chat || !IsWindowVisible(g_chat)) return;
+    if (notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0) {
+        static double last; static float push;
+        double now = wall();
+        if (now - last > 0.6) push = 0;
+        last = now; push += notches;
+        if (push >= 3) { push = 0; g_chat_hist = g_hist_land = 1; g_chat_auto = 0; }
+        return;
+    }
+    if (g_chat_body_h <= g_chat_view_h) return;
     int to = g_chat_scroll - (int)(notches * 3 * g_chat_line);
     if (to < 0) to = 0;
     if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
@@ -2893,7 +2910,7 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
-        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 6) *(*o)++ = *c;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 7) *(*o)++ = *c;
         *(*o)++ = '\n';
         if (*c) c++;
     }
@@ -2906,10 +2923,16 @@ static char *chat_conv(int st) {
         cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
     }
     char *out = malloc(cap), *o = out;
-    for (int i = 0; i < g_mt_n; i++) {
+    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until scrolled on past the top */
+    if (i0) {
+        char line[80];
+        snprintf(line, sizeof line, "\xE2\x96\xB2 %d earlier turn%s", i0, i0 == 1 ? "" : "s");
+        conv_put(&o, 7, line, 1);
+    }
+    for (int i = i0; i < g_mt_n; i++) {
         MTurn *t = &g_mt[i];
         int live = i == g_mt_n - 1 && !t->r;
-        if (i) conv_put(&o, 5, " ", 1);
+        if (i > i0) conv_put(&o, 5, " ", 1);
         if (t->p) conv_put(&o, 1, t->p, 1);
         if (live) { /* going on: the last steps one by one, the running one last */
             char line[300];
@@ -2939,6 +2962,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_pend && !strcmp(g_pend_sid, s->sid)) strncat(title, " \xC2\xB7 your reply waits for your answer in the terminal", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
+    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) g_chat_hist = 0; /* opened, or another session's: its latest turn only */
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -2995,6 +3019,11 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (g_chat_auto && g_pr_n) { /* following: the newest prompt at the top, or the end while the turn runs */
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
         g_chat_scroll = live || g_pr[g_pr_n - 1].y0 > mx ? mx : g_pr[g_pr_n - 1].y0;
+    }
+    if (g_hist_land && g_pr_n) { /* the earlier turns just came in above: a little of the one before shows over the latest prompt */
+        int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_pr[g_pr_n - 1].y0 - 3 * g_chat_line;
+        g_chat_scroll = y < 0 ? 0 : y > mx ? mx : y;
+        g_hist_land = 0;
     }
     int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
     int w = (t.right > b.right ? t.right : b.right), h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad;
