@@ -1167,6 +1167,57 @@ float bh_hole_E(const Session *s, int px) {
     float R = m * SHELL_FRAC * ws * (s->mo.scale > 0 ? s->mo.scale : 1);
     return px * 0.5f / fmaxf(1e-3f, bh_kpx(&s->mo, R));
 }
+/* the void, its dust disc, nebula light and a few stars, drawn over the collapsed shell */
+static void draw_hole_classic(Canvas *c, Clip cl, const Motion *mo, float ox, float oy, float R, float ks, double t) {
+    /* rh0: the void as it opens; once the shell is swallowed (grow) the whole picture grows with it, the same tilt
+     * and proportions, until the void's edge (1.3 rh) is 0.85 of the shell. Only the dust disc's faint outer tail is
+     * drawn in, so it ends before the tile's edge (a full-size disc would be cut off square) */
+    float hb = mo->hole, g0 = clamp01(mo->rs.hole.grow), gr = g0 * g0 * (3 - 2 * g0), rh0 = R * 0.3f * (1 + 0.25f * hb), rh = rh0 + (R * 0.85f / 1.3f - rh0) * gr;
+    float tilt = 0.36f, rotA = -0.42f, ca = cosf(rotA), sa = sinf(rotA);
+    float dmax = R * 1.3f / rh, knee = 1.6f; /* the dust's reach, in rh: 3.2 as it opens; beyond the knee squeezed to fit */
+    float neb = fminf(rh, R * 0.5f);         /* the nebula light grows too, but stays inside the tile */
+    const Col VIOLET = {0.56f, 0.32f, 1}, MAGENTA = {1, 0.3f, 0.82f}, PALE = {0.86f, 0.8f, 1}, DEEP = {0.28f, 0.16f, 0.7f};
+    for (int i = 0; i < 3; i++) { /* nebula light, slowly drifting round */
+        float a = (float)t * 0.05f + i * 2.1f;
+        Col col = i == 1 ? MAGENTA : i == 2 ? DEEP : VIOLET;
+        blob(c, cl, ox + cosf(a) * neb * 0.8f, oy + sinf(a) * neb * 0.6f, neb * (1.9f + 0.3f * i), col, 0.13f * hb, col, 0.12f * hb, 0.02f); /* (kept inside the tile) */
+    }
+    for (int front = 0; front < 2; front++) {
+        if (front) { /* the void (light taken away: see-through on the desktop), then its violet haze */
+            float vr = rh * 1.3f;
+            int bx0 = (int)fmaxf(cl.x0, floorf(ox - rh * 1.6f)), bx1 = (int)fminf(cl.x1, ceilf(ox + rh * 1.6f) + 1);
+            int by0 = (int)fmaxf(cl.y0, floorf(oy - rh * 1.6f)), by1 = (int)fminf(cl.y1, ceilf(oy + rh * 1.6f) + 1);
+            for (int y = by0; y < by1; y++) for (int x = bx0; x < bx1; x++) {
+                float dx = x + 0.5f - ox, dy = y + 0.5f - oy, r = sqrtf(dx * dx + dy * dy), u = r / vr;
+                float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
+                if (u < 1) {
+                    float a = u < 0.62f ? hb : u < 0.85f ? hb * (1 - 0.4f * (u - 0.62f) / 0.23f) : 0.6f * hb * (1 - (u - 0.85f) / 0.15f);
+                    p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a;
+                }
+                float hu = (r - rh * 0.8f) / (rh * 0.8f); /* 0 at 0.8 rh, 1 at 1.6 rh */
+                if (hu > 0 && hu < 1) { float ha = 0.14f * hb * (hu < 0.35f ? hu / 0.35f : (1 - hu) / 0.65f); p[0] += VIOLET.r * ha; p[1] += VIOLET.g * ha; p[2] += VIOLET.b * ha; }
+            }
+        }
+        for (int i = 0; i < NDUST; i++) { /* the far side of the disc behind the void, the near side in front */
+            const Dust *d = &mo->rs.hole.dust[i];
+            float sn = sinf(d->a);
+            if ((sn > 0) != front) continue;
+            float dr = d->r;
+            if (dmax < 3.2f && dr > knee) dr = knee + (dr - knee) * fmaxf(0, dmax - knee) / (3.2f - knee);
+            float rr = dr * rh;
+            float x = cosf(d->a) * rr, y = sn * rr * tilt;
+            float al = hb * 0.8f * clamp01((3.2f - d->r) / 1.2f) * (front ? 0.9f : 0.55f);
+            Col col = d->r < 1.6f ? mix(PALE, VIOLET, clamp01((d->r - 1.15f) / 0.45f)) : mix(VIOLET, MAGENTA, clamp01((d->r - 1.6f) / 1.2f));
+            disc(c, cl, ox + x * ca - y * sa, oy + x * sa + y * ca, d->s * ks * (front ? 1.3f : 1), col, al);
+        }
+    }
+    for (int i = 0; i < NSTAR; i++) { /* a few faint stars, holding still */
+        const float *st = mo->rs.hole.star[i];
+        float x = st[0] * R, y = st[1] * R;
+        if (sqrtf(x * x + y * y) < rh * 2) continue;
+        disc(c, cl, ox + x, oy + y, st[2] * 0.8f * ks, PALE, hb * (0.4f + 0.1f * sinf((float)t * 0.4f + st[3])) * 0.6f);
+    }
+}
 static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, float ox, float oy, float R, float ks, double t, double now, float room) {
     bh_lut();
     (void)ks;
@@ -1881,7 +1932,7 @@ static void draw_session(Canvas *c, Clip cl, const Session *s, const Shape *sh, 
             glow_line(c, cl, pts[i][0], pts[i][1], pts[j][0], pts[j][1], L->eh, 0.5f * mo->inner * edge, L->eh, 0.4f * mo->inner * glow * edge, k);
         }
     }
-    if (mo->hole > 0.01f) draw_hole(c, cl, s, mo, ox, oy, Rpx, ks, t, now, room);
+    if (mo->hole > 0.01f) { if (HOLE_CLASSIC) draw_hole_classic(c, cl, mo, ox, oy, Rpx, ks, t); else draw_hole(c, cl, s, mo, ox, oy, Rpx, ks, t, now, room); }
     if (mo->scan_a > 0.01f) { /* the scan plane, seen edge-on: a flat ellipse at its height */
         float h = mo->scan_h, rx = sqrtf(fmaxf(0, 1.04f - h * h)) * CIRCUM * P.unit, ry = rx * 0.14f, cy = oy + h * CIRCUM * P.unit;
         for (int i = 0; i < 40; i++) {
