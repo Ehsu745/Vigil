@@ -288,6 +288,9 @@ typedef struct {
     float tmx[MAX_T + 1][9];
     int ntm, tt_on, ta_on, sharp_on, trail_on, edge_on;
     float tt[MAX_T][3];                  /* each triangle carried off whole, shell units */
+    float tanc[MAX_T][3];                /* READY's loose triangle: the centre its piece is drawn in perspective about (shell
+                                          * units, as tt): its own, or the piece's when several make one (a forge clump, a
+                                          * spike cone), so their shared corners stay shared */
     float talpha[MAX_T];                 /* how see-through each triangle is (1 = as usual), when ta_on */
     signed char sharp_v[MAX_T];          /* a blade (Blades): its tip node, stretched out by sharp_k */
     float sharp_k[MAX_T];
@@ -306,7 +309,8 @@ typedef struct {
     int loose_on, atk_busy, atk_want;   /* atk_want: an attack asked for (ready_play) */
     float rage;
     double hit_at;
-    float trail[MAX_TRAIL][3]; int ntrail; Col trail_col; /* a light trail over the shell, model space */
+    float trail[MAX_TRAIL][3]; int ntrail, trail_stage; Col trail_col; /* a light trail over the shell, model space; trail_stage: in the
+                                                                       * stage's frame instead (READY's slingshot), as stage sparks are */
     /* READY: the bursts of blows on the pointer (stage units, as aim_x / aim_y) and the lock-on closing round it, 0..1 */
     struct { double at; float x, y, dx, dy, size, ring; Col col; } imp[4];
     float lock_on;
@@ -397,8 +401,10 @@ typedef struct {
     float aim_x, aim_y, aim_hit;
     int aim_on;
     /* READY's dodge game (panel only): an attack dodged whole starts a run of GAME_HEARTS hearts; each hit costs one; the
-     * run ends with the last, or when READY does (game_at: it started; heart_at: one was lost; game_end: it ended) */
+     * run ends with the last, or when READY does (game_at: it started; heart_at: one was lost; game_end: it ended); a dodged
+     * missile or slingshot led into the core wins one back (heal_at); while a run is on the attacks come faster */
     int game_on, hearts;
+    double heal_at;
     float glow_boost;      /* panel only: a moment's extra glow (a satellite winding up before the black hole throws it), 0..1 */
     double game_at, heart_at, game_end;
     float backdrop;        /* panel only: a soft dark halo behind the core and its thrown pieces, 0..1, so they show over a light app */
