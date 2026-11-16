@@ -466,8 +466,17 @@ static void at_tri(const Proj *P, const Motion *mo, const Shape *sh, float base[
             }
         }
         m3_app(p, mo->tmx[mo->tmi[t] - 1], d);
-        for (int i = 0; i < 3; i++) p[i] += mo->tt[t][i];
-        project(&g_stage, p, out);
+        /* its centre where the stage's perspective puts it, its corners round that centre with their own depth: a
+         * piece far out to the side would otherwise be drawn out away from the core (a corner a little nearer the
+         * camera lands a long way further out), so a dart on another monitor was stretched into a long sliver */
+        const Proj *S = &g_stage;
+        const float *C = mo->tanc[t]; /* (its piece's centre: its own, or one shared by the triangles of a clump or cone) */
+        float q[3];
+        for (int i = 0; i < 3; i++) q[i] = mo->tt[t][i] - C[i] + p[i];
+        float pc = S->cam / (S->cam - C[2]), pv = S->cam / (S->cam - C[2] - q[2]);
+        out[0] = S->ox + (C[0] * pc + q[0] * pv) * S->unit;
+        out[1] = S->oy + (C[1] * pc + q[1] * pv) * S->unit;
+        out[2] = C[2] + q[2];
         return;
     }
     if (mo->sharp_on && mo->sharp_k[t] > 0.001f && mo->sharp_v[t] >= 0) {
@@ -524,7 +533,7 @@ static void draw_trail(Canvas *c, Clip cl, const Proj *P, const Motion *mo, floa
     int n = mo->ntrail;
     if (!mo->trail_on || n < 2) return;
     float pts[MAX_TRAIL][3];
-    for (int i = 0; i < n; i++) { float p[3] = {mo->trail[i][0] * CIRCUM, mo->trail[i][1] * CIRCUM, mo->trail[i][2] * CIRCUM}; project(P, p, pts[i]); }
+    for (int i = 0; i < n; i++) { float p[3] = {mo->trail[i][0] * CIRCUM, mo->trail[i][1] * CIRCUM, mo->trail[i][2] * CIRCUM}; project(mo->trail_stage ? &g_stage : P, p, pts[i]); } /* (stage points, as stage sparks) */
     Col tc = mo->trail_col;
     for (int i = 1; i < n; i++) { /* a tapered glowing ribbon, brightest at the head */
         float f = (float)i / (n - 1);

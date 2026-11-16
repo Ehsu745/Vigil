@@ -21,13 +21,15 @@ static void slingshot_push(SlingshotAtk *A, const float *p) {
     memcpy(A->tr[A->ntr++], p, sizeof A->tr[0]);
 }
 static void slingshot_shift(SlingshotAtk *A) { if (A->ntr) { memmove(A->tr, A->tr + 1, sizeof A->tr[0] * (SLINGSHOT_TRAIL - 1)); A->ntr--; } }
-/* the trail lives on the stage; Motion's trail is drawn over the shell, so each frame its points are carried into the
- * shell's frame of this very frame, where they land back on the same stage points */
+/* the trail lives on the stage and is drawn in the stage's frame (Motion.trail_stage), as the dart is: drawn over the
+ * shell it took the core's lean, stretch and offset, which grow with the distance, so far out (on another monitor)
+ * the line ran off to one side of the dart */
 static void slingshot_trail(Ctx *c, const RFrame *f, const SlingshotAtk *A) {
+    (void)f;
     Motion *m = c->m;
     if (A->ntr < 2) { m->ntrail = 0; return; }
-    for (int i = 0; i < A->ntr; i++) { float v[3]; r_to_view(f, A->tr[i], v); m3_tapp(m->trail[i], f->Mf, v); for (int k = 0; k < 3; k++) m->trail[i][k] /= CIRCUM; }
-    m->ntrail = A->ntr; m->trail_on = 1; m->trail_col = RGB255(190, 214, 255);
+    for (int i = 0; i < A->ntr; i++) memcpy(m->trail[i], A->tr[i], sizeof m->trail[i]);
+    m->ntrail = A->ntr; m->trail_on = 1; m->trail_stage = 1; m->trail_col = RGB255(190, 214, 255);
 }
 /* the stage point of its place on the orbit */
 static void slingshot_at(const RFrame *f, const float *q, float *pos) { pos[0] = f->wox + q[0] * f->sc; pos[1] = f->woy + q[1] * f->sc; pos[2] = q[2]; }

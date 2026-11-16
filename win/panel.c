@@ -110,6 +110,7 @@ static long g_stat_late;            /* ticks that came more than half an interva
  * and when (seconds into the span) each late tick came and how late, to see a stall that repeats */
 static long g_sa_n, g_sa_late, g_sa_nl;
 static double g_sa_gap_max, g_sa_work_max, g_sa_poll_max, g_sa_lt[24], g_sa_lg[24];
+static long g_sa_resized, g_sa_px_max; /* READY's windows: new sizes (a new bitmap, all of it redone), the largest in pixels */
 static long g_stat_paint_edit, g_stat_paint_card; /* repaints of the reply line's field and of its card */
 static double g_stat_render_ms, g_stat_push_ms; /* of the tick time: making pictures, handing bitmaps to Windows */
 static double qpc_ms(void) { LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f); return q.QuadPart * 1000.0 / f.QuadPart; }
@@ -1648,11 +1649,17 @@ static void draw(double now) {
     g_core_n = n;
 }
 
-/* READY's layer: a see-through window that never takes the mouse or the focus, over the part of the core's monitor
- * where its pieces fly (from the core to the pointer), so a piece can reach the pointer anywhere. Shown only while
- * pieces are out. */
-static Pane g_layer;
-static Canvas g_lcv;
+/* READY's layer: see-through windows that never take the mouse or the focus, over the part of the screen where its
+ * pieces fly (from the core to the pointer), so a piece can reach the pointer anywhere. One a monitor: a window
+ * stretched over two monitors was a bitmap of millions of pixels redone every refresh (40-50 ms a frame while pieces
+ * crossed over), and it was cut at the monitors it covered (pieces vanished, the slingshot's trail broke). Each
+ * window covers only its own monitor's part; a piece on the border is drawn by both. Shown only while pieces are out. */
+#define MAX_LAYER 8
+typedef struct { Pane p; Canvas cv; Bands B; RECT keep, box; HMONITOR mon; int mx, my; } Layer; /* box: the window, a part of
+                                                       * the monitor-sized bitmap p (and canvas cv) whose corner is mx, my */
+static Layer g_lay[MAX_LAYER];
+static int layer_shown(void) { for (int i = 0; i < MAX_LAYER; i++) if (g_lay[i].p.shown) return 1; return 0; }
+static void layer_hide_all(void) { for (int i = 0; i < MAX_LAYER; i++) { pane_hide(&g_lay[i].p); SetRectEmpty(&g_lay[i].keep); } }
 /* an app filling that monitor (a game, a video, a presentation): READY never throws over it */
 static int full_on(HMONITOR mon) {
     HWND fg = GetForegroundWindow();
@@ -1665,12 +1672,74 @@ static int full_on(HMONITOR mon) {
     if (!GetMonitorInfo(mon, &mi) || !GetWindowRect(fg, &r)) return 0;
     return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right && r.bottom >= mi.rcMonitor.bottom;
 }
+static BOOL CALLBACK mon_enum(HMONITOR h, HDC dc, LPRECT r, LPARAM lp) {
+    (void)dc;
+    struct { HMONITOR h[MAX_LAYER]; RECT r[MAX_LAYER]; int n; } *M = (void *)lp;
+    if (M->n < MAX_LAYER) { M->h[M->n] = h; M->r[M->n++] = *r; }
+    return TRUE;
+}
+/* one monitor's window: its part of the pieces' box want (inside that monitor), drawn and handed over; hidden if none */
+static void layer_one(Layer *L, const Session *s, int who, RECT cr, RECT want, RECT monr, double now) {
+    RECT b;
+    if (!IntersectRect(&b, &want, &monr)) { pane_hide(&L->p); SetRectEmpty(&L->keep); return; }
+    if (!L->p.w) pane_create(&L->p);
+    /* The bitmap and canvas are the monitor's size, made once; the window shows only the part of them where the
+     * pieces are. A window that was a bitmap of its own size needed a new one, all of it redone, each time it grew
+     * (35-45 ms frames as pieces crossed the screen); a window the monitor's size was blended whole by Windows every
+     * refresh (most frames late). So the window stays small and grows (in 128-pixel steps) for nothing but a copy. */
+    int Wm = monr.right - monr.left, Hm = monr.bottom - monr.top;
+    canvas_resize(&L->cv, Wm, Hm);
+    pane_size(&L->p, Wm, Hm);
+    if ((size_t)Wm * Hm * 4 > g_rgba_cap) { free(g_rgba); g_rgba = malloc((size_t)Wm * Hm * 4); g_rgba_cap = g_rgba ? (size_t)Wm * Hm * 4 : 0; } /* (conversion's scratch, indexed as the canvas) */
+    L->mx = monr.left; L->my = monr.top;
+    if (!L->p.shown || IsRectEmpty(&L->keep)) L->keep = b;
+    else UnionRect(&L->keep, &L->keep, &b);
+    { RECT q = L->keep; int gw = ((q.right - q.left + 127) / 128) * 128, gh = ((q.bottom - q.top + 127) / 128) * 128;
+      q.left -= (gw - (q.right - q.left)) / 2; q.right = q.left + gw; q.top -= (gh - (q.bottom - q.top)) / 2; q.bottom = q.top + gh;
+      if (q.left < monr.left) OffsetRect(&q, monr.left - q.left, 0);
+      if (q.right > monr.right) OffsetRect(&q, monr.right - q.right, 0);
+      if (q.top < monr.top) OffsetRect(&q, 0, monr.top - q.top);
+      if (q.bottom > monr.bottom) OffsetRect(&q, 0, monr.bottom - q.bottom);
+      IntersectRect(&b, &q, &monr); L->keep = b; }
+    if (b.right - b.left < 8 || b.bottom - b.top < 8) { pane_hide(&L->p); return; }
+    int moved = !L->p.shown || !EqualRect(&b, &L->box);
+    if (moved) g_sa_resized++;
+    if ((long)(b.right - b.left) * (b.bottom - b.top) > g_sa_px_max) g_sa_px_max = (long)(b.right - b.left) * (b.bottom - b.top);
+    /* drawn in the monitor's canvas: only the box drawn last is cleared, the new one drawn, the two converted */
+    RECT was = {L->cv.bx0, L->cv.by0, L->cv.bx1, L->cv.by1};
+    L->cv.sx = g_pic[who].fx; L->cv.sy = g_pic[who].fy; /* the same part-pixel place as its core's picture, so the pieces never step against it */
+    RENDER_PART = 2;
+    render_prep(&L->cv, 0);
+    { int r0 = (want.top > b.top ? want.top : b.top) - monr.top, r1 = (want.bottom < b.bottom ? want.bottom : b.bottom) - monr.top;
+      if (!IsRectEmpty(&was)) { if (was.top < r0) r0 = was.top; if (was.bottom > r1) r1 = was.bottom; }
+      draw_banded(&L->B, &L->cv, s, now, cr.left - monr.left, cr.top - monr.top, cr.right - monr.left, cr.bottom - monr.top, r0, r1); }
+    RENDER_PART = 0;
+    L->cv.sx = L->cv.sy = 0;
+    RECT now_rc = {L->cv.bx0, L->cv.by0, L->cv.bx1, L->cv.by1}, dirty;
+    if (IsRectEmpty(&was)) dirty = now_rc;
+    else if (IsRectEmpty(&now_rc)) dirty = was;
+    else UnionRect(&dirty, &was, &now_rc);
+    if (!IsRectEmpty(&dirty)) convert_banded(&L->B, &L->cv, g_rgba, L->p.px, dirty.left, dirty.top, dirty.right, dirty.bottom);
+    /* handed over: the window's part of the bitmap (all of it when the window moved or grew, else only what changed) */
+    POINT src = {b.left - monr.left, b.top - monr.top}, dst = {b.left, b.top};
+    SIZE size = {b.right - b.left, b.bottom - b.top};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    RECT dw = {dirty.left - src.x, dirty.top - src.y, dirty.right - src.x, dirty.bottom - src.y}, all = {0, 0, size.cx, size.cy}, one = {0, 0, 1, 1};
+    IntersectRect(&dw, &dw, &all);
+    double u0 = g_stats ? qpc_ms() : 0;
+    UPDATELAYEREDWINDOWINFO ui = {sizeof ui, NULL, &dst, &size, L->p.mem, &src, 0, &blend, ULW_ALPHA, moved ? NULL : IsRectEmpty(&dw) ? &one : &dw};
+    if (!UpdateLayeredWindowIndirect(L->p.w, &ui)) UpdateLayeredWindow(L->p.w, NULL, &dst, &size, L->p.mem, &src, 0, &blend, ULW_ALPHA);
+    if (g_stats) g_stat_push_ms += qpc_ms() - u0;
+    g_stat_push++;
+    L->box = b; L->p.x = b.left; L->p.y = b.top;
+    if (!L->p.shown) { SetWindowPos(L->p.w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW); L->p.shown = 1; }
+    else SetWindowPos(L->p.w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); /* over the cores */
+}
 static void layer_draw(double now) {
     Room *room = shown_room();
     int who = -1;
     for (int i = 0; i < room->n && i < MAX_SESS && i < g_core_n; i++) if (room->s[i].mo.loose_on && !IsRectEmpty(&g_core_rc[i])) { who = i; break; }
-    if (who < 0 || g_hidden) { pane_hide(&g_layer); return; }
-    if (!g_layer.w) pane_create(&g_layer);
+    if (who < 0 || g_hidden) { layer_hide_all(); return; }
     const Session *s = &room->s[who];
     RECT cr = g_core_rc[who], b = cr;
     float u = (cr.right - cr.left) * SHELL_FRAC, cx = (cr.left + cr.right) * .5f, cy = (cr.top + cr.bottom) * .5f, m = 1.8f * u;
@@ -1692,59 +1761,23 @@ static void layer_draw(double now) {
     }
     if (R->nsh) { RECT p = {(int)(cx - mf), (int)(cy - mf), (int)(cx + mf), (int)(cy + mf)}; UnionRect(&b, &b, &p); } /* a crash into the core: its flash */
     if (s->aim_on) { RECT p = {(int)(cx + s->aim_x * u - m), (int)(cy + s->aim_y * u - m), (int)(cx + s->aim_x * u + m), (int)(cy + s->aim_y * u + m)}; UnionRect(&b, &b, &p); }
-    RECT want = b; /* where the drawing will mostly be (screen) */
-    MONITORINFO mi;
-    memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
-    GetMonitorInfo(MonitorFromRect(&cr, MONITOR_DEFAULTTONEAREST), &mi);
-    RECT mon = mi.rcMonitor;
-    UnionRect(&mon, &mon, &cr); /* (the core itself may hang over the edge) */
-    if (s->aim_on) { /* the pointer's monitor too: what is thrown follows it across */
-        POINT ap = {(LONG)(cx + s->aim_x * u), (LONG)(cy + s->aim_y * u)};
-        MONITORINFO pm; memset(&pm, 0, sizeof pm); pm.cbSize = sizeof pm;
-        if (GetMonitorInfo(MonitorFromPoint(ap, MONITOR_DEFAULTTONEAREST), &pm)) UnionRect(&mon, &mon, &pm.rcMonitor);
+    /* every monitor the pieces reach gets its own window over its part of them; the others are hidden */
+    struct { HMONITOR h[MAX_LAYER]; RECT r[MAX_LAYER]; int n; } M = {0};
+    EnumDisplayMonitors(NULL, NULL, mon_enum, (LPARAM)&M);
+    int used[MAX_LAYER] = {0};
+    for (int k = 0; k < M.n; k++) {
+        RECT x;
+        if (!IntersectRect(&x, &b, &M.r[k])) continue;
+        int li = -1;
+        for (int j = 0; j < MAX_LAYER; j++) if (g_lay[j].mon == M.h[k] && !used[j]) { li = j; break; } /* (the window it had, so its bitmap is kept) */
+        for (int j = 0; j < MAX_LAYER && li < 0; j++) if (!used[j] && !g_lay[j].mon) li = j; /* (a new one; one made for a monitor stays its) */
+        for (int j = 0; j < MAX_LAYER && li < 0; j++) if (!used[j] && !g_lay[j].p.shown) li = j;
+        if (li < 0) continue;
+        used[li] = 1;
+        if (g_lay[li].mon != M.h[k]) { SetRectEmpty(&g_lay[li].keep); g_lay[li].mon = M.h[k]; }
+        layer_one(&g_lay[li], s, who, cr, b, M.r[k], now);
     }
-    IntersectRect(&b, &b, &mon);
-    /* while pieces are out the window only grows, in 128-pixel steps: a new size means a new bitmap and canvas, and
-     * pieces scattering after a hit would otherwise change it every frame */
-    static RECT keep;
-    if (!g_layer.shown || IsRectEmpty(&keep)) keep = b;
-    else UnionRect(&keep, &keep, &b);
-    { RECT q = keep; int gw = ((q.right - q.left + 127) / 128) * 128, gh = ((q.bottom - q.top + 127) / 128) * 128;
-      q.left -= (gw - (q.right - q.left)) / 2; q.right = q.left + gw; q.top -= (gh - (q.bottom - q.top)) / 2; q.bottom = q.top + gh;
-      if (q.left < mon.left) OffsetRect(&q, mon.left - q.left, 0);
-      if (q.right > mon.right) OffsetRect(&q, mon.right - q.right, 0);
-      if (q.top < mon.top) OffsetRect(&q, 0, mon.top - q.top);
-      if (q.bottom > mon.bottom) OffsetRect(&q, 0, mon.bottom - q.bottom);
-      IntersectRect(&b, &q, &mon); keep = b; }
-    int W = b.right - b.left, H = b.bottom - b.top;
-    if (W < 8 || H < 8) { pane_hide(&g_layer); return; }
-    /* Only what changed is redone: the pieces cover a sliver of the window, and clearing, converting and handing
-     * Windows all of it every refresh took longer than a frame at 120 Hz (the pieces stuttered). The canvas keeps the
-     * box it drew last; that box is cleared, the new one drawn, and the two together converted into the window's
-     * bitmap and handed over as the window's dirty part. A new size starts all over (canvas_resize marks it all). */
-    int sized = W != g_layer.W || H != g_layer.H || !g_layer.bmp;
-    canvas_resize(&g_lcv, W, H);
-    RECT was = {g_lcv.bx0, g_lcv.by0, g_lcv.bx1, g_lcv.by1};
-    g_lcv.sx = g_pic[who].fx; g_lcv.sy = g_pic[who].fy; /* the same part-pixel place as its core's picture, so the pieces never step against it */
-    static Bands B;
-    RENDER_PART = 2;
-    render_prep(&g_lcv, 0);
-    { int r0 = want.top - b.top, r1 = want.bottom - b.top; /* the bands spread over where it drew last and where the pieces are now */
-      if (!IsRectEmpty(&was)) { if (was.top < r0) r0 = was.top; if (was.bottom > r1) r1 = was.bottom; }
-      draw_banded(&B, &g_lcv, s, now, cr.left - b.left, cr.top - b.top, cr.right - b.left, cr.bottom - b.top, r0, r1); }
-    RENDER_PART = 0;
-    g_lcv.sx = g_lcv.sy = 0;
-    RECT now_rc = {g_lcv.bx0, g_lcv.by0, g_lcv.bx1, g_lcv.by1}, dirty;
-    if (IsRectEmpty(&was)) dirty = now_rc;
-    else if (IsRectEmpty(&now_rc)) dirty = was;
-    else UnionRect(&dirty, &was, &now_rc);
-    if (sized) SetRect(&dirty, 0, 0, W, H);
-    size_t need = (size_t)W * H;
-    if (need * 4 > g_rgba_cap) { free(g_rgba); g_rgba = malloc(need * 4); g_rgba_cap = need * 4; }
-    pane_size(&g_layer, W, H);
-    if (!IsRectEmpty(&dirty)) convert_banded(&B, &g_lcv, g_rgba, g_layer.px, dirty.left, dirty.top, dirty.right, dirty.bottom);
-    pane_show_dirty(&g_layer, b.left, b.top, sized ? NULL : &dirty);
-    if (g_layer.shown) SetWindowPos(g_layer.w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); /* over the cores */
+    for (int j = 0; j < MAX_LAYER; j++) if (!used[j]) { pane_hide(&g_lay[j].p); SetRectEmpty(&g_lay[j].keep); }
 }
 
 /* READY's dodge game: the hearts, a column at the left edge of the core's monitor. They drop in one by one as a run
@@ -1777,7 +1810,12 @@ static void hearts_draw(double now) {
     for (int k = 0; k < GAME_HEARTS; k++) {
         float in = clampf01(((float)(now - g->game_at) - k * 0.06f) / 0.25f), pop = in * in * (3 - 2 * in) * (1 + 0.25f * sinf(3.14159265f * in));
         float cx = W * 0.5f, cy = 12 * dp + gap * (k + 0.5f);
-        int full = k < g->hearts, lost = k == g->hearts && g->heart_at > g->game_at && now - g->heart_at < 0.6;
+        int full = k < g->hearts, lost = k == g->hearts && g->heart_at > g->game_at && g->heart_at > g->heal_at && now - g->heart_at < 0.6;
+        if (full && k == g->hearts - 1 && g->heal_at > g->game_at && now - g->heal_at < 0.5) { /* just won back: it swells in, a white flash round it */
+            float u = (float)(now - g->heal_at) / 0.5f;
+            pop *= 1 + 0.6f * (1 - u) * (1 - u);
+            heart_at(&g_hearts, cx, cy, sz * (1.3f + 0.6f * u), white, 0.5f * (1 - u) * out);
+        }
         if (full) { heart_at(&g_hearts, cx, cy, sz * 1.25f * pop, red, 0.22f * in * out); heart_at(&g_hearts, cx, cy, sz * pop, red, in * out); heart_at(&g_hearts, cx - sz * 0.18f, cy - sz * 0.2f, sz * 0.22f * pop, white, 0.55f * in * out); }
         else {
             heart_at(&g_hearts, cx, cy, sz * pop, dim, in * out);
@@ -4138,7 +4176,7 @@ static void update_backdrop(double now, double dt) {
         g_bd_nreq = room->n < MAX_SESS ? room->n : MAX_SESS;
         for (int i = 0; i < g_bd_nreq; i++) {
             g_bd_req[i][0] = g_core_rc[i]; SetRectEmpty(&g_bd_req[i][1]);
-            if (room->s[i].mo.loose_on && g_layer.shown) SetRect(&g_bd_req[i][1], g_layer.x, g_layer.y, g_layer.x + g_layer.W, g_layer.y + g_layer.H);
+            if (room->s[i].mo.loose_on) for (int j = 0; j < MAX_LAYER; j++) if (g_lay[j].p.shown) { RECT lr = g_lay[j].box; if (IsRectEmpty(&g_bd_req[i][1])) g_bd_req[i][1] = lr; else UnionRect(&g_bd_req[i][1], &g_bd_req[i][1], &lr); } /* (the layers' part of the screen) */
             g_bd_light[i] = g_bd_got[i];
         }
         LeaveCriticalSection(&g_bd_cs);
@@ -4313,13 +4351,13 @@ static void write_stats(double now) {
         fprintf(f, "    black hole: %s, %.1f GPU pictures/s, %.2f ms each%s%s\n", g_gpu && gpu_init() ? "GPU" : BH_LIGHT ? "CPU light" : "CPU", g_stat_gpu_n / span, g_stat_gpu_n ? g_stat_gpu_ms / g_stat_gpu_n : 0, g_gpu ? "" : "  (", g_gpu ? "" : "--no-gpu or none)");
         g_stat_gpu_ms = 0; g_stat_gpu_n = 0;
         if (g_sa_n) {
-            fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events read %.1f ms  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max);
+            fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events read %.1f ms  resized %ld  largest %.1f Mpx  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max, g_sa_resized, g_sa_px_max / 1e6);
             for (long i = 0; i < g_sa_nl; i++) fprintf(f, " %.2fs/%.0fms", g_sa_lt[i], g_sa_lg[i]);
             fputc('\n', f);
         }
         fclose(f);
     }
-    g_sa_n = g_sa_late = g_sa_nl = 0; g_sa_gap_max = g_sa_work_max = g_sa_poll_max = 0;
+    g_sa_n = g_sa_late = g_sa_nl = 0; g_sa_resized = g_sa_px_max = 0; g_sa_gap_max = g_sa_work_max = g_sa_poll_max = 0;
     g_stat_tick = g_stat_pic = g_stat_push = g_stat_late = g_stat_paint_edit = g_stat_paint_card = 0;
     g_stat_ms = g_stat_gap = g_stat_gap2 = g_stat_gap_max = g_stat_render_ms = g_stat_push_ms = 0;
     g_stat_since = now;
@@ -4365,7 +4403,7 @@ static void tick(void) {
             g_stat_gap += gap; g_stat_gap2 += gap * gap;
             if (gap > g_stat_gap_max) g_stat_gap_max = gap;
             if (gap > want * 1.5) g_stat_late++;
-            if (g_layer.shown) {
+            if (layer_shown()) {
                 double work = (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart;
                 g_sa_n++;
                 if (gap > g_sa_gap_max) g_sa_gap_max = gap;
@@ -4384,7 +4422,7 @@ static void tick(void) {
  * own, lower rates; a tick that has nothing due costs next to nothing) */
 static double tick_interval(void) {
     double hand = smooth_now()->hand, mv = hand <= 0 || hand > g_hz ? g_hz : hand < 30 ? 30 : hand; /* moving windows: smooth, aligned to the display */
-    if (g_layer.shown) return 1.0 / g_hz; /* READY's pieces are out: every refresh */
+    if (layer_shown()) return 1.0 / g_hz; /* READY's pieces are out: every refresh */
     if (g_moving || g_dragging || g_carrying || g_down_sid[0] || g_hover >= 0 || set_open() || g_orbiting) return 1.0 / mv;
     double need = g_need_hz < 10 ? 10 : g_need_hz;
     return 1.0 / (need > g_hz ? g_hz : need);
@@ -6141,7 +6179,7 @@ static void rec_frame(FILE *f) {
         Pane *p = &g_pane[i];
         if (p->shown && p->px) rec_over(fr, W, H, p->px, p->W, p->H, p->x - g_rec_rc.left, p->y - g_rec_rc.top, 0);
     }
-    if (g_layer.shown && g_layer.px) rec_over(fr, W, H, g_layer.px, g_layer.W, g_layer.H, g_layer.x - g_rec_rc.left, g_layer.y - g_rec_rc.top, 0); /* READY's pieces */
+    for (int j = 0; j < MAX_LAYER; j++) if (g_lay[j].p.shown && g_lay[j].p.px) rec_over(fr, W, H, g_lay[j].p.px, g_lay[j].p.W, g_lay[j].p.H, g_lay[j].mx - g_rec_rc.left, g_lay[j].my - g_rec_rc.top, 0); /* READY's pieces (the whole monitor's bitmap: clear outside the window) */
     if (g_chat && IsWindowVisible(g_chat)) { /* the chat box paints itself into a bitmap of ours */
         RECT r;
         GetWindowRect(g_chat, &r);
