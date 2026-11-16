@@ -2,6 +2,8 @@
 
 The data folder `~/.dodeca-core` and the `DODECA_*` environment variables keep the old name until the hooks are reinstalled; renaming them means running `install_hooks.py --apply`, which needs the user's OK.
 
+The work log is the sibling vault `../vigil-folio` (private, `zelvet-velvet/vigil-folio`); the skills in `.claude/skills/` (`cmd-sync`, `test-queue`, `git-workflow`, …) are links into it. Record ideas and open tasks in its `LLM/DEV_STATUS.md` Ongoing, decisions and their reasons in `Notes/Vigil.md`, tests in `Quest/Test Queue.md`; not in Claude's own memory, which stays on one machine. When asked whether something is recorded, search the vault first.
+
 Vigil (formerly dodeca-core) shows every running Claude Code session as a glowing polyhedron, either in the terminal or in a floating macOS panel. A Claude Code hook appends events to a JSONL file, and a C program reads that file, runs a state machine per session and draws the result with its own software renderer.
 
 ## Build and run
