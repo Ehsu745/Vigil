@@ -4365,6 +4365,44 @@ static void toggle_mode(void) {
 }
 
 static double g_polled;
+/* The events file is read on a thread of its own. Over \\wsl.localhost one look costs about 3 ms and now and then 20,
+ * and on the drawing thread that cost a frame 4 times a second at 120 Hz (READY's pieces stuttered every 0.25 s, and
+ * jumped two or three frames on a slow read). The reader queues what it finds; each tick takes the queue whole. */
+static CRITICAL_SECTION g_evq_cs;
+static Event g_evq[2048];
+static int g_evq_n, g_evq_on;
+static DWORD WINAPI reader_main(LPVOID arg) {
+    (void)arg;
+    static Event got[1024];
+    for (;;) {
+        Sleep(250); /* (4 looks a second, as before) */
+        int n = tail_poll(&g_tail, got, 1024), done = 0;
+        while (done < n) { /* never drops one: a full queue (the drawing thread held up) waits for room */
+            EnterCriticalSection(&g_evq_cs);
+            int k = (int)(sizeof g_evq / sizeof g_evq[0]) - g_evq_n;
+            if (k > n - done) k = n - done;
+            memcpy(g_evq + g_evq_n, got + done, sizeof(Event) * (size_t)k);
+            g_evq_n += k; done += k;
+            LeaveCriticalSection(&g_evq_cs);
+            if (done < n) Sleep(10);
+        }
+    }
+    return 0;
+}
+static void reader_start(void) {
+    InitializeCriticalSection(&g_evq_cs);
+    HANDLE h = CreateThread(NULL, 0, reader_main, NULL, 0, NULL);
+    if (h) { g_evq_on = 1; CloseHandle(h); }
+}
+/* the events the reader has queued, applied in order (the queue taken whole, so the lock is held only for a copy) */
+static void reader_take(void) {
+    static Event take[2048];
+    int n = 0;
+    EnterCriticalSection(&g_evq_cs);
+    if (g_evq_n) { n = g_evq_n; memcpy(take, g_evq, sizeof(Event) * (size_t)n); g_evq_n = 0; }
+    LeaveCriticalSection(&g_evq_cs);
+    for (int i = 0; i < n; i++) room_apply(&g_room, &take[i]);
+}
 
 static void write_stats(double now) {
     double span = now - g_stat_since;
@@ -4380,7 +4418,7 @@ static void write_stats(double now) {
         fprintf(f, "    black hole: %s, %.1f GPU pictures/s, %.2f ms each%s%s\n", g_gpu && gpu_init() ? "GPU" : BH_LIGHT ? "CPU light" : "CPU", g_stat_gpu_n / span, g_stat_gpu_n ? g_stat_gpu_ms / g_stat_gpu_n : 0, g_gpu ? "" : "  (", g_gpu ? "" : "--no-gpu or none)");
         g_stat_gpu_ms = 0; g_stat_gpu_n = 0;
         if (g_sa_n) {
-            fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events read %.1f ms  resized %ld  largest %.1f Mpx  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max, g_sa_resized, g_sa_px_max / 1e6);
+            fprintf(f, "    pieces out: ticks %ld  late %ld  worst gap %.1f ms  worst tick %.1f ms  slowest events taken %.1f ms  resized %ld  largest %.1f Mpx  late at:", g_sa_n, g_sa_late, g_sa_gap_max, g_sa_work_max, g_sa_poll_max, g_sa_resized, g_sa_px_max / 1e6);
             for (long i = 0; i < g_sa_nl; i++) fprintf(f, " %.2fs/%.0fms", g_sa_lt[i], g_sa_lg[i]);
             fputc('\n', f);
         }
@@ -4405,11 +4443,10 @@ static void tick(void) {
     if (dt > 0.25f) dt = 0.25f;
     g_last = now;
     if (g_demo_n && !g_rec_still) demo_run(&g_demo, &g_room, now);
-    else if (now - g_polled >= 0.25) { /* the events file sits in WSL: each look is a trip into its VM, 4 a second is plenty */
+    else if (g_evq_on && now - g_polled >= 0.05) { /* what the reader found (it looks 4 times a second, off this thread) */
         g_polled = now;
         LARGE_INTEGER p0, p1; QueryPerformanceCounter(&p0);
-        int n = tail_poll(&g_tail, g_ev, 1024);
-        for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
+        reader_take();
         if (g_stats) { QueryPerformanceCounter(&p1); QueryPerformanceFrequency(&qf); double ms = (p1.QuadPart - p0.QuadPart) * 1000.0 / qf.QuadPart; if (ms > g_sa_poll_max) g_sa_poll_max = ms; }
     }
     if (g_moving) follow();
@@ -6896,6 +6933,7 @@ int main(int argc, char **argv) {
         tail_init(&g_tail, events);
         int n = tail_history(&g_tail, now - 1800, g_ev, 1024); /* the sessions of the last half hour */
         for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
+        reader_start(); /* from here on only the reader touches g_tail */
     }
 
     SystemParametersInfo(SPI_GETWORKAREA, 0, &g_work, 0);
