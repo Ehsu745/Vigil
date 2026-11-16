@@ -2089,7 +2089,12 @@ static COLORREF g_chat_accent;
 static HFONT g_chat_tf, g_chat_bf, g_chat_mf; /* title, body, monospaced */
 static int g_chat_title_h, g_chat_body_h, g_chat_view_h, g_chat_line, g_chat_scroll;
 static int g_chat_hist;              /* the earlier turns are shown: off each time the box opens, on by scrolling on past its top */
-static int g_hist_land;              /* they were just let in: the view stays on the latest turn's prompt */
+static int g_hist_land;              /* 1: they were just let in, the view stays on the latest turn's prompt; 2: just left out, the view at the end; 3: left out, from the top */
+static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
+static double g_push_at;
+enum { HIST_PUSH = 7 };              /* notches past an edge that flip the earlier turns in or out, a dot each */
+static int g_gap_lit;                /* the gap's dots lit: one a notch, kept while it springs back */
+static float g_pull;                 /* the rubber band: the body pulled away from the edge being pushed (pixels, + down), easing back after a pause */
 static int g_chat_auto = 1;          /* the box follows the conversation: the newest turn from its prompt, or its end while it runs */
 static int g_pin = -1, g_pin_hot;    /* the prompt pinned at the top while its turn is scrolled through; the pointer on it shows it whole */
 static RECT g_pin_rc;
@@ -2414,7 +2419,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
-        if (*ln >= 1 && *ln <= 7) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
+        if (*ln >= 1 && *ln <= 6) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
             int kind = *ln, pad = lh / 4;
             in_code = 0;
             if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
@@ -2483,10 +2488,6 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 while (n > 0 && x + text_w(dc, F_BODY, ln + 1, n) > maxw) n--;
                 lay_put(x, y + asc, F_BODY, MD_MARK, ln + 1, n, text_w(dc, F_BODY, ln + 1, n), 0);
                 y += lh; blank = 0; marked = 0;
-            } else if (kind == 7) { /* how many earlier turns are left out, centred at the top */
-                int n = (int)(end - ln - 1), w = text_w(dc, F_BODY, ln + 1, n);
-                lay_put(w < maxw ? (maxw - w) / 2 : 0, y + asc, F_BODY, MD_MARK, ln + 1, n, w, 0);
-                y += lh + gap / 2; blank = 1;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
@@ -2690,16 +2691,25 @@ static void chat_refont(void) {
     chat_hide();
 }
 
-/* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; at the top,
- * going on up for 3 notches (no pause over 0.6 s) lets the earlier turns in above the latest */
+/* how far the wheel has gone on past an edge, 0 to 1 (nothing after a 0.6 s pause) */
+static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
+/* the earlier turns in (above the latest, the view staying on it) or out (the latest turn from its top) */
+static void chat_hist_set(int on) { g_chat_hist = on; g_chat_auto = 0; g_hist_land = on ? 1 : 3; g_push = 0; }
+
+/* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; going on
+ * for HIST_PUSH notches (no pause over 0.6 s) past the top lets the earlier turns in above the latest, and past the bottom
+ * shows the latest only again */
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
-    if (notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0) {
-        static double last; static float push;
+    int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
+    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0, out = notches < 0 && g_chat_hist && bottom;
+    if (in || out) {
         double now = wall();
-        if (now - last > 0.6) push = 0;
-        last = now; push += notches;
-        if (push >= 3) { push = 0; g_chat_hist = g_hist_land = 1; g_chat_auto = 0; }
+        if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
+        g_push_at = now; g_push += notches;
+        g_gap_lit = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
+        if (fabsf(g_push) >= HIST_PUSH) { chat_hist_set(in); if (!in) g_hist_land = 2; }
+        InvalidateRect(g_chat, NULL, FALSE);
         return;
     }
     if (g_chat_body_h <= g_chat_view_h) return;
@@ -2762,13 +2772,38 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_chat_title) DrawTextW(dc, g_chat_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         int top = t.bottom + chat_gap(), sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
         RECT view = {t.left, top, r.right - pad - sb, top + g_chat_view_h};
-        RECT body = {view.left, top - g_chat_scroll, view.right, top - g_chat_scroll + g_chat_body_h};
+        int pl = (int)lroundf(g_pull); /* the rubber band */
+        RECT body = {view.left, top - g_chat_scroll + pl, view.right, top - g_chat_scroll + pl + g_chat_body_h};
         g_chat_view = view;
         SetTextColor(dc, text_body());
         SelectObject(dc, g_chat_bf);
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
         chat_runs(dc, 0, g_runs_n, view, body.top);
+        g_push_drawn = hist_push_now();
+        if (abs(pl) >= g_chat_line * 3 / 4) { /* in the rubber band's gap, as the terminal would say it: what the push does, a dot a notch */
+            RECT gap_rc = pl > 0 ? (RECT){view.left, view.top, view.right, view.top + pl} : (RECT){view.left, view.bottom + pl, view.right, view.bottom};
+            wchar_t what[64];
+            int n = g_mt_n - 1;
+            if (pl > 0) swprintf(what, 64, L"\x2191 %d earlier turn%ls ", n, n == 1 ? L"" : L"s");
+            else swprintf(what, 64, L"\x2193 latest turn only ");
+            SaveDC(dc);
+            IntersectClipRect(dc, gap_rc.left, gap_rc.top, gap_rc.right, gap_rc.bottom);
+            SetTextAlign(dc, TA_TOP | TA_LEFT);
+            SelectObject(dc, g_chat_bf);
+            int x = view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), y = (gap_rc.top + gap_rc.bottom - g_chat_line) / 2, lit = g_gap_lit;
+            SetTextColor(dc, ink(MD_MARK));
+            TextOutW(dc, x, y, what, (int)wcslen(what));
+            SIZE sz; GetTextExtentPoint32W(dc, what, (int)wcslen(what), &sz);
+            x += sz.cx;
+            for (int i = 0; i < HIST_PUSH; i++) { /* \x25CF lit in the session's colour, \x25CB still to go */
+                SetTextColor(dc, i < lit ? g_chat_accent : ink(MD_MARK));
+                TextOutW(dc, x, y, i < lit ? L"\x25CF" : L"\x25CB", 1);
+                GetTextExtentPoint32W(dc, L"\x25CF ", 2, &sz);
+                x += sz.cx;
+            }
+            RestoreDC(dc, -1);
+        }
         /* the prompt of the turn being read stays at the top as one line once it has scrolled away (as in the
          * terminal); the pointer on it shows it whole, a click goes back to it */
         g_pin = -1;
@@ -2910,7 +2945,7 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
-        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 7) *(*o)++ = *c;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 6) *(*o)++ = *c;
         *(*o)++ = '\n';
         if (*c) c++;
     }
@@ -2923,12 +2958,7 @@ static char *chat_conv(int st) {
         cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
     }
     char *out = malloc(cap), *o = out;
-    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until scrolled on past the top */
-    if (i0) {
-        char line[80];
-        snprintf(line, sizeof line, "\xE2\x96\xB2 %d earlier turn%s", i0, i0 == 1 ? "" : "s");
-        conv_put(&o, 7, line, 1);
-    }
+    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until let in */
     for (int i = i0; i < g_mt_n; i++) {
         MTurn *t = &g_mt[i];
         int live = i == g_mt_n - 1 && !t->r;
@@ -2962,7 +2992,18 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_pend && !strcmp(g_pend_sid, s->sid)) strncat(title, " \xC2\xB7 your reply waits for your answer in the terminal", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
-    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) g_chat_hist = 0; /* opened, or another session's: its latest turn only */
+    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_pull = 0; } /* opened, or another session's: its latest turn only */
+    else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's fill fades after a pause */
+    { /* the rubber band: up to 46 px away from the edge as the push grows, eased (critically damped, no bounce), back after a pause */
+        static double last;
+        float p = hist_push_now(), want = p > 0 ? (g_push > 0 ? 1.0f : -1.0f) * 46 * (float)g_dpi * (1 - (1 - p) * (1 - p)) : 0;
+        float dt = (float)fmin(0.1, now - last), k = 1 - expf(-dt * (want ? 22.0f : 11.0f));
+        last = now;
+        if (want != g_pull) {
+            g_pull = fabsf(want - g_pull) < 0.3f ? want : g_pull + (want - g_pull) * k;
+            InvalidateRect(g_chat, NULL, FALSE);
+        }
+    }
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -3020,8 +3061,8 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
         g_chat_scroll = live || g_pr[g_pr_n - 1].y0 > mx ? mx : g_pr[g_pr_n - 1].y0;
     }
-    if (g_hist_land && g_pr_n) { /* the earlier turns just came in above: a little of the one before shows over the latest prompt */
-        int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_pr[g_pr_n - 1].y0 - 3 * g_chat_line;
+    if (g_hist_land && g_pr_n) { /* the earlier turns just came in above: a little of the one before shows over the latest prompt; just left out: the end, where the wheel was */
+        int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_hist_land == 2 ? mx : g_hist_land == 3 ? 0 : g_pr[g_pr_n - 1].y0 - 3 * g_chat_line;
         g_chat_scroll = y < 0 ? 0 : y > mx ? mx : y;
         g_hist_land = 0;
     }
