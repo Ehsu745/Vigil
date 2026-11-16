@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings layouts</title>
+<!-- Layout mocks for the Windows panel's Settings window: every page fitting with no scrolling.
+     Today: the window as it is. A: a shorter preview, tighter rows, cards placed so the columns balance, the
+     fixed keys as a compact list, Motions' states as chips. B: the preview as a column on the right, the page a
+     single column under the full height. Each window is drawn at its real size in 96-dpi units and measured: the
+     badge says whether its page fits. Opens from disk; no dependencies. -->
+<style>
+:root{
+  --bg:#0B0B0D; --win:#18181B; --side:#131316; --line:#26262C; --card:#1F1F23; --pv:#0F0F12;
+  --text:#ECECEF; --dim:#8B8B94; --chip:#2A2A30; --acc:#FF8A1F; --knob:#FFF1E3; --warn:#F2A33A; --ok:#4CC38A; --bad:#F06A6A;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px 'Segoe UI',Inter,system-ui,sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.bar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 16px;background:#111114;border-bottom:1px solid var(--line)}
+.bar h1{font-size:15px;margin:0 8px 0 0;font-weight:600}
+.grp{display:flex;gap:4px;align-items:center}
+.grp span{color:var(--dim);margin-right:4px}
+.tb{border:1px solid var(--line);background:transparent;border-radius:7px;padding:5px 10px;color:#B4B4BC}
+.tb.on{border-color:var(--acc);color:var(--text)}
+.stage{padding:20px 16px 40px;overflow-x:auto}
+.notes{max-width:980px;color:#B4B4BC;line-height:1.55;margin:0 0 16px}
+.notes b{color:var(--text)}
+.badge{display:inline-flex;gap:6px;align-items:center;font-size:12px;padding:3px 9px;border-radius:20px;background:#1E1E22;margin-bottom:8px}
+.badge i{width:8px;height:8px;border-radius:50%;display:inline-block}
+/* the overview: every page in every layout, small */
+.ov{display:grid;grid-template-columns:110px repeat(7,auto);gap:14px 12px;align-items:start}
+.ov .lab{color:var(--dim);font-size:12px;padding-top:24px}
+.ov .hd{color:var(--dim);font-size:12px}
+.thumb{cursor:pointer}
+.thumb .sz{overflow:hidden;border-radius:6px;outline:1px solid var(--line)}
+
+/* ---- the window ---- */
+.win{position:relative;display:flex;background:var(--win);border:1px solid var(--line);border-radius:10px;overflow:hidden;transform-origin:0 0;flex-shrink:0}
+.side{width:56px;flex-shrink:0;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 0}
+.sb{width:36px;height:36px;border-radius:8px;border:1.5px solid transparent;background:transparent;color:#B4B4BC;display:flex;align-items:center;justify-content:center;padding:0}
+.sb.on{border-color:var(--acc);color:var(--text)}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;padding:0 14px 0 16px}
+.top{height:52px;flex-shrink:0;display:flex;align-items:center;gap:12px}
+.top .t{font-size:15px;font-weight:600}
+.top .s{color:var(--dim);font-size:11.5px}
+.top .r{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:11.5px}
+.xbtn{width:30px;height:30px;border-radius:7px;background:#26262B;display:flex;align-items:center;justify-content:center}
+.body{flex:1;min-height:0;display:flex;gap:14px}
+.col-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:14px;min-height:0}
+.pv{position:relative;border-radius:12px;background:var(--pv);overflow:hidden;flex-shrink:0}
+.pv svg.core{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%)}
+.chips{position:absolute;left:10px;bottom:10px;right:150px;display:flex;flex-wrap:wrap;gap:5px}
+.chip{display:inline-flex;gap:6px;align-items:center;height:26px;padding:0 10px;border-radius:14px;background:var(--chip);font-size:12px;border:1.5px solid transparent;white-space:nowrap}
+.chip.on{border-color:var(--acc)}
+.chip i{width:6px;height:6px;border-radius:50%}
+.chip.sep{background:transparent;color:var(--dim);padding:0 2px 0 6px;font-size:10.5px;letter-spacing:.06em}
+.zoom{position:absolute;right:10px;bottom:10px;display:flex;gap:6px;align-items:center}
+.zoom b{font-weight:400;display:inline-flex;align-items:center;gap:12px;height:26px;padding:0 12px;border-radius:14px;background:var(--chip);font-size:12px}
+.zoom em{width:26px;height:26px;border-radius:50%;background:var(--chip);display:inline-block}
+.tip{position:absolute;right:12px;top:12px;width:300px;background:#141417;border-left:3px solid var(--acc);border-radius:4px;padding:10px 12px;font:15px/1.45 Consolas,monospace}
+.tip b{color:var(--acc)}
+.page{flex:1;min-height:0;overflow:hidden;position:relative}
+.cols{display:flex;gap:12px;align-items:flex-start}
+.col{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border-radius:10px;padding:4px 16px 6px}
+.card h3{margin:0;font-size:10.5px;letter-spacing:.08em;color:#A9A9B2;font-weight:600;padding:10px 0 4px}
+.row{display:flex;align-items:center;gap:12px;min-height:var(--rh,48px);border-top:1px solid #2A2A30;padding:4px 0}
+.card h3+.row{border-top:0}
+.row .l{flex-shrink:0;max-width:46%}
+.row .l div{font-size:13px}
+.row .l small{display:block;color:var(--dim);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .l small.w{color:var(--warn)}
+.row .c{margin-left:auto;display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap;min-width:0}
+.row.stack{flex-direction:column;align-items:stretch;gap:6px}
+.row.stack .l{max-width:none}
+.row.stack .c{margin-left:0;justify-content:flex-start}
+.ico{width:16px;height:16px;flex-shrink:0;color:#9A9AA3}
+.seg{height:26px;padding:0 11px;border-radius:14px;background:var(--chip);font-size:12px;display:inline-flex;align-items:center;border:1.5px solid transparent;white-space:nowrap}
+.seg.on{border-color:var(--acc);background:transparent}
+.sl{display:flex;align-items:center;gap:8px;width:250px;color:var(--dim);font-size:11px}
+.sl .tr{flex:1;height:4px;border-radius:4px;background:#34343B;position:relative}
+.sl .tr i{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--acc)}
+.sl .tr b{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:var(--knob)}
+.tg{width:42px;height:24px;border-radius:12px;background:var(--acc);position:relative}
+.tg b{position:absolute;right:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#1A1A1D}
+.tg.off{background:#3A3A41}.tg.off b{left:3px;right:auto;background:#8B8B94}
+.sw{width:24px;height:24px;border-radius:6px;border:1.5px solid transparent}
+.sw.on{border-color:var(--acc)}
+.shape{width:40px;height:36px;border-radius:8px;border:1.5px solid #34343B;display:flex;align-items:center;justify-content:center;color:#B4B4BC}
+.shape.on{border-color:var(--acc);color:var(--acc)}
+.font{height:36px;padding:0 14px;border-radius:8px;border:1.5px solid #34343B;display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
+.font.on{border-color:var(--acc);color:var(--text)}
+.kc{display:inline-flex;align-items:center;height:24px;padding:0 7px;border-radius:5px;border:1px solid #44444C;background:#26262B;font-size:11.5px}
+.hk{display:inline-flex;gap:3px;padding:3px;border-radius:8px;border:1.5px solid var(--acc)}
+.keys{display:grid;grid-template-columns:1fr 1fr;gap:2px 18px;padding:4px 0 6px}
+.keys div{display:flex;align-items:center;gap:8px;min-height:30px;font-size:12px}
+.keys div span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* motions */
+.mhd{display:flex;align-items:center;gap:8px;padding:10px 0 6px}
+.mhd .n{font-size:14px;font-weight:600}
+.mhd .r{margin-left:auto;display:flex;gap:6px}
+.hint{background:#26262B;border-radius:7px;padding:8px 12px;color:#A9A9B2;font-size:11.5px;margin-bottom:8px}
+.zone{display:flex;align-items:center;gap:10px;font-size:10.5px;letter-spacing:.06em;color:#A9A9B2;font-weight:600;margin:8px 0 6px}
+.zone small{letter-spacing:0;font-weight:400;color:var(--dim)}
+.zone::after{content:"";flex:1;height:1px;background:#2E2E34}
+.tiles{display:grid;gap:6px}
+.tile{border-radius:8px;background:#26262B;display:flex;align-items:center;justify-content:center;gap:7px;font-size:11.5px;border:1.5px solid transparent;color:#D4D4DA;white-space:nowrap;overflow:hidden}
+.tile.big{flex-direction:column;height:56px;gap:4px}
+.tile.small{height:30px;justify-content:flex-start;padding:0 9px}
+.tile.on{border-color:var(--acc)}
+.tile svg{flex-shrink:0;color:var(--acc)}
+.tile:not(.on) svg{color:#B4B4BC}
+.slist .it{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;border:1.5px solid transparent;font-size:12.5px}
+.slist .it.on{border-color:var(--acc)}
+.slist .it i{width:6px;height:6px;border-radius:50%}
+.slist .it em{margin-left:auto;color:var(--dim);font-style:normal;font-size:11px}
+.slist h4{margin:8px 8px 4px;font-size:10.5px;letter-spacing:.08em;color:#A9A9B2}
+.hrow{display:flex;align-items:center;gap:10px;min-height:38px;border-top:1px solid #2A2A30;font-size:12.5px}
+.hrow .pl{width:26px;height:26px;border-radius:50%;background:#2A2A30;display:flex;align-items:center;justify-content:center}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--dim);font-size:11px;padding:6px 0 8px}
+.legend b{color:#C9C9CF;font-weight:500}
+/* layout B: the preview a column */
+.pvcol{width:330px;flex-shrink:0;display:flex;flex-direction:column;gap:10px;padding-bottom:14px}
+.pvcol .pv{flex:1}
+.pvcol .chips2{display:flex;flex-wrap:wrap;gap:5px}
+.over{position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--bad);display:none}
+</style>
+</head>
+<body>
+<div class="bar" role="toolbar" aria-label="Mock controls">
+  <h1>Settings layouts</h1>
+  <div class="grp" id="gView"><span>View</span></div>
+  <div class="grp" id="gLay"><span>Layout</span></div>
+  <div class="grp" id="gSize"><span>Window</span></div>
+</div>
+<div class="stage" id="stage"></div>
+
+<script>
+const $ = (t, cls, html) => { const e = document.createElement(t); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+/* icons: Lucide's paths (ISC), the few used here */
+const IC = {
+  look:'<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.7 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1a1.6 1.6 0 0 1 1.6-1.7h2c3.1 0 5.6-2.5 5.6-5.6C22 6 17.5 2 12 2z"/>',
+  cluster:'<circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.9-9.3M13.6 2.1a10 10 0 0 0-9.9 9.3"/>',
+  replies:'<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  motions:'<path d="M22 12h-2.5a2 2 0 0 0-1.9 1.5l-2.4 8.4a.25.25 0 0 1-.5 0L9.2 2.2a.25.25 0 0 0-.5 0l-2.4 8.4A2 2 0 0 1 4.5 12H2"/>',
+  keys:'<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>',
+  perf:'<path d="m12 14 4-4"/><path d="M3.3 19a10 10 0 1 1 17.4 0"/>',
+  reset:'<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5"/>',
+  fold:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M14 9l3 3-3 3"/>',
+  x:'<path d="M18 6 6 18M6 6l12 12"/>',
+  play:'<path d="M6 3l14 9-14 9z"/>',
+  dot:'<circle cx="12" cy="12" r="4"/>',
+  spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+};
+const svg = (k, s = 16, extra = '') => `<svg class="ico" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${IC[k] || IC.dot}</svg>`;
+
+const STATES = [['Idle','#6FA0FF'],['Thinking','#FFA43A'],['Working','#36C6F0'],['Needs you','#FF7A2F'],['Done','#7B9CFF'],['Asleep','#7F9BFF']];
+const PANEL_STATES = [['Ready','#9AA8FF'],['Speaking','#3FD0B0'],['Listening','#5BE38A'],['Transcribing','#B08CFF'],['Away','#8B8B94'],['Error','#F06A6A']];
+const ROUT = ['Oracle','Puzzle','Smooth puzzle','Long spin','Blades','Engine','Gyro','Helix','Typewriter','Forge','Loom','Conveyor','Compressor','Swimmers','Beacon','Knock','Unlock','Bloom','Zip','Black hole','Broadcast','Receiver','Decoding','Locked','Crazy','Restless'];
+const ACTS = ['Look','Peek','Twirl','Shiver','Blink','Align','Step','Unfold','Scan','Spike','Crazy','Ripple','Orbit','Petal','Constellation','Tumble'];
+const USE = {Thinking:['Puzzle','Smooth puzzle','Long spin','Blades'], Asleep:['Black hole']};
+
+/* the pages: the rows win/panel.c's page_sections() has */
+const sl = (l, note, v, ends) => ({k:'slider', l, note, v, ends});
+const seg = (l, note, opts, on, stack) => ({k:'seg', l, note, opts, on, stack});
+const PAGES = {
+  look:{t:'Look', s:'how a core looks', icon:'look', cards:[
+    {t:'SHELL', rows:[{k:'shapes', l:'Shape'}, sl('Glow', null, .98, ['', 'Bright']), sl('Inner core', null, .35, ['', 'S'])]},
+    {t:'ON SCREEN', rows:[sl('Size', null, .33, ['S','L']), seg('Focus frame','round a carried core, or one you rest on',['Segments','Lens','Polar','Diamond','Lock','Orbits','None'],1,true)]},
+    {t:'BACKDROP', rows:[seg('Backdrop','a soft dark outline along the lines, so they read over a light app; Auto: light apps only',['Off','On','Auto'],1),
+      {k:'swatch', l:'Darkness colour', note:'of the outline', cols:['#000','#0E1430','#1E1028','#0D1F16','#2A160C']},
+      sl('Outline width', null, 1, ['', 'Heavy']), sl('Outline strength', null, .6, ['', 'Strong']),
+      {k:'toggle', l:'Behind the centre', note:'a small soft disc behind the bright centre too', on:true}]},
+  ]},
+  cluster:{t:'Cluster', s:'the cores and their orbit', icon:'cluster', cards:[
+    {t:'LAYOUT', rows:[seg('Layout',null,['Single core','All cores'],0), {k:'toggle', l:'Other sessions', note:'small cores round the main one', on:true}, seg('Names over cores','all-cores mode',['On hover','Always'],1)]},
+    {t:'MOTION', rows:[sl('Gravity','drag the core above to feel it',.33,['Floaty','Firm']), seg('Scroll on a core',null,['Roll','Roll back','Turn','Turn back','Off'],1)]},
+    {t:'AWAY', rows:[sl('Rest after','no mouse or keys this long: the cores show STANDBY',0,['', '1 min'])]},
+  ]},
+  replies:{t:'Replies', s:'the box with the last reply', icon:'replies', tip:true, cards:[
+    {t:'TEXT', rows:[{k:'fonts', l:'Font'}, sl('Text size', null, .75, ['', 'L'])]},
+    {t:'BOX', rows:[sl('Box size','how far it grows before it scrolls',1,['', 'XL']), {k:'swatch', l:'Box colour', cols:['#141417','#222226','#16213D','#22183A','#11291F']},
+      {k:'swatch', l:'Text colour', cols:['#1A1A1D','#1A1A1D','#1A1A1D','#1A1A1D','#1A1A1D'], aa:true}, seg('Opens',null,['Next to core','Middle'],0)]},
+  ]},
+  motions:{t:'Motions', s:'what each state may play', icon:'motions', motions:true},
+  keys:{t:'Shortcuts', s:'click a key to change it', icon:'keys', cards:[
+    {t:'ANYWHERE', rows:[{k:'hotkey', l:'One core / all cores', keys:['Ctrl','Alt','C'], warn:1}, {k:'hotkey', l:'Show or hide Vigil', keys:['Ctrl','Alt','V'], warn:1},
+      {k:'hotkey', l:'Reply to the main core', keys:['Ctrl','Alt','R'], warn:1}, {k:'hotkey', l:'Open Settings', keys:[], set:1}]},
+    {t:'ON A CORE', rows:[seg('Move or carry a core','hold it, then drag (move) or click (carry)',['Alt','Ctrl','Shift'],0), {k:'caps', l:'Type a reply', key:'Double-click', fixed:1}, {k:'caps', l:'Spin the shell', note:'flick it and it coasts back', key:'Drag', fixed:1}]},
+    {t:'IN THE REPLY LINE', rows:[seg('Send','the other one makes a new line',['Enter','Ctrl+Enter'],0), {k:'caps', l:'Clear the line', note:'with nothing selected; else it copies', key:'Ctrl+C', fixed:1},
+      {k:'caps', l:'Delete a word', note:'back to the space before it; Ctrl+U: the whole line before', key:'Ctrl+W', fixed:1}, {k:'caps', l:'Close', key:'Esc', fixed:1}]},
+  ]},
+  perf:{t:'Performance', s:'smoother costs more CPU', icon:'perf', cards:[
+    {t:'SMOOTHNESS', rows:[seg('Preset','at least 30 pictures a second; busy states 60',['Saver','Balanced','Smooth','Max'],2,true)]},
+    {t:'PICTURES A SECOND', rows:[sl('Idle',null,.55,['', '30']), sl('Thinking',null,.64,['', '45']), sl('Busy','working, done, a motion',.73,['', '60']), sl('Asleep or away',null,.27,['', '10']), sl('In the hand','pointed at or held',.73,['', '60'])]},
+    {t:'DRAWING', rows:[seg('Drawing threads','how many share drawing a big core; Auto: about one a physical core',['Auto','1','2','4','8'],1), seg('Black hole drawn on','asleep, it is drawn on the graphics card: a sixth of the CPU',['GPU','CPU','CPU light'],0)]},
+  ]},
+};
+const ORDER = ['look','cluster','replies','motions','keys','perf'];
+
+/* ---- rows ---- */
+function rowEl(r) {
+  const e = $('div', 'row');
+  const l = $('div', 'l', `<div>${r.l}</div>` + (r.note ? `<small>${r.note}</small>` : '') + (r.warn ? '<small class="w">held by another app: pick another</small>' : ''));
+  const c = $('div', 'c');
+  if (r.k === 'slider') c.innerHTML = `<div class="sl">${r.ends[0] ? `<span>${r.ends[0]}</span>` : ''}<div class="tr"><i style="width:${r.v * 100}%"></i><b style="left:${r.v * 100}%"></b></div><span>${r.ends[1]}</span></div>`;
+  else if (r.k === 'seg') { c.innerHTML = r.opts.map((o, i) => `<span class="seg${i === r.on ? ' on' : ''}">${o}</span>`).join(''); if (r.stack) e.classList.add('stack'); }
+  else if (r.k === 'toggle') c.innerHTML = `<span class="tg${r.on ? '' : ' off'}"><b></b></span>`;
+  else if (r.k === 'swatch') c.innerHTML = r.cols.map((col, i) => `<span class="sw${i === 0 ? ' on' : ''}" style="background:${col}">${r.aa ? '<small style="font-size:9px;display:flex;justify-content:center;padding-top:5px;color:#ddd">Aa</small>' : ''}</span>`).join('') + '<span class="sw" style="background:#26262B;display:flex;align-items:center;justify-content:center">' + svg('look', 13) + '</span>';
+  else if (r.k === 'shapes') c.innerHTML = [0, 1, 2, 3].map(i => `<span class="shape${i === 2 ? ' on' : ''}">${svg(['dot', 'cluster', 'spark', 'look'][i], 18)}</span>`).join('');
+  else if (r.k === 'fonts') c.innerHTML = '<span class="font on"><b style="font-size:15px">Aa</b> Terminal</span><span class="font"><b style="font-size:15px;font-weight:400">Aa</b> Clean</span>';
+  else if (r.k === 'hotkey') c.innerHTML = r.set ? '<span style="color:var(--dim);font-size:12px">Set...</span>' : `<span class="hk">${r.keys.map(k => `<span class="kc">${k}</span>`).join('')}</span>`;
+  else if (r.k === 'caps') c.innerHTML = `<span class="kc">${r.key}</span>`;
+  e.append(l, c);
+  return e;
+}
+function cardEl(card, opt) {
+  const e = $('div', 'card');
+  e.append($('h3', null, card.t));
+  if (opt.compactKeys) { /* the keys you cannot change: a two-column list, not a row each */
+    const fixed = card.rows.filter(r => r.fixed), rest = card.rows.filter(r => !r.fixed);
+    rest.forEach(r => e.append(rowEl(r)));
+    if (fixed.length) { const k = $('div', 'keys'); fixed.forEach(r => k.append($('div', null, `<span title="${r.note || ''}">${r.l}</span><span class="kc" style="flex:none">${r.key}</span>`))); if (rest.length) k.style.borderTop = '1px solid #2A2A30'; e.append(k); }
+  } else card.rows.forEach(r => e.append(rowEl(r)));
+  return e;
+}
+
+/* ---- the preview ---- */
+function coreSvg(px) {
+  const s = px / 220;
+  return `<svg class="core" width="${px * 1.9}" height="${px * 1.6}" viewBox="-60 -60 340 290" aria-hidden="true">
+  <defs><radialGradient id="g"><stop offset="0" stop-color="#FFA43A" stop-opacity=".45"/><stop offset="1" stop-color="#FFA43A" stop-opacity="0"/></radialGradient>
+  <radialGradient id="h"><stop offset="0" stop-color="#fff"/><stop offset=".45" stop-color="#FFF6E8" stop-opacity=".85"/><stop offset="1" stop-color="#FFA43A" stop-opacity="0"/></radialGradient>
+  <radialGradient id="b"><stop offset="0" stop-color="#fff"/><stop offset=".4" stop-color="#9EC2FF" stop-opacity=".8"/><stop offset="1" stop-color="#9EC2FF" stop-opacity="0"/></radialGradient></defs>
+  <circle cx="110" cy="110" r="100" fill="url(#g)"/>
+  <g fill="none" stroke="#FFA43A" stroke-width="1.6" stroke-linejoin="round"><path d="M110 38L152.3 51.8L178.5 87.8L178.5 132.2L152.3 168.2L110 182L67.7 168.2L41.5 132.2L41.5 87.8L67.7 51.8Z"/><path d="M110 72L146.1 98.3L132.3 140.7L87.7 140.7L73.9 98.3Z"/><path d="M110 38L110 72M152.3 51.8L146.1 98.3M178.5 132.2L132.3 140.7M67.7 168.2L87.7 140.7M41.5 87.8L73.9 98.3M152.3 168.2L132.3 140.7M67.7 51.8L73.9 98.3"/></g>
+  <circle cx="110" cy="110" r="26" fill="url(#h)"/>
+  <circle cx="95" cy="-30" r="22" fill="url(#b)"/><circle cx="-30" cy="150" r="20" fill="url(#b)"/><circle cx="240" cy="130" r="18" fill="url(#h)"/></svg>`;
+}
+function chipsHtml(page, state, withPanel) {
+  const list = (arr) => arr.map(([n, c]) => `<span class="chip${n === state ? ' on' : ''}" data-state="${n}"><i style="background:${c}"></i>${n}</span>`).join('');
+  return list(STATES) + (withPanel ? '<span class="chip sep">PANEL</span>' + list(PANEL_STATES) : '');
+}
+function preview(page, state, w, h, chipsInside) {
+  const e = $('div', 'pv');
+  e.style.height = h + 'px'; if (w) e.style.width = w + 'px';
+  const core = Math.max(70, Math.min(150, h * 0.42));
+  e.innerHTML = coreSvg(core) + (PAGES[page].tip ? '<div class="tip"><b>vigil · Done</b><br>The satellites slide round the orbit and</div>' : '')
+    + (chipsInside ? `<div class="chips">${chipsHtml(page, state, page === 'motions')}</div>` : '')
+    + '<div class="zoom"><em></em><b>−&nbsp; 100% &nbsp;+</b></div>';
+  return e;
+}
+
+/* ---- Motions: the state's tiles ---- */
+function motionsDetail(state, opt) {
+  const box = $('div', 'card');
+  const hd = $('div', 'mhd', `<i style="width:8px;height:8px;border-radius:50%;background:${(STATES.concat(PANEL_STATES).find(s => s[0] === state) || [0, '#999'])[1]}"></i><span class="n">${state}</span><span class="r"><span class="seg">${svg('play', 11)}&nbsp;Try it</span><span class="seg" style="background:transparent;color:var(--dim)">Reset</span></span>`);
+  box.append(hd);
+  if (!opt.compact) box.append($('div', 'hint', `Click a motion to try it above; drag it up to use it in ${state}, down to stop.`));
+  if (state === 'Asleep') { box.append(holeBody(opt)); return box; }
+  const used = USE[state] || [], more = ROUT.filter(r => !used.includes(r)).concat(ACTS.map(a => a + ' ·'));
+  const cols = opt.cols, big = !opt.compact;
+  const zone = (t, sub) => $('div', 'zone', `${t}${sub ? ` <small>${sub}</small>` : ''}`);
+  const tiles = (arr, on) => { const g = $('div', 'tiles'); g.style.gridTemplateColumns = `repeat(${cols}, minmax(0,1fr))`; arr.forEach(n => g.append($('div', `tile ${big ? 'big' : 'small'}${on ? ' on' : ''}`, `${svg(n.endsWith('·') ? 'spark' : 'motions', 15)}<span>${n.replace(' ·', '')}</span>`))); return g; };
+  box.append(zone(`ROUTINES · ${used.length}`, 'one picked at random each time it starts'), tiles(used, true));
+  box.append(zone('MORE', opt.compact ? 'drag one up to use it; click to try it' : ''), tiles(opt.more ? more.slice(0, opt.more) : more, false));
+  return box;
+}
+function holeBody(opt) {
+  const w = $('div');
+  const two = opt.compact && opt.cols >= 6;
+  const a = $('div'), b = $('div');
+  a.append($('div', 'zone', 'THE HOLE'));
+  a.append(rowEl({k:'toggle', l:'Lensing', note:'the sky behind it, bent', on:true}), rowEl(sl('Tilt', 'its disc, as you see it', .4, ['Edge-on', 'Face-on'])));
+  b.append($('div', 'zone', 'ITS ACTIONS'));
+  ['Tidal disruption', 'Flare', 'Precession', 'Hot spot'].forEach((n, i) => b.append($('div', 'hrow', `<span class="pl">${svg('play', 11)}</span><span>${n}</span><span style="margin-left:auto" class="tg${i === 2 ? ' off' : ''}"><b></b></span>`)));
+  if (two) { const c = $('div', 'cols'); a.className = b.className = 'col'; c.append(a, b); w.append(c); } else w.append(a, b);
+  w.append($('div', 'legend', '<span><b>Press</b> pulls the gas in</span><span><b>Hold</b> feeds it</span><span><b>Drag</b> tilts the disc</span><span><b>Wheel</b> pushes the gas</span>'));
+  w.append($('div', 'zone', 'ROUTINES · 1'));
+  const g = $('div', 'tiles'); g.style.gridTemplateColumns = `repeat(${opt.cols}, minmax(0,1fr))`;
+  ['Black hole'].forEach(n => g.append($('div', `tile ${opt.compact ? 'small' : 'big'} on`, `${svg('dot', 15)}<span>${n}</span>`)));
+  w.append(g);
+  return w;
+}
+function stateList(state) {
+  const e = $('div', 'card slist');
+  const it = ([n, c]) => `<div class="it${n === state ? ' on' : ''}" data-state="${n}"><i style="background:${c}"></i>${n}<em>${(USE[n] || []).length || ''}</em></div>`;
+  e.innerHTML = '<h4>CLAUDE CODE</h4>' + STATES.map(it).join('') + '<h4>PANEL</h4>' + PANEL_STATES.map(it).join('');
+  e.style.padding = '4px 6px';
+  return e;
+}
+
+/* ---- the window, in one of the layouts ---- */
+function makeWindow(lay, page, state, W, H) {
+  const P = PAGES[page];
+  const win = $('div', 'win'); win.style.width = W + 'px'; win.style.height = H + 'px';
+  const side = $('nav', 'side');
+  side.innerHTML = `<span class="sb">${svg('fold', 18)}</span>` + ORDER.map(p => `<button class="sb${p === page ? ' on' : ''}" data-page="${p}" aria-label="${PAGES[p].t}" title="${PAGES[p].t}">${svg(PAGES[p].icon, 17)}</button>`).join('') + `<span style="flex:1"></span><span class="sb">${svg('reset', 16)}</span>`;
+  const main = $('div', 'main');
+  main.append($('div', 'top', `<span class="t">${P.t}</span><span class="s">${P.s}</span><span class="r">Reset <span class="xbtn">${svg('x', 15)}</span></span>`));
+  const body = $('div', 'body');
+  const colMain = $('div', 'col-main');
+  const pageEl = $('div', 'page');
+  pageEl.style.setProperty('--rh', lay === 'today' ? '48px' : '40px');
+  const innerW = W - 56 - 30;
+  if (lay === 'today') colMain.append(preview(page, state, 0, Math.round(Math.min(420, Math.max(200, H * 0.39))), page !== 'motions'));
+  if (lay === 'A') colMain.append(preview(page, state, 0, Math.max(160, Math.round(H * 0.26)), true));
+  colMain.append(pageEl);
+  body.append(colMain);
+  if (lay === 'B') { /* the preview, a column on the right; the chips under it */
+    const pc = $('div', 'pvcol');
+    pc.append(preview(page, state, 0, 10, false));
+    pc.append($('div', 'chips2', chipsHtml(page, state, page === 'motions')));
+    body.append(pc);
+  }
+  main.append(body);
+  win.append(side, main);
+  const pageW = lay === 'B' ? innerW - 330 - 14 : innerW;
+
+  if (P.motions) {
+    if (lay === 'today') {
+      const g = $('div', 'cols'); const a = $('div'); a.style.width = '240px'; a.style.flexShrink = '0';
+      a.append(stateList(state)); const b = $('div', 'col'); b.append(motionsDetail(state, {compact: false, cols: 7})); g.append(a, b); pageEl.append(g);
+    } else {
+      const cols = Math.max(3, Math.floor((pageW - 32) / (lay === 'B' ? 122 : 116)));
+      pageEl.append(motionsDetail(state, {compact: true, cols}));
+    }
+  } else if (lay === 'B') {
+    const c = $('div', 'col'); P.cards.forEach(card => c.append(cardEl(card, {compactKeys: true}))); pageEl.append(c);
+  } else {
+    const g = $('div', 'cols'), c1 = $('div', 'col'), c2 = $('div', 'col'); g.append(c1, c2); pageEl.append(g);
+    const opt = {compactKeys: lay === 'A'};
+    const cards = P.cards.map(card => cardEl(card, opt));
+    win._place = () => { /* Today: each card into the shorter column, in order (what the panel does). A: the split whose taller column is shortest. */
+      if (lay === 'today') { cards.forEach(cd => (c1.offsetHeight <= c2.offsetHeight ? c1 : c2).append(cd)); return; }
+      cards.forEach(cd => c1.append(cd)); const hs = cards.map(cd => cd.offsetHeight + 12); c1.innerHTML = '';
+      let best = null;
+      for (let m = 0; m < 1 << cards.length; m++) { let a = 0, b = 0; hs.forEach((h, i) => (m >> i & 1 ? (b += h) : (a += h))); const t = Math.max(a, b); if (!best || t < best.t - 1 || (Math.abs(t - best.t) <= 1 && (m & 1) === 0 && best.m & 1)) best = {m, t}; }
+      cards.forEach((cd, i) => (best.m >> i & 1 ? c2 : c1).append(cd));
+    };
+  }
+  win._pageEl = pageEl;
+  return win;
+}
+function fitOf(win) {
+  if (win._place) win._place();
+  const p = win._pageEl, over = p.scrollHeight - p.clientHeight;
+  const bar = $('div', 'over'); if (over > 1) bar.style.display = 'block'; p.append(bar);
+  return over > 1 ? over : 0;
+}
+function badge(over) { return `<span class="badge"><i style="background:${over ? 'var(--bad)' : 'var(--ok)'}"></i>${over ? `scrolls ${over}px` : 'fits'}</span>`; }
+
+/* ---- the controls and views ---- */
+const LAYS = {today: 'Today', A: 'A · tighter', B: 'B · preview at the side'};
+const SIZES = {'1000×720': [1000, 720], '1280×800': [1280, 800], '760×560': [760, 560]};
+let S = {view: 'one', lay: 'A', page: 'look', state: 'Thinking', size: '1000×720'};
+try { Object.assign(S, JSON.parse(localStorage.getItem('slm') || '{}')); } catch (e) {}
+{ const h = location.hash.slice(1).split(','); if (h[0] === 'all') S.view = 'all'; else if (LAYS[h[0]]) Object.assign(S, {view: 'one', lay: h[0], page: h[1] || S.page, state: h[2] || S.state}); } /* #all, or #A,motions,Asleep */
+function btns(id, map, key) {
+  const g = document.getElementById(id); g.querySelectorAll('button').forEach(b => b.remove());
+  Object.entries(map).forEach(([k, v]) => { const b = $('button', 'tb' + (S[key] === k ? ' on' : ''), v); b.type = 'button'; b.onclick = () => { S[key] = k; draw(); }; g.append(b); });
+}
+const NOTES = {
+  today: 'The window as it is now. The preview takes about 40% of the height, rows are 48 px, and each card goes into whichever column is shorter, in order. Look, Motions and Shortcuts scroll at 1000×720.',
+  A: '<b>A · tighter.</b> The preview drops to about a quarter of the height, with the cores a little smaller. Rows go from 48 to 40 px. The cards are split between the columns so the taller column is as short as possible. Keys you can\'t change (Double-click, Ctrl+W, Esc…) become a two-column list instead of a full row each. On Motions the state list moves into the preview as chips, with the panel states after a divider, and the tiles shrink to one line each.',
+  B: '<b>B · preview at the side.</b> The preview becomes a 330 px column on the right running the full height, with the state chips under it. The page is a single column of cards with 40 px rows and the same compact key list. It has the most height per page, but narrower rows.',
+};
+function draw() {
+  try { localStorage.setItem('slm', JSON.stringify(S)); } catch (e) {}
+  btns('gView', {one: 'One page', all: 'All pages'}, 'view');
+  btns('gLay', LAYS, 'lay'); btns('gSize', Object.fromEntries(Object.keys(SIZES).map(k => [k, k])), 'size');
+  document.getElementById('gLay').style.display = S.view === 'one' ? '' : 'none';
+  const st = document.getElementById('stage'); st.innerHTML = '';
+  const [W, H] = SIZES[S.size];
+  if (S.view === 'one') {
+    st.append($('p', 'notes', NOTES[S.lay] + ' Click a page in the sidebar, or a state chip on Motions (try Asleep).'));
+    const holder = $('div'); st.append(holder);
+    const win = makeWindow(S.lay, S.page, S.state, W, H);
+    const b = $('div'); holder.append(b, win);
+    b.innerHTML = badge(fitOf(win));
+    win.addEventListener('click', ev => { const p = ev.target.closest('[data-page]'), s = ev.target.closest('[data-state]'); if (p) { S.page = p.dataset.page; draw(); } else if (s) { S.state = s.dataset.state; draw(); } });
+  } else {
+    st.append($('p', 'notes', 'Every page in every layout at ' + S.size + '. A red line along the bottom means the page scrolls. Click a thumbnail to open it.'));
+    const ov = $('div', 'ov'); st.append(ov);
+    const cols = ORDER.map(p => [p, p === 'motions' ? 'Thinking' : 'Thinking']).concat([['motions', 'Asleep']]);
+    ov.append($('div', 'hd'));
+    cols.forEach(([p, s]) => ov.append($('div', 'hd', PAGES[p].t + (p === 'motions' ? ' · ' + s : ''))));
+    const k = 0.2;
+    Object.keys(LAYS).forEach(lay => {
+      ov.append($('div', 'lab', LAYS[lay]));
+      cols.forEach(([p, s]) => {
+        const t = $('div', 'thumb'); const sz = $('div', 'sz'); sz.style.width = W * k + 'px'; sz.style.height = H * k + 'px';
+        const win = makeWindow(lay, p, s, W, H); win.style.transform = `scale(${k})`;
+        const b = $('div'); t.append(b, sz); sz.append(win); ov.append(t);
+        b.innerHTML = badge(fitOf(win));
+        t.onclick = () => { Object.assign(S, {view: 'one', lay, page: p, state: s}); draw(); window.scrollTo(0, 0); };
+      });
+    });
+  }
+}
+draw();
+</script>
+</body>
+</html>
