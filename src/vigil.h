@@ -169,6 +169,7 @@ void motion_map_init(void);               /* sets MOTION_MAP to the defaults onc
 #define MAX_BLADE 20
 #define MAX_SKEIN 5
 #define NSTAR 22
+#define NDUST 140 /* the classic black hole's dust disc (HOLE_CLASSIC) */
 typedef struct { float axis[3], angle, done, dur; double at; int kind; } Turn; /* kind: 0 in-out, 1 speeds up and stops dead, 2 jerks out and back */
 typedef struct { int v; float len, up, hd, dn; double at; } Spike;         /* len < 0: pulled in toward the centre */
 typedef struct { int from, to, ntrail, trail[10]; double at, trail_at[10]; } Fish;
@@ -221,7 +222,8 @@ typedef struct { float p[TDE_N][3], v[TDE_N][3], q[TDE_N], s[6], spread, heat, a
 /* gas pulled off the pointer while a press is held on the hole (screen frame: x right, y up, z toward you; M units) */
 #define HS_N 64
 typedef struct { float p[HS_N][3], v[HS_N][3], age[HS_N], acc; int head; double next; } HoldRS;
-typedef struct { Piece piece[MAX_T]; TdeRS tde; HoldRS hold; float star[NSTAR][4], wake, grow, act_p, act_q, flow;
+typedef struct { float r, a, s; } Dust;
+typedef struct { Piece piece[MAX_T]; Dust dust[NDUST]; TdeRS tde; HoldRS hold; float star[NSTAR][4], wake, grow, act_p, act_q, flow;
                  float nv[3], nvel[3], tilt_ph, ax_seen, ay_seen, flow_v; double touched; /* the disc's axis (x right, y up, z toward you; 0: as it rests), turned by
                                 * a drag and the wheel like a shell; when last handled; flow_v: the hand's push on its turn */
                  float M0[9], dn[3], d1[3], d2[3]; /* the view as it began, and the disc's axis and plane in it (the collapse) */
@@ -456,6 +458,9 @@ int bh2_progress(void);                                    /* how far the map as
 typedef struct { const Session *s; int n; float E; const unsigned char *rgba; } BhGpuImg;
 extern BhGpuImg BH_GPU_IMG;
 extern int BH_GPU_ON;
+/* HOLE_CLASSIC: the black hole as it was before the traced one (a void with a violet dust disc, no actions), much
+ * cheaper to draw; the Mac panel sets it, the Windows panel and the terminal leave it 0 */
+extern int HOLE_CLASSIC;
 extern int BH_LIGHT; /* the CPU's black hole lighter (the Windows panel's CPU light): no stars behind it, 30 pictures
                       * a second at most while it plays */
 float bh_hole_expo(const Session *s, double now); /* how bright its light is now (hover, the wheel, away, back) */
