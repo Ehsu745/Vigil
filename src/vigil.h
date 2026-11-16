@@ -355,6 +355,15 @@ typedef struct {
     int pressing;          /* the button is down on it and has not moved off (panel only) */
     float quiet_to, quiet; /* you are away (panel only): a black hole goes quiet, embers and slow, and flares up when you are back */
     double woke_at;        /* when it last woke from quiet */
+    /* the black hole eats from the star (panel only): round a main core asleep as a black hole a satellite is a star
+     * (star, 0..1: how far it has turned into one; the panel eases it), and the hole draws a thin stream of gas from each
+     * star into its disc: feed[i] = where that star is (x right, y up, z toward you, in the hole's core squares from its
+     * middle), how much gas it gives (feed[i][3], 0..1) and its own seed (feed[i][4], so its clumps keep their pattern);
+ * nfeed of them */
+#define MAX_FEED 6
+    float star, star_tx, star_ty; /* (star_t*: the way its gas leaves it on the screen, y down: its tail, as a comet's) */
+    float feed[MAX_FEED][5];
+    int nfeed;
     float pad;             /* its picture is pad times the core's square, the core the same size in the middle (0, 1: none); the
                             * panel gives the black hole room for its disc and its actions */
     float spin_x, spin_y;  /* extra rotation speed left from a drag, fades out */

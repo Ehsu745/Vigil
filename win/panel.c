@@ -529,7 +529,7 @@ static void settings_load(void) {
         g_smooth_custom = cu;
     if (json_num(buf, "threads", &v) && v >= 0 && v <= 8) g_threads = (int)v;
     if (json_num(buf, "holeGpu", &v)) g_gpu = v != 0;
-    if (json_num(buf, "holeLight", &v)) g_hole_light = v != 0;
+    /* (holeLight: CPU light is gone, the CPU's black hole is light enough; a saved one is the CPU) */
     if (json_num(buf, "setW", &v) && v >= 620 && v <= 6000) g_set_w = v; /* the Settings window itself */
     if (json_num(buf, "setH", &v) && v >= 480 && v <= 6000) g_set_h = v;
     if (json_num(buf, "setSide", &v)) g_set_side = v != 0;
@@ -1412,6 +1412,49 @@ static int sat_play(Room *room, int i, Orbit *ob, float tx, float ty, float rx, 
     }
     return 0;
 }
+/* The hole always eats from the star: round a main core asleep as a black hole (hk: how far it is one) a satellite turns
+ * into a star (Session.star, drawn by render.c), unless it is a black hole itself, and the hole draws the thin stream
+ * of gas it loses (main->feed, bh_gas_points). cx, cy: the main core's middle; zpx: how far toward you the satellite's
+ * place on its orbit is; big: the main core's square, all in pixels */
+/* the black hole's disc plane as drawn now: he1, he2 across it (x right, y up, z toward you), he1 where it crosses the screen */
+static void hole_plane(const Session *mh, double now, float *he1, float *he2) {
+    float hax[3] = {0, 1, 0};
+    bh_hole_axis(mh, now, hax);
+    he1[0] = 1; he1[1] = 0; he1[2] = 0;
+    float l = hypotf(hax[1], hax[0]);
+    if (l > 1e-3f) { he1[0] = hax[1] / l; he1[1] = -hax[0] / l; }
+    he2[0] = hax[1] * he1[2] - hax[2] * he1[1]; he2[1] = hax[2] * he1[0] - hax[0] * he1[2]; he2[2] = hax[0] * he1[1] - hax[1] * he1[0];
+}
+/* a satellite's place on its orbit round the black hole, in the disc's plane: k of m, rx the orbit's radius (pixels),
+ * clk the orbits' clock, wide 0..1 (you away: out wide); P3 its direction, *Rk its radius */
+static void hole_orbit(const float *he1, const float *he2, int k, int m, float rx, double clk, float wide, float *P3, float *Rk, float *G3) {
+    *Rk = rx * (0.9f + 0.1f * (k % 3)) * (1 + 0.45f * wide);
+    float wk = 0.5f * powf(rx / *Rk, 1.5f);
+    double ph = clk * wk + 2 * M_PI * k / (m > 0 ? m : 1);
+    float c = (float)cos(ph), sn = (float)sin(ph), sg = BH_TUNE.b2_spin < 0 ? -1.0f : 1.0f;
+    for (int q = 0; q < 3; q++) P3[q] = c * he1[q] + sn * he2[q];
+    /* the way its gas leaves it (the start of bh_gas_points' spiral arm: in, and on round the way the disc turns) */
+    for (int q = 0; q < 3; q++) G3[q] = -0.85f * P3[q] + sg * 2.0f * (-sn * he1[q] + c * he2[q]);
+}
+static void sat_star(Session *main, Session *sat, const Orbit *ob, float cx, float cy, float zpx, const float *G3, float big, float hk, float dt) {
+    float want = is_hole(sat) ? 0 : hk;
+    sat->star += (want - sat->star) * (1 - expf(-dt * 2.5f));
+    if (fabsf(want - sat->star) < 0.005f) sat->star = want;
+    float ux = (ob->px - cx) / big, uy = -(ob->py - cy) / big, ud = hypotf(ux, uy), give = sat->star * fminf(1, fmaxf(0, (1.15f - ud) / 0.25f));
+    { /* its tail: the way its gas leaves it on the screen (on its orbit), else toward the hole; turning smoothly */
+        float tx = -ux, ty = uy, l; /* (y down) */
+        if (G3 && !ob->free && hypotf(G3[0], G3[1]) > 0.2f) { tx = G3[0]; ty = -G3[1]; }
+        l = hypotf(tx, ty);
+        if (l > 1e-4f) {
+            tx /= l; ty /= l;
+            float f = 1 - expf(-dt * 6), nx = sat->star_tx + (tx - sat->star_tx) * f, ny = sat->star_ty + (ty - sat->star_ty) * f, nl = hypotf(nx, ny);
+            if (nl > 1e-3f) { sat->star_tx = nx / nl; sat->star_ty = ny / nl; } else { sat->star_tx = tx; sat->star_ty = ty; }
+        }
+    }
+    if (give < 0.03f || main->nfeed >= MAX_FEED || ob->latched || ob->swallow_at > 0) return; /* (out of its reach, or on the pointer) */
+    float *F = main->feed[main->nfeed++];
+    F[0] = ux; F[1] = uy; F[2] = zpx / big; F[3] = give; F[4] = (float)fmod(sat->phase, 6.2831853);
+}
 static void draw_single(Room *room, int n, double now) {
     int fi = 0;
     for (int i = 0; i < n; i++) if (!strcmp(room->s[i].sid, g_focus)) fi = i;
@@ -1436,12 +1479,9 @@ static void draw_single(Room *room, int n, double now) {
     static float hk_e; static double hclk;
     const Session *mh = fi < n ? &room->s[fi] : NULL;
     hk_e += ((mh && is_hole(mh) ? 1.0f : 0.0f) - hk_e) * (1 - expf(-dt * 1.2f));
-    float hax[3] = {0, 1, 0}, he1[3] = {1, 0, 0}, he2[3] = {0, 0, -1}, wide = mh ? mh->quiet : 0;
+    float he1[3] = {1, 0, 0}, he2[3] = {0, 0, -1}, wide = mh ? mh->quiet : 0;
     if (hk_e > 0.01f) {
-        bh_hole_axis(mh, now, hax);
-        float l = hypotf(hax[1], hax[0]);
-        if (l > 1e-3f) { he1[0] = hax[1] / l; he1[1] = -hax[0] / l; he1[2] = 0; } /* (the line where its disc crosses the screen) */
-        he2[0] = hax[1] * he1[2] - hax[2] * he1[1]; he2[1] = hax[2] * he1[0] - hax[0] * he1[2]; he2[2] = hax[0] * he1[1] - hax[1] * he1[0];
+        hole_plane(mh, now, he1, he2);
         hclk += dt * (1 - 0.7f * wide);
     }
     /* while the main core is carried nothing draws the small ones to their places: only gravity holds them to the
@@ -1450,9 +1490,10 @@ static void draw_single(Room *room, int n, double now) {
     Orbit *ring_of[MAX_SESS];
     int rn = 0;
     for (int i = 0; i < n; i++) if (i != fi && i != dragged) { Orbit *o = orbit_of(room->s[i].sid); if (o->init && !o->free) ring_of[rn++] = o; }
+    for (int i = 0; i < n; i++) { room->s[i].nfeed = 0; if (i == fi) room->s[i].star = 0; }
     for (int i = 0, k = 0; i < n; i++) {
         Orbit *ob = orbit_of(room->s[i].sid);
-        float tx, ty, tw, bob = 0;
+        float tx, ty, tw, bob = 0, zpx = 0, G3[3] = {0, 0, 0};
         double a = 0;
         if (i == fi) { tx = g_mx; ty = g_my; tw = big; }
         else {
@@ -1460,11 +1501,10 @@ static void draw_single(Room *room, int n, double now) {
             bob = (float)(3 * g_dpi * sin(orbit * 0.8 + i * 1.7));
             tx = g_mx + rx * (float)cos(a); ty = g_my - ry * (float)sin(a) + bob; tw = small;
             if (hk_e > 0.01f) { /* round the black hole, in its disc */
-                float Rk = rx * (0.9f + 0.1f * (k % 3)) * (1 + 0.45f * wide), wk = 0.5f * powf(rx / Rk, 1.5f);
-                double ph = hclk * wk + 2 * M_PI * k / (n - 1);
-                float c = (float)cos(ph), sn = (float)sin(ph), P3[3];
-                for (int q = 0; q < 3; q++) P3[q] = c * he1[q] + sn * he2[q];
+                float Rk, P3[3];
+                hole_orbit(he1, he2, k, n - 1, rx, hclk, wide, P3, &Rk, G3);
                 tx += (g_mx + Rk * P3[0] - tx) * hk_e; ty += (g_my - Rk * P3[1] - ty) * hk_e;
+                zpx = Rk * P3[2] * hk_e;
                 g_sat_behind[i] = hk_e > 0.5f && P3[2] < 0;
             } else g_sat_behind[i] = 0;
             k++;
@@ -1500,6 +1540,7 @@ static void draw_single(Room *room, int n, double now) {
             if (fd > 0.02f) { float f = fminf(1, fd * 3); ob->px += (tx - ob->px) * f; ob->py += (ty - ob->py) * f; ob->vx *= 1 - f; ob->vy *= 1 - f; } /* (whipped round: on the spiral, never flung off) */
             else if (d > ok.BREAK) ob->free = 1; /* pulled too far: it lets go, and flies on with the speed it had */
         }
+        if (i != fi && g_others) sat_star(&room->s[fi], &room->s[i], ob, g_mx, g_my, zpx, hk_e > 0.5f ? G3 : NULL, big, hk_e, dt);
         /* its window: the core, room round it for the focus frame, drawn at its exact place (part pixels too) */
         int w4 = ((int)ob->w / 4) * 4;
         Pane *sp = &g_pane[i];
@@ -1600,6 +1641,7 @@ static void draw(double now) {
         draw_single(room, n, now);
     } else {
         pane_hide(&g_cluster);
+        for (int i = 0; i < n; i++) { room->s[i].star = 0; room->s[i].nfeed = 0; } /* (stars only round the main core) */
         draw_all(room, n, now);
     }
     RENDER_PART = 0;
@@ -2465,31 +2507,61 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
             for (int i = 0; i < nk; i++) { int r = keep[i]; for (int k = 0; k < cells[r]; k++) { int w = cell_put(dc, 0, 0, cell[r][k], r == head, 0); if (w > cw[k]) cw[k] = w; } }
             for (int k = 0; k < ncol; k++) total += cw[k] + (k ? gapc : 0);
             int sw = text_w(dc, F_BODY, L" ", 1), edge = g_chat_mono ? text_w(dc, F_BODY, L"\x2502 ", 2) : 0;
-            if (g_chat_mono && total + 2 * edge <= maxw - x0) { /* a terminal table: box-drawing borders, padded to the columns */
+            /* too wide for the box: the narrow columns keep their width, the wide ones share what is left, and
+             * their cells wrap inside them (the row as tall as its tallest cell) */
+            int fitw = maxw - x0 - (g_chat_mono ? 2 * edge : 0), squeezed = 0;
+            if (total > fitw && ncol > 0) {
+                int room = fitw - (ncol - 1) * gapc, left = ncol, fixed[12] = {0};
+                for (int again = 1; again && left;) {
+                    again = 0;
+                    int share = room / left;
+                    for (int k = 0; k < ncol; k++) if (!fixed[k] && cw[k] <= share) { fixed[k] = 1; room -= cw[k]; left--; again = 1; }
+                }
+                if (left) { int share = (int)fmax(room / left, 8 * sw); for (int k = 0; k < ncol; k++) if (!fixed[k]) cw[k] = share; }
+                total = 0;
+                for (int k = 0; k < ncol; k++) total += cw[k] + (k ? gapc : 0);
+                squeezed = 1;
+            }
+            if (g_chat_mono && total <= fitw) { /* a terminal table: box-drawing borders, padded to the columns */
                 const COLORREF BORDER = RGB(110, 116, 130);
                 /* the borders as thin lines (box-drawing characters left gaps where the rows met), the column
                  * lines where the characters' bars were, so the columns line up as before; each row padded */
-                int barw = text_w(dc, F_BODY, L"\x2502", 1), th = (int)fmax(1, g_dpi), pad = lh / 4, rowh = lh + 2 * pad;
-                int xb[13], top = y + pad;
+                int barw = text_w(dc, F_BODY, L"\x2502", 1), th = (int)fmax(1, g_dpi), pad = lh / 4;
+                int xb[13], top = y + pad, rt = top;
                 xb[0] = x0 + barw / 2;
                 for (int k = 0; k < ncol; k++) xb[k + 1] = xb[k] + barw + ((cw[k] + sw - 1) / sw + 2) * sw;
                 int tw = xb[ncol] - xb[0] + th;
                 lay_shape(SH_RULE, xb[0], top, tw, BORDER);
                 for (int i = 0; i < nk; i++) {
-                    int r = keep[i], rt = top + i * rowh;
-                    for (int k = 0; k < ncol && k < cells[r]; k++) cell_put(dc, xb[k] + barw / 2 + sw, rt + pad + asc, cell[r][k], r == head, 1);
-                    lay_shape(SH_RULE, xb[0], rt + rowh, tw, BORDER); /* under every row; the last one is the bottom */
+                    int r = keep[i], bottom = rt + pad + lh;
+                    for (int k = 0; k < ncol && k < cells[r]; k++) {
+                        int cx = xb[k] + barw / 2 + sw;
+                        if (!squeezed) { cell_put(dc, cx, rt + pad + asc, cell[r][k], r == head, 1); continue; }
+                        int xx = cx, ye = lay_inline(dc, cell[r][k], cell[r][k] + wcslen(cell[r][k]), &xx, cx, rt + pad, lh, asc, cx + cw[k], r == head ? 3 : 0, MD_BODY, 0) + lh;
+                        if (ye > bottom) bottom = ye;
+                    }
+                    rt = bottom + pad;
+                    lay_shape(SH_RULE, xb[0], rt, tw, BORDER); /* under every row; the last one is the bottom */
                 }
-                for (int k = 0; k <= ncol; k++) lay_shape(SH_VLINE, xb[k], top, nk * rowh + th, BORDER);
+                for (int k = 0; k <= ncol; k++) lay_shape(SH_VLINE, xb[k], top, rt - top + th, BORDER);
                 if (xb[ncol] + th > g_lay_w) g_lay_w = xb[ncol] + th;
-                y = top + nk * rowh + pad + th;
+                y = rt + pad + th;
                 blank = 0;
                 ln = nl ? nl + 1 : NULL;
                 continue;
             }
             for (int i = 0; i < nk; i++) {
                 int r = keep[i], x = x0;
-                if (total <= maxw - x0) { /* aligned columns */
+                if (squeezed && total <= fitw) { /* aligned columns, the wide ones wrapped */
+                    int bottom = y + lh;
+                    for (int k = 0; k < cells[r]; k++) {
+                        int xx = x, ye = lay_inline(dc, cell[r][k], cell[r][k] + wcslen(cell[r][k]), &xx, x, y, lh, asc, x + cw[k], r == head ? 3 : 0, MD_BODY, 0) + lh;
+                        if (ye > bottom) bottom = ye;
+                        x += cw[k] + gapc;
+                    }
+                    y = bottom;
+                    if (r == head) { lay_shape(SH_RULE, x0, y - (int)(3 * g_dpi), total, MD_RULE); y += (int)(2 * g_dpi); }
+                } else if (total <= maxw - x0) { /* aligned columns */
                     for (int k = 0; k < cells[r]; k++) {
                         cell_put(dc, x, y + asc, cell[r][k], r == head, 1);
                         x += cw[k] + gapc;
@@ -4333,7 +4405,7 @@ static const float RATES[NRATES] = {2, 4, 6, 10, 15, 20, 30, 45, 60, 90, 120, 0}
 static const wchar_t *RATE_NAMES[NRATES] = {L"2", L"4", L"6", L"10", L"15", L"20", L"30", L"45", L"60", L"90", L"120", L"Max"};
 static const int THREADS[5] = {0, 1, 2, 4, 8};
 static const wchar_t *THREAD_NAMES[5] = {L"Auto", L"1", L"2", L"4", L"8"};
-static const wchar_t *HOLEGPU_NAMES[3] = {L"GPU", L"CPU", L"CPU light"};
+static const wchar_t *HOLEGPU_NAMES[2] = {L"GPU", L"CPU"};
 static float *rate_of(Smooth *m, int row) { return row == R_RIDLE ? &m->idle : row == R_RTHINK ? &m->think : row == R_RBUSY ? &m->busy : row == R_RREST ? &m->rest : &m->hand; }
 static int rate_stop(float v) { /* the slider's step nearest a rate */
     if (v <= 0) return NRATES - 1;
@@ -4341,7 +4413,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP };
 enum { PG_LOOK, PG_CLUSTER, PG_REPLIES, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Replies", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -4402,6 +4474,7 @@ static const char *HOLE_ICON[HA_N] = {"", "unfold", "sparkles", "sunDim", "scanE
 static const char *ATK_ICON[] = {"", "rocket", "hammer", "orbit", "triangle"};
 _Static_assert(sizeof ATK_ICON / sizeof *ATK_ICON == RA_N, "one icon per READY attack (a missing one crashes the Motions page)");
 static int own_rdy(void) { return g_pv_st == ST_READY; } /* row 2 of the Motions page: READY's attacks, else the black hole's actions */
+static int pv_away_hole(void) { return g_pv_st == ST_STANDBY && ((MOTION_MAP[ST_SLEEP].rt >> RT_HOLE) & 1); } /* the preview's Away: a quiet black hole */
 
 static float S(float v) { return v * (float)g_sdpi; }
 static RECT SR(float x0, float y0, float x1, float y1) { RECT r = {(int)lroundf(S(x0)), (int)lroundf(S(y0)), (int)lroundf(S(x1)), (int)lroundf(S(y1))}; return r; }
@@ -4766,9 +4839,11 @@ static const int MOT_STATES[ST_N] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHE
 static const wchar_t *MOT_STATE_NAMES[ST_N] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep",
                                               L"Ready", L"Speaking", L"Listening", L"Transcribing", L"Away", L"Error"};
 static const char *MOT_RT_ICON[RT_N] = {"rotateCw", "eye", "puzzle", "blend", "rotateCw", "swords", "cog", "orbit", "dna", "keyboard", "hammer", "grid", "arrows", "minimize",
-                                    "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap", "crosshair"};
-static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw"};
-_Static_assert(RT_N == 28 && W_N == 17, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
+                                    "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap", "crosshair", "swords"};
+static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw", "triangle"};
+_Static_assert(RT_N == 29 && W_N == 18, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
+static int mot_grp(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return i >= 6; return 0; } /* 0 Claude Code's, 1 the panel's */
+static int g_mot_last[2] = {ST_IDLE, ST_READY}; /* the state last shown in each tab */
 static const wchar_t *state_wname(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return L"?"; }
 static void txa(float x0, float y0, float x1, float y1, const char *a, HFONT f, unsigned c, UINT how) {
     wchar_t w[160];
@@ -4789,6 +4864,10 @@ static const char *mot_about(int row, int id) { return row == 0 ? ROUTINES[id].a
 static uint32_t mot_set(int row) { return row == 0 ? MOTION_MAP[g_pv_st].rt : row == 1 ? MOTION_MAP[g_pv_st].act : own_rdy() ? READY_ATKS : HOLE_ACTS; }
 static void mot_play(int row, int id) {
     Session *m = &g_pv_room.s[0];
+    if (row != 2 && pv_away_hole()) { /* Away with the main core a quiet black hole: the satellites are the ones in Away */
+        for (int i = 1; i < 4; i++) { if (row == 0) motion_play(&g_pv_room.s[i], id); else whim_play(&g_pv_room.s[i], id, wall()); }
+        return;
+    }
     if (row == 0) motion_play(m, id);
     else if (row == 2 && own_rdy()) ready_play(m, id);
     else if (row == 2) hole_play(m, id); /* (it becomes a black hole first if it is not one) */
@@ -4894,9 +4973,9 @@ static int page_sections(int pg, SSec *s) {
         ROW(2, RK_SEG, R_THREADS, 5, L"Drawing threads", L"how many share drawing a big core; Auto: about one a physical core", THREAD_NAMES, NULL, NULL, "layers");
         {
             static wchar_t gnote[200];
-            if (gpu_init()) swprintf(gnote, 200, L"asleep, it is drawn on the graphics card: a sixth of the CPU");
-            else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it", gpu_why());
-            ROW(2, RK_SEG, R_HOLEGPU, 3, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
+            if (gpu_init()) swprintf(gnote, 200, L"GPU: the real thing, traced; CPU: its middle, and the gas as dots");
+            else swprintf(gnote, 200, L"no graphics card it can use here (%hs): the CPU draws it, the gas as dots", gpu_why());
+            ROW(2, RK_SEG, R_HOLEGPU, 2, L"Black hole drawn on", gnote, HOLEGPU_NAMES, NULL, NULL, "moon");
         }
         break;
     }
@@ -4925,17 +5004,22 @@ static float ctrl_w(const SRow *r) {
     return 0;
 }
 static float row_h(const SRow *r, float colw) {
-    float h = r->hint ? 56 : 48;
+    float h = r->hint ? 46 : 40;
     if (r->kind == RK_SEG) { /* the chips go under the name when the name and hint would not fit beside them */
         float text = fmaxf(tw_of(r->label, g_sf_text), r->hint ? fminf(tw_of(r->hint, g_sf_small), 260) : 0);
-        if (seg_w(r) + 16 + text > colw - 32) h += 36;
+        if (seg_w(r) + 16 + text > colw - 32) h += 34;
     }
-    if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 56;
+    if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 46;
     return h;
 }
+/* keys that cannot be changed (RK_CAPS) are not rows but a list of two columns at the card's foot */
+static int caps_cols(float colw) { return colw >= 380 ? 2 : 1; }
+#define CAPS_H 30.0f
 static float sec_h(const SSec *s, float colw) {
-    float h = 36 + 6;
-    for (int i = 0; i < s->n; i++) h += row_h(&s->r[i], colw);
+    float h = 32 + 4;
+    int nc = 0;
+    for (int i = 0; i < s->n; i++) { if (s->r[i].kind == RK_CAPS) nc++; else h += row_h(&s->r[i], colw); }
+    if (nc) h += ((nc + caps_cols(colw) - 1) / caps_cols(colw)) * CAPS_H + (nc < s->n ? 6 : 0);
     return h;
 }
 
@@ -4958,7 +5042,7 @@ static void slider(Pane *pn, float x0, float y, float x1, int row, int n) {
 /* one row: its name (and hint) on the left, its control on the right */
 static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float h) {
     int warn = r->kind == RK_HOTKEY && g_hk_fail[r->row];
-    float base = r->hint || warn ? 56 : 48, lx = x0 + 16, rx = x1 - 16, cy = y + (h > base + 1 ? base / 2 : h / 2);
+    float base = r->hint || warn ? 46 : 40, lx = x0 + 16, rx = x1 - 16, cy = y + (h > base + 1 ? base / 2 : h / 2);
     int wrapped = h > base + 1;
     if (r->icon) { lu_icon(pn, r->icon, lx + 8, cy, 16, S_LABEL); lx += 28; }
     const wchar_t *hint = warn ? L"held by another app: pick another" : r->hint;
@@ -4979,7 +5063,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
         break;
     }
     case RK_SEG: {
-        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 40 : cy - 14;
+        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 34 : cy - 14;
         int cur = set_current(r->row);
         for (int i = 0; i < r->n; i++) {
             float cw = tw_of(r->names[i], g_sf_label) + 24;
@@ -5068,17 +5152,44 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     float cw = x1 - x0;
     int cols = cw >= 820 ? 2 : 1;
     float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
+    int side = 0; /* which column each card goes in (bit k: the right): the split whose taller column is the shortest, in order within each */
+    if (cols == 2) {
+        float best = 1e9f;
+        for (int m = 0; m < 1 << n; m += 2) { /* (the first card always on the left) */
+            float h2[2] = {0, 0};
+            for (int k = 0; k < n; k++) h2[m >> k & 1] += sec_h(&s[k], colw) + 12;
+            float t = fmaxf(h2[0], h2[1]);
+            if (t < best - 0.5f) { best = t; side = m; }
+        }
+    }
     for (int k = 0; k < n; k++) {
-        int c = cols == 2 && colh[1] < colh[0] ? 1 : 0;
+        int c = side >> k & 1;
         float x = x0 + c * (colw + 12), y = y0 + colh[c], h = sec_h(&s[k], colw);
         box(pn, x, y, x + colw, y + h, 12, S_CARD, 0, 0);
-        tx(x + 16, y + 12, x + colw - 16, y + 30, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
-        float ry = y + 36;
+        tx(x + 16, y + 10, x + colw - 16, y + 28, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
+        float ry = y + 32;
+        int drawn = 0, nc = 0;
         for (int i = 0; i < s[k].n; i++) {
+            if (s[k].r[i].kind == RK_CAPS) { nc++; continue; }
             float rh = row_h(&s[k].r[i], colw);
-            if (i) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
+            if (drawn++) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
             draw_row(pn, &s[k].r[i], x, ry, x + colw, rh);
             ry += rh;
+        }
+        if (nc) { /* the fixed keys: name and key, two to a line */
+            int cc = caps_cols(colw), j = 0;
+            if (drawn) { box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0); ry += 6; }
+            float cellw = (colw - 32 - 18 * (cc - 1)) / cc;
+            for (int i = 0; i < s[k].n; i++) {
+                const SRow *r = &s[k].r[i];
+                if (r->kind != RK_CAPS) continue;
+                float a = x + 16 + (j % cc) * (cellw + 18), cy = ry + (j / cc) * CAPS_H + CAPS_H / 2, b = a + cellw, kw = tw_of(r->lo, g_sf_label) + 14;
+                if (r->icon) lu_icon(pn, r->icon, a + 8, cy, 14, S_LABEL);
+                tx(a + (r->icon ? 24 : 0), cy - 10, b - kw - 8, cy + 10, r->label, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+                box(pn, b - kw, cy - 11, b, cy + 11, 6, S_CHIP, 0x44444C, 1);
+                tx(b - kw, cy - 11, b, cy + 11, r->lo, g_sf_label, S_TEXT, DT_CENTER);
+                j++;
+            }
         }
         colh[c] += h + 12;
     }
@@ -5091,44 +5202,59 @@ static void mot_tile(Pane *pn, float x0, float y0, float x1, float y1, int row, 
     int hot = is_hot(K_MTOG, row, id);
     box(pn, x0, y0, x1, y1, 10, hot && !dis ? S_CHIP_HOT : S_TILE, on ? S_OR : dis ? S_EDGE : hot ? S_EDGE_HOT : S_RULE, on ? 1.5f : 1);
     unsigned ink = on ? S_OR : dis ? 0x55555E : S_MUTED;
-    lu_icon(pn, mot_icon(row, id), (x0 + x1) / 2, y0 + 20, 19, ink);
-    txa(x0 + 4, y0 + 32, x1 - 4, y1 - 4, mot_name(row, id), g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
+    lu_icon(pn, mot_icon(row, id), (x0 + x1) / 2, y0 + 15, 17, ink);
+    txa(x0 + 3, y0 + 25, x1 - 3, y1 - 2, mot_name(row, id), g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
     if (!dis) hit(x0, y0, x1, y1, K_MTOG, row, id);
 }
+static int g_mot_fold, g_mot_more; /* mot_tiles: the rest folded into one line; Asleep's other routines shown anyway (a click on that line) */
 /* the tiles of one kind: those in use, a MORE rule, the rest; returns the height used */
 static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     int st = g_pv_st;
     uint32_t set = mot_set(row);
-    int first = 1, last = row == 0 ? RT_N : row == 1 ? W_N : own_rdy() ? RA_N : HA_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (96 + 6)));
+    int first = 1, last = row == 0 ? RT_N : row == 1 ? W_N : own_rdy() ? RA_N : HA_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (80 + 6)));
     float tw = (x1 - x0 - 6 * (cols - 1)) / cols, y = y0;
     wchar_t head[80];
-    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : row == 1 ? L"ACTIONS \x00B7 %d" : own_rdy() ? L"ATTACKS \x00B7 %d" : L"BLACK HOLE \x00B7 %d", bits(set & ~1u));
+    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : row == 1 ? L"ACTIONS \x00B7 %d" : own_rdy() ? L"ATTACKS \x00B7 %d" : L"BLACK HOLE \x00B7 %d", bits(set & ~1u & ~(row == 0 ? 1u << RT_DORMANT : 0u))); /* (Dormant: retired, never counted) */
     float hx = x0;
     if (row == 2) { lu_icon(pn, MOT_RT_ICON[own_rdy() ? RT_RESTLESS : RT_HOLE], x0 + 7, y + 9, 13, S_OR); hx += 20; } /* the black hole's own: marked as its */
     tx(hx, y, hx + 120, y + 18, head, g_sf_cap, row == 2 ? S_TEXT : S_MUTED, DT_LEFT);
     tx(hx + (row == 2 ? 120 : 110), y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : row == 1 ? L"played now and then while left alone" : own_rdy() ? L"thrown at the pointer every second or two; point at the core to read the reply" : L"its own actions, now and then, once it is a black hole", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-    y += 26;
+    y += 22;
     for (int pass = 0; pass < 2; pass++) {
         float zy = y;
         int k = 0;
+        if (pass && g_mot_fold) { /* the rest folded into one line (Asleep as a black hole): a click shows them */
+            int nrest = 0;
+            for (int id = first; id < last; id++) if (!((set >> id) & 1) && !(row == 0 && id == RT_DORMANT)) nrest++;
+            int hm = is_hot(K_MMORE, row, 0);
+            box(pn, x0, y, x1, y + 30, 8, hm ? S_CHIP_HOT : S_TILE, 0, 0);
+            wchar_t t[80];
+            swprintf(t, 80, L"%d more routines \x00B7 show", nrest);
+            lu_icon(pn, "chevrons", x0 + 16, y + 15, 13, S_MUTED);
+            tx(x0 + 30, y, x1 - 10, y + 30, t, g_sf_small, hm ? S_TEXT : S_MUTED, DT_LEFT);
+            hit(x0, y, x1, y + 30, K_MMORE, row, 0);
+            g_mzone[row][1] = SR(x0 - 4, y - 4, x1 + 4, y + 34);
+            y += 30;
+            break;
+        }
         for (int id = first; id < last; id++) {
             int on = (set >> id) & 1;
             if (on != !pass) continue;
             if (row == 0 && id == RT_DORMANT) continue; /* (retired: asleep, it is the black hole) */
             if (row == 2 && !own_rdy() && (HA_RETIRED >> id & 1)) continue; /* (Jets: retired) */
-            float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 64;
-            mot_tile(pn, a, b, a + tw, b + 58, row, id, on, row == 0 && ((id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY)));
+            float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 46;
+            mot_tile(pn, a, b, a + tw, b + 42, row, id, on, row == 0 && ((id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY)));
             k++;
         }
-        if (!pass && !k) { tx(x0, y + 4, x1, y + 52, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
-        if (pass && !k) { tx(x0, y, x1, y + 30, L"All in use. Drag one down here to stop it.", g_sf_small, 0x6E6E78, DT_CENTER); y += 34; } /* still a place to drop on */
-        y += ((k + cols - 1) / cols) * 64;
+        if (!pass && !k) { tx(x0, y + 4, x1, y + 38, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
+        if (pass && !k) { tx(x0, y - 2, x1, y + 22, L"All in use. Drag one down here to stop it.", g_sf_small, 0x6E6E78, DT_CENTER); y += 22; } /* still a place to drop on */
+        y += ((k + cols - 1) / cols) * 46;
         g_mzone[row][pass] = SR(x0 - 4, zy - 4, x1 + 4, y); /* where a dragged tile lands in use (0) or out (1) */
         if (g_md_row == row && g_md_moved && PtInRect(&g_mzone[row][pass], g_md_at)) frame(pn, x0 - 4, zy - 4, x1 + 4, y - 2, 12, S_OR, 1.5f); /* it would land here */
         if (!pass) { /* the rule between those in use and the rest */
-            tx(x0, y + 4, x0 + 50, y + 20, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
-            box(pn, x0 + 44, y + 12, x1, y + 13, 0, S_RULE, 0, 0);
-            y += 26;
+            tx(x0, y + 2, x0 + 50, y + 18, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
+            box(pn, x0 + 44, y + 10, x1, y + 11, 0, S_RULE, 0, 0);
+            y += 22;
         }
     }
     return y - y0;
@@ -5140,92 +5266,101 @@ static const char *HOLE_SHORT[HA_N] = {"", "", "a star torn apart as it swings p
     "a loop of hot gas rises off the disc, snaps and flings a blob out", "", "its disc wobbles round like a top", "a hot clump spirals in, faster as it falls"};
 static float sleep_body(Pane *pn, float a, float y0, float b, int draw) {
     float y = y0;
-    { /* the black hole itself */
-        float h = 30 + 56 + 1 + 56 + 6;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "hole", a + 19, y + 17, 13, S_OR);
-            tx(a + 32, y + 8, b - 12, y + 26, L"THE BLACK HOLE", g_sf_cap, S_TEXT, DT_LEFT);
-            SRow lens = {RK_TOGGLE, R_HOLELENS, 1, L"Lensing", L"the stars behind it, bent round its shadow", NULL, NULL, NULL, "scanEye"};
-            SRow tilt = {RK_SLIDER, R_HOLETILT, 5, L"Tilt", L"how fast it tilts and rolls on its own", TILT_NAMES, NULL, NULL, "rotateCcw"};
-            draw_row(pn, &lens, a, y + 30, b, 56);
-            box(pn, a + 16, y + 86, b - 16, y + 87, 0, S_RULE, 0, 0);
-            draw_row(pn, &tilt, a, y + 87, b, 56);
-        }
-        y += h + 12;
+    int two = b - a >= 600; /* the hole and its actions side by side when there is room */
+    float mid = two ? a + (b - a - 12) / 2 : b;
+    int n = 0;
+    for (int id = 1; id < HA_N; id++) if (id != HA_LENS && !(HA_RETIRED >> id & 1)) n++;
+    float hh = 30 + 46 + 1 + 46 + 6, ah = 30 + n * 42 + 6;
+    float ax0 = two ? mid + 12 : a, ay = two ? y : y + hh + 12;
+    if (draw) { /* the black hole itself */
+        box(pn, a, y, mid, y + hh, 12, S_TILE, S_RULE, 1);
+        lu_icon(pn, "hole", a + 19, y + 17, 13, S_OR);
+        tx(a + 32, y + 8, mid - 12, y + 26, L"THE BLACK HOLE", g_sf_cap, S_TEXT, DT_LEFT);
+        SRow lens = {RK_TOGGLE, R_HOLELENS, 1, L"Lensing", L"the stars behind it, bent round its shadow", NULL, NULL, NULL, "scanEye"};
+        SRow tilt = {RK_SLIDER, R_HOLETILT, 5, L"Tilt", L"how fast it tilts and rolls on its own", TILT_NAMES, NULL, NULL, "rotateCcw"};
+        draw_row(pn, &lens, a, y + 30, mid, 46);
+        box(pn, a + 16, y + 76, mid - 16, y + 77, 0, S_RULE, 0, 0);
+        draw_row(pn, &tilt, a, y + 77, mid, 46);
     }
-    { /* its actions */
-        int n = 0;
-        for (int id = 1; id < HA_N; id++) if (id != HA_LENS && !(HA_RETIRED >> id & 1)) n++;
-        float h = 30 + n * 52 + 6;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "sparkles", a + 19, y + 17, 13, S_OR);
-            wchar_t head[64];
-            swprintf(head, 64, L"ITS ACTIONS \x00B7 %d", bits(HOLE_ACTS & ~1u & ~(1u << HA_LENS) & ~HA_RETIRED));
-            tx(a + 32, y + 8, a + 200, y + 26, head, g_sf_cap, S_TEXT, DT_LEFT);
-            tx(a + 150, y + 8, b - 16, y + 26, L"one now and then, while it sleeps", g_sf_small, S_MUTED, DT_RIGHT | DT_END_ELLIPSIS);
-            int k = 0;
-            for (int id = 1; id < HA_N; id++) {
-                if (id == HA_LENS || (HA_RETIRED >> id & 1)) continue;
-                float ry = y + 30 + 52 * k++;
-                int on = HOLE_ACTS >> id & 1, hr = is_hot(K_HPLAY, 2, id), hs = is_hot(K_HTOG, 2, id);
-                if (k > 1) box(pn, a + 16, ry, b - 16, ry + 1, 0, S_RULE, 0, 0);
-                if (hr) box(pn, a + 6, ry + 3, b - 6, ry + 49, 9, S_CHIP_HOT, 0, 0);
-                lu_icon(pn, HOLE_ICON[id], a + 30, ry + 26, 18, on ? S_OR : S_MUTED);
-                txa(a + 52, ry + 8, b - 120, ry + 27, HOLE_ACT_NAME[id], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
-                txa(a + 52, ry + 27, b - 120, ry + 45, HOLE_SHORT[id], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-                /* play: a round button with a triangle; the row plays it too */
-                float px = b - 88, cy = ry + 26;
-                aa_disc(pn, S(px), S(cy), S(14), hexc(hr ? S_OR : S_CHIP), 1);
-                float P[6] = {S(px - 4), S(cy - 6), S(px - 4), S(cy + 6), S(px + 6), S(cy)};
-                aa_tri(pn, P, hexc(hr ? S_ON_OR : S_TEXT), 1);
-                hit(a, ry, b - 70, ry + 52, K_HPLAY, 2, id);
-                /* its switch */
-                box(pn, b - 58, cy - 12, b - 16, cy + 12, 12, on ? S_OR : (hs ? S_EDGE_HOT : S_EDGE), 0, 0);
-                aa_disc(pn, S(on ? b - 28 : b - 46), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
-                hit(b - 66, ry + 6, b - 10, ry + 46, K_HTOG, 2, id);
-            }
+    if (draw) { /* its actions: played with the button or a click on the row, switched with the switch */
+        float x = ax0, e = b, yy = ay;
+        box(pn, x, yy, e, yy + ah, 12, S_TILE, S_RULE, 1);
+        lu_icon(pn, "sparkles", x + 19, yy + 17, 13, S_OR);
+        wchar_t head[64];
+        swprintf(head, 64, L"ITS ACTIONS \x00B7 %d", bits(HOLE_ACTS & ~1u & ~(1u << HA_LENS) & ~HA_RETIRED));
+        tx(x + 32, yy + 8, x + 200, yy + 26, head, g_sf_cap, S_TEXT, DT_LEFT);
+        tx(x + 150, yy + 8, e - 16, yy + 26, L"now and then, asleep", g_sf_small, S_MUTED, DT_RIGHT | DT_END_ELLIPSIS);
+        int k = 0;
+        for (int id = 1; id < HA_N; id++) {
+            if (id == HA_LENS || (HA_RETIRED >> id & 1)) continue;
+            float ry = yy + 30 + 42 * k++;
+            int on = HOLE_ACTS >> id & 1, hr = is_hot(K_HPLAY, 2, id), hs = is_hot(K_HTOG, 2, id);
+            if (k > 1) box(pn, x + 16, ry, e - 16, ry + 1, 0, S_RULE, 0, 0);
+            if (hr) box(pn, x + 6, ry + 2, e - 6, ry + 40, 9, S_CHIP_HOT, 0, 0);
+            lu_icon(pn, HOLE_ICON[id], x + 28, ry + 21, 16, on ? S_OR : S_MUTED);
+            txa(x + 48, ry + 3, e - 104, ry + 21, HOLE_ACT_NAME[id], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+            txa(x + 48, ry + 21, e - 104, ry + 38, HOLE_SHORT[id], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+            float px = e - 84, cy = ry + 21; /* play: a round button with a triangle */
+            aa_disc(pn, S(px), S(cy), S(13), hexc(hr ? S_OR : S_CHIP), 1);
+            float P[6] = {S(px - 4), S(cy - 6), S(px - 4), S(cy + 6), S(px + 6), S(cy)};
+            aa_tri(pn, P, hexc(hr ? S_ON_OR : S_TEXT), 1);
+            hit(x, ry, e - 66, ry + 42, K_HPLAY, 2, id);
+            box(pn, e - 58, cy - 12, e - 16, cy + 12, 12, on ? S_OR : (hs ? S_EDGE_HOT : S_EDGE), 0, 0);
+            aa_disc(pn, S(on ? e - 28 : e - 46), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
+            hit(e - 66, ry + 4, e - 10, ry + 38, K_HTOG, 2, id);
         }
-        y += h + 12;
     }
-    { /* hands on: what the mouse does to it */
+    y = two ? y + fmaxf(hh, ah) + 12 : ay + ah + 12;
+    { /* hands on: what the mouse does to it, one line (or two) */
         static const char *IC[5] = {"pointer", "hand", "mouse", "move", "eye"};
-        static const wchar_t *VERB[5] = {L"Click", L"Hold", L"Scroll", L"Drag or swipe", L"Rest on it"};
-        static const wchar_t *WHAT[5] = {L"drops a star in from that side", L"pulls a stream of gas off the pointer", L"spins its gas; keep going and it speeds up", L"turns it over", L"for 2 s, untouched: it wakes"};
-        int cols = b - a >= 560 ? 2 : 1, rows = (5 + cols - 1) / cols;
-        float h = 30 + rows * 32 + 8, cw = (b - a - 16) / cols;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "hand", a + 19, y + 17, 13, S_OR);
-            tx(a + 32, y + 8, b - 12, y + 26, L"HANDS ON", g_sf_cap, S_TEXT, DT_LEFT);
-            for (int i = 0; i < 5; i++) {
-                float cx = a + 8 + (i % cols) * cw, cy = y + 30 + (i / cols) * 32 + 16;
-                lu_icon(pn, IC[i], cx + 14, cy, 15, S_LABEL);
-                float vw = tw_of(VERB[i], g_sf_label);
-                tx(cx + 32, cy - 10, cx + 32 + vw + 2, cy + 10, VERB[i], g_sf_label, S_TEXT, DT_LEFT);
-                tx(cx + 40 + vw, cy - 10, cx + cw - 8, cy + 10, WHAT[i], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+        static const wchar_t *VERB[5] = {L"Click", L"Hold", L"Scroll", L"Drag", L"Rest 2 s"};
+        static const wchar_t *WHAT[5] = {L"drops a star in", L"pulls gas off the pointer", L"spins its gas", L"turns it over", L"wakes it"};
+        float x = a + 4, line = 0;
+        for (int i = 0; i < 5; i++) {
+            float vw = tw_of(VERB[i], g_sf_label), ww = tw_of(WHAT[i], g_sf_small), w = 20 + vw + 6 + ww;
+            if (x + w > b && x > a + 4) { x = a + 4; line++; }
+            float cy = y + line * 24 + 12;
+            if (draw) {
+                lu_icon(pn, IC[i], x + 7, cy, 14, S_LABEL);
+                tx(x + 20, cy - 10, x + 20 + vw + 2, cy + 10, VERB[i], g_sf_label, S_TEXT, DT_LEFT);
+                tx(x + 26 + vw, cy - 10, x + w + 2, cy + 10, WHAT[i], g_sf_small, S_MUTED, DT_LEFT);
             }
+            x += w + 20;
         }
-        y += h + 16;
+        y += (line + 1) * 24 + 10;
     }
-    y += mot_tiles(pn, 0, a, draw ? y : -10000, b); /* the routines Asleep may pick from */
+    g_mot_fold = !g_mot_more; /* the routines Asleep may pick from: the other ones folded */
+    y += mot_tiles(pn, 0, a, draw ? y : -10000, b);
+    g_mot_fold = 0;
     if (draw) { g_mzone[2][0] = g_mzone[2][1] = SR(0, 0, 0, 0); } /* (no tiles of the black hole's to drag here) */
     return y - y0;
 }
 static float motions_page(Pane *pn, float x0, float y0, float x1) {
-    float cw = x1 - x0, lw = cw >= 720 ? 250 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
+    float cw = x1 - x0, lw = cw >= 720 ? 200 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
     /* the list: each state with the icons of its routines and how many actions it has */
-    float lh = 8 + 2 * 26 + ST_N * 36 + 8, y = y0;
+    /* Claude Code's states or the panel's: two tabs over the list, six states each */
+    int grp = mot_grp(g_pv_st);
+    float lh = 8 + 28 + 8 + 6 * 30 + 6, y = y0 + (cw >= 720 ? g_set_scroll : 0); /* (beside the editor it floats: it stays put while the page scrolls) */
     box(pn, x0, y, x0 + lw, y + lh, 12, S_CARD, 0, 0);
     y += 8;
-    for (int i = 0; i < ST_N; i++) {
-        if (i == 0 || i == 6) { tx(x0 + 16, y + 6, x0 + lw - 16, y + 22, i ? L"PANEL" : L"CLAUDE CODE", g_sf_cap, S_MUTED, DT_LEFT); y += 26; }
+    {
+        float a = x0 + 8, c = x0 + lw - 8, m = (a + c) / 2;
+        box(pn, a, y, c, y + 28, 14, S_TILE, 0, 0);
+        for (int k = 0; k < 2; k++) {
+            float p0 = k ? m + 1 : a + 2, p1 = k ? c - 2 : m - 1;
+            int on = grp == k, hot = is_hot(K_MGRP, 0, k);
+            if (on || hot) box(pn, p0, y + 2, p1, y + 26, 12, on ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.2f : 0);
+            tx(p0, y, p1, y + 28, k ? L"Panel" : L"Claude Code", g_sf_label, on || hot ? S_TEXT : S_MUTED, DT_CENTER);
+            hit(p0, y, p1, y + 28, K_MGRP, 0, k);
+        }
+        y += 36;
+    }
+    for (int i = grp * 6; i < grp * 6 + 6; i++) {
         int st = MOT_STATES[i], on = st == g_pv_st, hot = is_hot(K_MSTATE, 0, st);
         float a = x0 + 8, b = y, c = x0 + lw - 8;
-        box(pn, a, b, c, b + 34, 9, hot ? S_CHIP_HOT : S_CARD, S_OR, on ? 1.5f : 0);
-        aa_disc(pn, S(a + 14), S(b + 17), S(4), LOOKS[st].halo, 1);
-        tx(a + 26, b, c - 100, b + 34, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+        box(pn, a, b, c, b + 28, 8, hot ? S_CHIP_HOT : S_CARD, S_OR, on ? 1.5f : 0);
+        aa_disc(pn, S(a + 14), S(b + 14), S(4), LOOKS[st].halo, 1);
+        tx(a + 26, b, c - 84, b + 28, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
         /* its routines' icons (up to four), then +n, then the actions' count */
         uint32_t rt = MOTION_MAP[st].rt & ~1u;
         int na = st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1) ? 0 : bits(MOTION_MAP[st].act & ~1u), shown = 0, more = 0; /* (a black hole plays none of them) */
@@ -5234,58 +5369,54 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
         if (na) {
             swprintf(num, 12, L"%d", na);
             float w = tw_of(num, g_sf_small);
-            tx(ix - w - 2, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT);
-            lu_icon(pn, "sparkles", ix - w - 10, b + 17, 11, S_MUTED);
+            tx(ix - w - 2, b, ix, b + 28, num, g_sf_small, S_MUTED, DT_RIGHT);
+            lu_icon(pn, "sparkles", ix - w - 10, b + 14, 11, S_MUTED);
             ix -= w + 20;
         }
         int ids[4];
         for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1) { if (shown < 4) ids[shown++] = id; else more++; }
-        if (more) { swprintf(num, 12, L"+%d", more); tx(ix - 24, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT); ix -= 28; }
-        for (int k = shown - 1; k >= 0; k--) lu_icon(pn, MOT_RT_ICON[ids[k]], ix - 8 - (shown - 1 - k) * 18, b + 17, 14, on ? S_OR : S_MUTED);
-        hit(a, b, c, b + 34, K_MSTATE, 0, st);
-        y += 36;
+        if (shown > 3) { more += shown - 3; shown = 3; } /* (a narrower list: three icons) */
+        if (more) { swprintf(num, 12, L"+%d", more); tx(ix - 24, b, ix, b + 28, num, g_sf_small, S_MUTED, DT_RIGHT); ix -= 28; }
+        for (int k = shown - 1; k >= 0; k--) lu_icon(pn, MOT_RT_ICON[ids[k]], ix - 8 - (shown - 1 - k) * 18, b + 14, 13, on ? S_OR : S_MUTED);
+        hit(a, b, c, b + 28, K_MSTATE, 0, st);
+        y += 30;
     }
     /* the editor */
     float ey = cw >= 720 ? y0 : y0 + lh + 12;
     int st = g_pv_st;
-    float iy = ey + 16 + 30 + 10, ty = iy + 44 + 16;
+    float ty = ey + 50; /* (the hint sits in the header, beside the name) */
     int hole = (st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1)) || (st == ST_READY && (MOTION_MAP[st].rt >> RT_RESTLESS & 1)); /* asleep as a black hole, or READY: their own first */
     int no_acts = hole && st == ST_SLEEP; /* (a black hole plays only its own: the shell's actions never run on it, so they are not offered) */
     int sleepy = hole && st == ST_SLEEP; /* (Asleep as a black hole: its own page) */
     float th = sleepy ? sleep_body(pn, ex0 + 16, ty, x1 - 16, 0) : mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + (no_acts ? 0 : 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16)) + (hole ? 16 + 24 + mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28) : 0); /* (measured off the page) */
-    float eh = (ty - ey) + th + 16;
+    float eh = (ty - ey) + th + 12;
     box(pn, ex0, ey, x1, ey + eh, 12, S_CARD, 0, 0);
-    aa_disc(pn, S(ex0 + 22), S(ey + 31), S(5), LOOKS[st].halo, 1);
-    tx(ex0 + 34, ey + 16, x1 - 180, ey + 46, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
+    float hy = ey + 12, hc = hy + 14; /* the header: the state, the hint (or what the tile under the pointer does), Try it, Reset */
+    aa_disc(pn, S(ex0 + 22), S(hc), S(5), LOOKS[st].halo, 1);
+    float nx = ex0 + 34 + tw_of(state_wname(st), g_sf_card) + 12;
+    tx(ex0 + 34, hy, nx, hy + 28, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
     if (sleepy) { /* (marked: it is a black hole) */
-        float nw = tw_of(state_wname(st), g_sf_card), bx = ex0 + 34 + nw + 10;
-        box(pn, bx, ey + 21, bx + 92, ey + 41, 10, S_CHIP, S_OR, 1);
-        lu_icon(pn, "hole", bx + 13, ey + 31, 11, S_OR);
-        tx(bx + 22, ey + 21, bx + 88, ey + 41, L"black hole", g_sf_small, S_OR, DT_LEFT);
+        box(pn, nx, hc - 10, nx + 92, hc + 10, 10, S_CHIP, S_OR, 1);
+        lu_icon(pn, "hole", nx + 13, hc, 11, S_OR);
+        tx(nx + 22, hc - 10, nx + 88, hc + 10, L"black hole", g_sf_small, S_OR, DT_LEFT);
+        nx += 104;
     }
     int htr = is_hot(K_MTRY, 0, 0), hrs = is_hot(K_MRESET, 0, 0);
-    box(pn, x1 - 152, ey + 18, x1 - 80, ey + 44, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
-    float P[6] = {S(x1 - 138), S(ey + 26), S(x1 - 138), S(ey + 36), S(x1 - 130), S(ey + 31)};
+    box(pn, x1 - 152, hc - 13, x1 - 80, hc + 13, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
+    float P[6] = {S(x1 - 138), S(hc - 5), S(x1 - 138), S(hc + 5), S(x1 - 130), S(hc)};
     aa_tri(pn, P, hexc(S_TEXT), 1);
-    tx(x1 - 126, ey + 18, x1 - 84, ey + 44, L"Try it", g_sf_label, S_TEXT, DT_LEFT);
-    hit(x1 - 152, ey + 18, x1 - 80, ey + 44, K_MTRY, 0, 0);
-    tx(x1 - 74, ey + 18, x1 - 16, ey + 44, L"Reset", g_sf_label, hrs ? S_TEXT : S_MUTED, DT_CENTER);
-    hit(x1 - 74, ey + 18, x1 - 16, ey + 44, K_MRESET, 0, 0);
-    /* the info line: what the tile under the pointer does */
-    box(pn, ex0 + 16, iy, x1 - 16, iy + 44, 9, S_TILE, 0, 0);
+    tx(x1 - 126, hc - 13, x1 - 84, hc + 13, L"Try it", g_sf_label, S_TEXT, DT_LEFT);
+    hit(x1 - 152, hc - 13, x1 - 80, hc + 13, K_MTRY, 0, 0);
+    tx(x1 - 74, hc - 13, x1 - 16, hc + 13, L"Reset", g_sf_label, hrs ? S_TEXT : S_MUTED, DT_CENTER);
+    hit(x1 - 74, hc - 13, x1 - 16, hc + 13, K_MRESET, 0, 0);
     char line[400];
     if (g_hot >= 0 && (g_hits[g_hot].kind == K_MTOG || g_hits[g_hot].kind == K_HPLAY || g_hits[g_hot].kind == K_HTOG)) {
         int row = g_hits[g_hot].row, id = g_hits[g_hot].val;
-        lu_icon(pn, mot_icon(row, id), ex0 + 36, iy + 22, 18, S_OR);
+        lu_icon(pn, mot_icon(row, id), nx + 8, hc, 14, S_OR);
         snprintf(line, sizeof line, "%s: %s", mot_name(row, id), mot_about(row, id));
-        txa(ex0 + 54, iy, x1 - 26, iy + 44, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
-    } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
-    else {
-        wchar_t t[200];
-        if (sleepy) swprintf(t, 200, L"Click an action to watch it above; its switch says whether it plays on its own.");
-        else swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
-        tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-    }
+        txa(nx + 22, hy, x1 - 162, hy + 28, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
+    } else if (wall() < g_mot_msg_until) tx(nx, hy, x1 - 162, hy + 28, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT | DT_END_ELLIPSIS);
+    else tx(nx, hy, x1 - 162, hy + 28, sleepy ? L"click an action to watch it; its switch: plays on its own" : L"click to try it \x00B7 drag up to use, down to stop", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     if (sleepy) { sleep_body(pn, ex0 + 16, ty, x1 - 16, 1); return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0); }
     float hh = 0;
     if (hole) { /* the black hole's own actions, in a frame of their own above the state's */
@@ -5314,7 +5445,7 @@ static void set_build(void) {
     HDC mdc = pn->mem;
     box(pn, 0, 0, WL, HL, 14, S_BG, 0x2A2A30, 1);
     /* the page first (it scrolls under the preview), then everything round it */
-    float pvh = clampf(HL * 0.4f, 180, 420), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
+    float pvh = clampf(HL * 0.285f, 170, 380), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
     g_set_view_h = cb - ct;
     g_set_scroll = clampf(g_set_scroll, 0, fmaxf(0, g_set_content_h - g_set_view_h));
     g_set_scroll_to = clampf(g_set_scroll_to, 0, fmaxf(0, g_set_content_h - g_set_view_h));
@@ -5460,13 +5591,22 @@ static void settings_tick(double now) {
     float dt = (float)fmin(0.1, now - g_pv_last);
     g_pv_last = now;
     int shown[4] = {g_pv_st, ST_WORK, ST_IDLE, ST_THINK};
+    /* Away, as the desktop shows it: the main core asleep as a black hole goes quiet (when Asleep uses the hole), the
+     * awake ones round it are in Away */
+    int away_hole = pv_away_hole();
+    static int was_away_hole;
+    if (away_hole) { shown[0] = ST_SLEEP; shown[1] = shown[2] = shown[3] = ST_STANDBY; }
+    if (away_hole && !was_away_hole && g_pv_room.s[0].mo.rt != RT_HOLE) motion_play(&g_pv_room.s[0], RT_HOLE);
+    was_away_hole = away_hole;
     for (int i = 0; i < 4; i++) {
         Session *s = &g_pv_room.s[i];
         s->state = shown[i] == ST_SLEEP ? ST_IDLE : shown[i];
         s->overlay = shown[i] == ST_IDLE ? 0 : shown[i];
         s->last = now;
         s->aura_a = g_others ? TOUCH.aura : 0;
+        s->quiet_to = 0;
     }
+    if (away_hole && is_hole(&g_pv_room.s[0])) g_pv_room.s[0].quiet_to = 1;
     /* resting on a motion tile: it plays after a moment, once */
     if (g_krec >= 0 || (g_kmsg_until > 0 && now > g_kmsg_until)) { if (now > g_kmsg_until) g_kmsg_until = 0; g_sl_dirty = 1; }
     if (fabsf(g_set_scroll_to - g_set_scroll) > 0.3f) { /* the page glides to where the wheel sent it (quick, no overshoot) */
@@ -5536,14 +5676,29 @@ static void settings_tick(double now) {
     Orbit *ring[3];
     int rn = 0;
     for (int i = 1; i < 4; i++) if (g_pv_ob[i].init && !g_pv_ob[i].free) ring[rn++] = &g_pv_ob[i];
+    /* the main core asleep as a black hole: the satellites orbit it in its disc's plane, as on the desktop (draw_single) */
+    static float hkp; static double pclk;
+    float pe1[3] = {1, 0, 0}, pe2[3] = {0, 0, -1}, pz[4] = {0}, pg[4][3] = {{0}};
+    hkp += ((is_hole(m) ? 1.0f : 0.0f) - hkp) * (1 - expf(-dt * 1.2f));
+    if (hkp > 0.01f) { hole_plane(m, now, pe1, pe2); pclk += dt * (1 - 0.7f * m->quiet); }
     for (int i = 1; i < 4; i++) {
         Orbit *ob = &g_pv_ob[i];
         double a = M_PI / 2 + 2 * M_PI * (i - 1) / 3 + g_pv_orbit * 0.10;
         float bob = (float)(3 * g_dpi * sin(g_pv_orbit * 0.8 + i * 1.7));
         float tx = g_pv_mx + rx * (float)cos(a), ty = g_pv_my - ry * (float)sin(a) + bob;
+        if (hkp > 0.01f) {
+            float Rk, P3[3];
+            hole_orbit(pe1, pe2, i - 1, 3, rx, pclk, m->quiet, P3, &Rk, pg[i]);
+            tx += (g_pv_mx + Rk * P3[0] - tx) * hkp; ty += (g_pv_my - Rk * P3[1] - ty) * hkp;
+            pz[i] = Rk * P3[2] * hkp;
+        }
         if (!ob->init) { ob->px = tx; ob->py = ty; ob->vx = ob->vy = 0; ob->w = small; ob->init = 1; ob->free = 0; }
         ob->w += (small - ob->w) * (1 - expf(-dt * 7));
-        if (ob->free) { /* loose: it bounces round the preview until the core comes close or it has lain still a while */
+        if (!ob->free && hkp > 0.5f) { /* round a black hole: drawn to its place on its orbit (critically damped) */
+            const float W = 5;
+            ob->vx += (W * W * (tx - ob->px) - 2 * W * ob->vx) * dt; ob->vy += (W * W * (ty - ob->py) - 2 * W * ob->vy) * dt;
+            ob->px += ob->vx * dt; ob->py += ob->vy * dt;
+        } else if (ob->free) { /* loose: it bounces round the preview until the core comes close or it has lain still a while */
             fly_step(ob, dt);
             float hs = ob->w / 2;
             if (ob->px < hs) { ob->px = hs; ob->vx = fabsf(ob->vx) * BOUNCE; }
@@ -5557,18 +5712,24 @@ static void settings_tick(double now) {
             else if (d > ok.BREAK) ob->free = 1, ob->rest = 0;
         }
     }
+    /* round the black hole the satellites are stars, each losing gas to it (sat_star) */
+    m->nfeed = 0; m->star = 0;
+    for (int i = 1; i < 4; i++) if (g_others) sat_star(m, &g_pv_room.s[i], &g_pv_ob[i], g_pv_mx, g_pv_my, pz[i], hkp > 0.5f ? pg[i] : NULL, big, hkp, dt); else g_pv_room.s[i].star = 0;
     /* the cluster's picture: the band's colour, the small cores, the main one and its frame on top */
     pane_size(&g_pv, pw, ph);
     uint32_t bg = 0xff000000u | (g_pv_light ? PV_LIGHT : S_BAND);
     for (size_t j = 0; j < (size_t)pw * ph; j++) g_pv.px[j] = bg;
     g_blit_add = !g_pv_light; /* (on the light background the pictures are laid over it, as Windows does on the desktop) */
-    for (int i = 1; i < 4 && g_others; i++) {
+    for (int i = 1; i < 4 && g_others; i++) { /* (their pictures; laid in behind the main core, or in front of it) */
         int w4 = ((int)g_pv_ob[i].w / 4) * 4;
         if (w4 < 8) continue;
         if (pics_now) pic_make(&g_pv_pic[i], &g_pv_room.s[i], w4, now, 1);
-        else if (g_pv_pic[i].img) w4 = g_pv_pic[i].px; else continue; /* (the last picture, at its size) */
-        blit_pic_at(&g_pv, g_pv_ob[i].px - w4 / 2.0f, g_pv_ob[i].py - w4 / 2.0f, &g_pv_pic[i]);
     }
+#define PV_SATS(FRONT) for (int i = 1; i < 4 && g_others; i++) { \
+        if ((pz[i] > 0.5f) != (FRONT) || !g_pv_pic[i].img || ((int)g_pv_ob[i].w / 4) * 4 < 8) continue; \
+        int w4_ = g_pv_pic[i].px; \
+        blit_pic_at(&g_pv, g_pv_ob[i].px - w4_ / 2.0f, g_pv_ob[i].py - w4_ / 2.0f, &g_pv_pic[i]); }
+    PV_SATS(0)
     int w4 = ((int)big / 4) * 4;
     m->pad = hole_pad(m);
     if (m->pad > 1) w4 = ((int)(w4 * m->pad) / 4) * 4; /* a black hole: room round it (the core the same size) */
@@ -5576,6 +5737,8 @@ static void settings_tick(double now) {
     else w4 = g_pv_pic[0].px;
     float fx = g_pv_mx - w4 / 2.0f, fy = g_pv_my - w4 / 2.0f;
     blit_pic_at(&g_pv, fx, fy, &g_pv_pic[0]);
+    PV_SATS(1)
+#undef PV_SATS
     if (m->mo.loose_on) { /* READY: its pieces and sparks anywhere on the preview, as the layer does on the desktop */
         static Canvas cv;
         static uint8_t *rgba;
@@ -5747,8 +5910,10 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_PVBG: g_pv_light = !g_pv_light; g_sl_dirty = 1; settings_applied(1); break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
-            case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
+            case K_MSTATE: g_pv_st = sh->val; g_mot_last[mot_grp(g_pv_st)] = g_pv_st; g_sl_dirty = 1; break;
+            case K_MGRP: if (mot_grp(g_pv_st) != sh->val) { g_mot_last[!sh->val] = g_pv_st; g_pv_st = g_mot_last[sh->val]; g_sl_dirty = 1; } break;
             case K_MTOG: g_md_row = sh->row; g_md_id = sh->val; g_md_moved = 0; g_md_from = g_md_at = p; SetCapture(w); break; /* a click or a drag: told apart on the move */
+            case K_MMORE: g_mot_more = 1; g_sl_dirty = 1; break;
             case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
             case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; if (g_pv_st == ST_SLEEP) { HOLE_ACTS = HOLE_ACTS_DEF; HOLE_TILT = 2.5f; } if (g_pv_st == ST_READY) READY_ATKS = (1u << RA_N) - 2; settings_applied(1); break; }
             case K_HPLAY: mot_play(2, sh->val); break;
@@ -6365,8 +6530,8 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
         wheel_spin(s, notches);
-        g_hover_since = wall(); /* (scrolling on it is not resting on it) */
-        if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches);
+        if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches); /* its box open: the wheel scrolls it, and it stays */
+        else g_hover_since = wall(); /* (scrolling on it is not resting on it: no box opens mid-scroll) */
         return 0;
     }
     case WM_MOUSEHWHEEL: { /* sideways (a touchpad swipe): the core spins about its other axis */
@@ -6645,7 +6810,7 @@ int main(int argc, char **argv) {
     }
     remember_launch();
     settings_load(); /* the Settings menu's choices win over the options */
-    if (g_nogpu_arg) { g_gpu = 0; g_hole_light = g_nogpu_arg == 2; } /* (--no-gpu / --cpu-light win: a check against the CPU) */
+    if (g_nogpu_arg) { g_gpu = 0; g_hole_light = 0; } /* (--cpu-light: the CPU, as --no-gpu; its light version is gone) */ /* (--no-gpu / --cpu-light win: a check against the CPU) */
     if (g_pv_light_arg > 0) g_pv_light = 1;
     if (!shape_make(&g_shape, g_shape_name)) { snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape); shape_make(&g_shape, g_shape_name); }
     pos_read();
