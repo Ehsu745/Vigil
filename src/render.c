@@ -854,13 +854,19 @@ void bh_hole_axis(const Session *s, double now, float *out) {
 #define B2_RHI 9.0f
 typedef struct { short x, y, z; unsigned short om; float w; unsigned char r, g, b, pad; } B2S; /* a sample: where (M / 512), its turn (1 / 8192), weight, colour */
 typedef struct {
-    int ready, row, n;              /* built to row; its size (n x n) */
+    int ready, row, n, idx;         /* built to row; its size (n x n); its tilt (x B2_STEP degrees) */
     unsigned long used;             /* when last drawn (to keep the latest) */
     unsigned *off; unsigned char *cnt, *hit, *star; float *ring, *ergo; short *dir; /* dir: where each ray leaves to (x 32767) */
     float *prof; int prow; /* the ring's profile (B2_RA x B2_RB), traced to angle prow */
     B2S *s; size_t ns, cap;
 } B2Map;
 static B2Map g_b2[B2_NI];
+/* rough maps for every tilt (B2_CN square, the ring's profile every B2_CPS-th radius): built first, so a turn or a drag
+ * shows the tilt it is at straight away and never the nearest finished one (it jumped); the full map follows once it rests */
+#define B2_CN 48
+#define B2_CPS 2
+static B2Map g_b2c[B2_NI];
+static int g_b2_last = -1, g_b2_still; /* the tilt asked for last, and for how many calls in a row */
 static float g_b2_key[12];          /* the tunables the maps were built with: changed, they are built again */
 static unsigned long g_b2_clock;
 static int g_b2_want = -1; /* the map asked for last */
@@ -975,7 +981,7 @@ static float b2_ray(B2Map *m, size_t pix, float inc, float u, float v) { /* (m N
                 b2_bb_lut(Tk, col);
                 float mx = fmaxf(col[0] * beam, fmaxf(col[1] * beam, col[2] * beam));
                 if (mx > 1e-6f) {
-                    if (m->ns >= m->cap) { m->cap = m->cap ? m->cap * 2 : 65536; m->s = realloc(m->s, m->cap * sizeof *m->s); }
+                    if (m->ns >= m->cap) { m->cap = m->cap ? m->cap * 2 : (size_t)m->n * m->n * 2 + 256; m->s = realloc(m->s, m->cap * sizeof *m->s); }
                     B2S *o = &m->s[m->ns++];
                     o->x = (short)lrintf(fmaxf(-63, fminf(63, sP[0])) * 512); o->y = (short)lrintf(fmaxf(-63, fminf(63, sP[1])) * 512); o->z = (short)lrintf(fmaxf(-63, fminf(63, sP[2])) * 512);
                     o->om = (unsigned short)lrintf(fminf(65535, fabsf(Om) * 8192)); o->w = w * mx * (Om < 0 ? -1 : 1);
@@ -1007,61 +1013,77 @@ static float b2_ray(B2Map *m, size_t pix, float inc, float u, float v) { /* (m N
     }
     return ring;
 }
+/* build (a little more of) map m for tilt idx at size n: about `budget` rays; the ring's profile every pstep-th radius */
+static void b2_build(B2Map *m, int idx, int n, int budget, int pstep) {
+    if (m->ready) return;
+    if (!m->off) {
+        size_t np = (size_t)n * n;
+        m->n = n; m->row = 0; m->idx = idx; m->used = g_b2_clock;
+        m->off = malloc(np * sizeof *m->off); m->cnt = malloc(np); m->hit = malloc(np); m->star = malloc(np * 3);
+        m->ring = malloc(np * sizeof *m->ring); m->ergo = malloc(np * sizeof *m->ergo); m->dir = malloc(np * 3 * sizeof *m->dir);
+        m->prof = malloc((size_t)B2_RA * B2_RB * sizeof *m->prof); m->prow = 0;
+        if (!m->off || !m->cnt || !m->hit || !m->star || !m->ring || !m->ergo || !m->dir || !m->prof) { b2_free(m); return; }
+    }
+    float E = BH_TUNE.b2_ext, incr = idx * B2_STEP / 57.29578f;
+    int rows = (int)fmaxf(1, (float)budget / n);
+    for (int k = 0; k < rows && m->row < n; k++, m->row++) {
+        float v = E - (m->row + 0.5f) * 2 * E / n;
+        for (int i = 0; i < n; i++) b2_ray(m, (size_t)m->row * n + i, incr, -E + (i + 0.5f) * 2 * E / n, v);
+    }
+    if (m->row < n) return;
+    int angs = (int)fmaxf(1, (float)budget * pstep / B2_RB); /* then the ring's profile: rays along each angle */
+    for (int k = 0; k < angs && m->prow < B2_RA; k++, m->prow++) {
+        float th = (m->prow + 0.5f) * 6.2831853f / B2_RA, cu = cosf(th), sv = sinf(th), *P = m->prof + m->prow * B2_RB;
+        for (int i = 0; i < B2_RB; i += pstep) {
+            float b = B2_RLO + (i + 0.5f * pstep) * (B2_RHI - B2_RLO) / B2_RB, val = b2_ray(NULL, 0, incr, b * cu, b * sv);
+            for (int q = i; q < i + pstep && q < B2_RB; q++) P[q] = val;
+        }
+    }
+    if (m->prow >= B2_RA) { /* done: each bin takes its neighbours' brightest (the ring is thinner than a bin: never missed between two) */
+        static float row[B2_RB];
+        for (int a = 0; a < B2_RA; a++) {
+            float *P = m->prof + a * B2_RB;
+            for (int i = 0; i < B2_RB; i++) row[i] = fmaxf(P[i], fmaxf(i ? P[i - 1] : 0, i + 1 < B2_RB ? P[i + 1] : 0));
+            memcpy(P, row, sizeof row);
+        }
+        m->ready = 1;
+    }
+}
 /* the maps: built for the view a hole shows now (and kept), a little each call */
 BhGpuImg BH_GPU_IMG;
 void bh2_tick(const float *axis) {
     if (BH_TUNE.b2_engine < 0.5f || BH_GPU_ON) return;
     if (!g_b2_tex_ok) { unsigned s = 0x2545F491u; for (int i = 0; i < 256 * 256; i++) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; g_b2_tex[i] = (unsigned char)(s >> 7); } g_b2_tex_ok = 1; }
     float key[12]; b2_key_now(key);
-    if (memcmp(key, g_b2_key, sizeof key)) { for (int i = 0; i < B2_NI; i++) b2_free(&g_b2[i]); memcpy(g_b2_key, key, sizeof key); }
+    if (memcmp(key, g_b2_key, sizeof key)) { for (int i = 0; i < B2_NI; i++) { b2_free(&g_b2[i]); b2_free(&g_b2c[i]); } memcpy(g_b2_key, key, sizeof key); }
     float inc = acosf(fmaxf(-1, fminf(1, axis[2]))) * 57.29578f;
     if (inc > 90) inc = 180 - inc;
     int want = (int)lrintf(inc / B2_STEP);
     if (want < 0) want = 0;
     if (want >= B2_NI) want = B2_NI - 1;
-    B2Map *m = &g_b2[want];
     g_b2_want = want;
+    if (want == g_b2_last) g_b2_still++; else { g_b2_last = want; g_b2_still = 0; }
+    B2Map *c = &g_b2c[want];
+    if (!c->ready) { b2_build(c, want, B2_CN, 3000, B2_CPS); return; } /* the rough one, at once (a tick or two) */
+    B2Map *m = &g_b2[want];
     m->used = ++g_b2_clock;
-    if (m->ready) return;
-    int n = (int)b2_res();
-    if (n < 32) n = 32;
-    if (n > 512) n = 512;
-    if (!m->off) { /* new: room for it, the least used one going if too many are kept */
-        int kept = 0, lru = -1;
-        for (int i = 0; i < B2_NI; i++) if (g_b2[i].off && &g_b2[i] != m) { kept++; if (lru < 0 || g_b2[i].used < g_b2[lru].used) lru = i; }
-        if (kept >= B2_KEEP && lru >= 0) b2_free(&g_b2[lru]);
-        size_t np = (size_t)n * n;
-        m->n = n; m->row = 0; m->used = g_b2_clock;
-        m->off = malloc(np * sizeof *m->off); m->cnt = malloc(np); m->hit = malloc(np); m->star = malloc(np * 3);
-        m->ring = malloc(np * sizeof *m->ring); m->ergo = malloc(np * sizeof *m->ergo); m->dir = malloc(np * 3 * sizeof *m->dir);
-        m->prof = malloc((size_t)B2_RA * B2_RB * sizeof *m->prof); m->prow = 0;
-        if (!m->off || !m->cnt || !m->hit || !m->star || !m->ring || !m->ergo || !m->dir || !m->prof) { b2_free(m); return; }
-    }
-    /* a slice of rows each call: the nearer rows to the middle first would look nicer, but in order is enough */
-    float E = BH_TUNE.b2_ext, incr = want * B2_STEP / 57.29578f;
-    int any = 0;
-    for (int i = 0; i < B2_NI; i++) any |= g_b2[i].ready;
-    float budget = any ? 360 : 3000; /* (rays a call: a couple of milliseconds; the very first map in a burst, while the hole forms) */
-    int rows = (int)fmaxf(1, budget / n);
-    for (int k = 0; k < rows && m->row < n; k++, m->row++) {
-        float v = E - (m->row + 0.5f) * 2 * E / n;
-        for (int i = 0; i < n; i++) b2_ray(m, (size_t)m->row * n + i, incr, -E + (i + 0.5f) * 2 * E / n, v);
-    }
-    if (m->row >= n) { /* then the ring's profile: rays along each angle, finely */
-        int angs = (int)fmaxf(1, budget / B2_RB);
-        for (int k = 0; k < angs && m->prow < B2_RA; k++, m->prow++) {
-            float th = (m->prow + 0.5f) * 6.2831853f / B2_RA, cu = cosf(th), sv = sinf(th);
-            for (int i = 0; i < B2_RB; i++) { float b = B2_RLO + (i + 0.5f) * (B2_RHI - B2_RLO) / B2_RB; m->prof[m->prow * B2_RB + i] = b2_ray(NULL, 0, incr, b * cu, b * sv); }
+    if (!m->ready && g_b2_still >= 8) { /* resting on this tilt: its full map, a little each call */
+        int n = (int)b2_res();
+        if (n < 32) n = 32;
+        if (n > 512) n = 512;
+        if (!m->off) { /* new: room for it, the least used one going if too many are kept */
+            int kept = 0, lru = -1;
+            for (int i = 0; i < B2_NI; i++) if (g_b2[i].off && &g_b2[i] != m) { kept++; if (lru < 0 || g_b2[i].used < g_b2[lru].used) lru = i; }
+            if (kept >= B2_KEEP && lru >= 0) b2_free(&g_b2[lru]);
         }
-        if (m->prow >= B2_RA) { /* done: each bin takes its neighbours' brightest (the ring is thinner than a bin: never missed between two) */
-            static float row[B2_RB];
-            for (int a = 0; a < B2_RA; a++) {
-                float *P = m->prof + a * B2_RB;
-                for (int i = 0; i < B2_RB; i++) row[i] = fmaxf(P[i], fmaxf(i ? P[i - 1] : 0, i + 1 < B2_RB ? P[i + 1] : 0));
-                memcpy(P, row, sizeof row);
-            }
-            m->ready = 1;
-        }
+        b2_build(m, want, n, 360, 1);
+        return;
+    }
+    for (int d = 1; d < B2_NI; d++) for (int sg = -1; sg <= 1; sg += 2) { /* else the rough maps for the other tilts, the nearest first */
+        int i = want + sg * d;
+        if (i < 0 || i >= B2_NI || g_b2c[i].ready) continue;
+        b2_build(&g_b2c[i], i, B2_CN, 360, B2_CPS);
+        return;
     }
 }
 /* how far the map asked for last is built, 0..100 (100: ready; -1: none asked for) */
@@ -1078,8 +1100,14 @@ static B2Map *b2_pick(const float *axis, int *mirror) {
     *mirror = inc > 90;
     if (inc > 90) inc = 180 - inc;
     float want = inc / B2_STEP;
-    B2Map *best = NULL; float bd = 1e9f;
-    for (int i = 0; i < B2_NI; i++) if (g_b2[i].ready && fabsf(i - want) < bd) { bd = fabsf(i - want); best = &g_b2[i]; }
+    int wi = (int)lrintf(want);
+    if (wi < 0) wi = 0;
+    if (wi >= B2_NI) wi = B2_NI - 1;
+    B2Map *best = g_b2[wi].ready ? &g_b2[wi] : g_b2c[wi].ready ? &g_b2c[wi] : NULL; float bd = 1e9f;
+    if (!best) for (int i = 0; i < B2_NI; i++) {
+        if (g_b2[i].ready && fabsf(i - want) < bd) { bd = fabsf(i - want); best = &g_b2[i]; }
+        if (g_b2c[i].ready && fabsf(i - want) < bd - 0.01f) { bd = fabsf(i - want); best = &g_b2c[i]; }
+    }
     if (best) best->used = ++g_b2_clock;
     return best;
 }
@@ -1150,6 +1178,9 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
     /* the shadow's radius in pixels: small as it opens, then once the shell is swallowed (grow) the whole picture grows
      * until the disc reaches the tile's edge */
     float hb = mo->hole, k = bh_kpx(mo, R); /* pixels per M */
+    /* Backdrop (Settings > Look, as the cores' band): a soft dark sky under all of its light, from the blurred light, so
+     * the disc, the ring, a torn star and the lensed stars read on a light app; never per star (each a grey speck) */
+    const float bdk = s->backdrop > 0.01f ? fminf(1, 0.95f * s->backdrop * BACKDROP_A) : 0;
     BHView V = {0};
     V.rout = fminf(17, room * 0.85f / k); /* the disc as far as the picture has room for, fading before its edge */
     int act = H->act;
@@ -1272,7 +1303,8 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                     if (sh > 0) { float a = sh * hb; p[0] *= 1 - a; p[1] *= 1 - a; p[2] *= 1 - a; }
                     float gb = BH_TUNE.bloom * g * ef * (1 - 0.95f * sh), lf = ef * hb * (1 / 255.0f);
                     p[0] += q[0] * lf + gb * hb; p[1] += q[1] * lf + gb * 0.55f * hb; p[2] += q[2] * lf + gb * 0.22f * hb;
-                    if (c->dk) { float lum = (0.3f * q[0] + 0.55f * q[1] + 0.15f * q[2]) * (1 / 255.0f), d = fmaxf(sh, clamp01(g * 2.5f + lum * 1.5f)) * hb * 0.92f * ef, *dk = c->dk + (size_t)y * c->w + x; if (d > *dk) *dk = d; }
+                    if (c->dk) { /* dark under the shadow and the gas only: under the glow it is a brown haze on a light desktop, under a star a grey speck */
+                        float lum = (0.3f * q[0] + 0.55f * q[1] + 0.15f * q[2]) * (1 / 255.0f), pl = clamp01((g - 0.05f) * 4), d = fmaxf(fmaxf(sh, clamp01(lum * 1.5f) * clamp01(sh * 6)) * 0.92f, bdk * pl * (3 - 2 * pl)) * hb * ef, *dk = c->dk + (size_t)y * c->w + x; if (d > *dk) *dk = d; }
                 }
             }
         } else
@@ -1316,7 +1348,7 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
                             float w = ((q & 1) ? wi : 1 - wi) * ((q >> 1) ? wj : 1 - wj); const short *dd = bm->dir + ((size_t)jj * n + ii) * 3; for (int c3 = 0; c3 < 3; c3++) d3[c3] += dd[c3] / 32767.0f * w; ws += w; }
                         if (ws > 0.01f) { /* fixed on the screen: the direction turned into the map's camera frame, then the
                                            * roll undone; in pixels at the hole's full size, so they never move or grow with it */
-                            float inc = (float)(bm - g_b2) * B2_STEP / 57.29578f, ci = cosf(inc), si = sinf(inc), c[3];
+                            float inc = (float)bm->idx * B2_STEP / 57.29578f, ci = cosf(inc), si = sinf(inc), c[3];
                             for (int c3 = 0; c3 < 3; c3++) d3[c3] /= ws;
                             float cx = d3[0], cy = d3[1] * si + d3[2] * ci, cz = -d3[1] * ci + d3[2] * si; /* (onto right, up, forward) */
                             if (cz > 0.05f) {
@@ -1349,7 +1381,7 @@ static void draw_hole(Canvas *c, Clip cl, const Session *s, const Motion *mo, fl
             if (i >= 0 && j >= 0 && i < gw - 1 && j < gh - 1) g = (gl[j * GM + i] * (1 - wi) + gl[j * GM + i + 1] * wi) * (1 - wj) + (gl[(j + 1) * GM + i] * (1 - wi) + gl[(j + 1) * GM + i + 1] * wi) * wj;
             float ef = clamp01((room - 1 - hypotf(x + 0.5f - ox, y + 0.5f - oy)) / (room * 0.12f)); /* (nothing reaches the window's edge) */
             float gb = BH_TUNE.bloom * g * ef * (1 - 0.95f * clamp01(sh)), a_ = clamp01(sh) * hb; /* (no glow in the shadow) */
-            float lum = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2], d_ = fmaxf(clamp01(sh), clamp01(g * 2.5f + lum * 1.5f)) * hb * 0.92f * ef;
+            float lum = 0.3f * L4[0] + 0.55f * L4[1] + 0.15f * L4[2], pl = clamp01((g - 0.05f) * 4), d_ = fmaxf(fmaxf(clamp01(sh), clamp01(lum * 1.5f) * clamp01(sh * 6)) * 0.92f, bdk * pl * (3 - 2 * pl)) * hb * ef; /* (as the GPU's: no dark under the glow or the stars) */
             float *p = c->p + 3 * ((size_t)y * (size_t)c->w + (size_t)x);
             if (sh > 0) { p[0] *= 1 - a_; p[1] *= 1 - a_; p[2] *= 1 - a_; }
             p[0] += (L4[0] * ef + gb) * hb; p[1] += (L4[1] * ef + gb * 0.55f) * hb; p[2] += (L4[2] * ef + gb * 0.22f) * hb;

@@ -4341,7 +4341,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP };
 enum { PG_LOOK, PG_CLUSTER, PG_REPLIES, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Replies", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -4769,6 +4769,8 @@ static const char *MOT_RT_ICON[RT_N] = {"rotateCw", "eye", "puzzle", "blend", "r
                                     "fish", "tower", "bell", "unlock", "flower", "chevrons", "moon", "hole", "radio", "mic", "binary", "lock", "zap", "crosshair"};
 static const char *MOT_W_ICON[W_N] = {"", "eye", "scanEye", "refresh", "vibrate", "sunDim", "crosshair", "step", "unfold", "scan", "triangle", "alert", "waves", "orbit", "flower", "sparkles", "rotateCcw"};
 _Static_assert(RT_N == 28 && W_N == 17, "MOT_RT_ICON and MOT_W_ICON have one icon per routine and action");
+static int mot_grp(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return i >= 6; return 0; } /* 0 Claude Code's, 1 the panel's */
+static int g_mot_last[2] = {ST_IDLE, ST_READY}; /* the state last shown in each tab */
 static const wchar_t *state_wname(int st) { for (int i = 0; i < ST_N; i++) if (MOT_STATES[i] == st) return MOT_STATE_NAMES[i]; return L"?"; }
 static void txa(float x0, float y0, float x1, float y1, const char *a, HFONT f, unsigned c, UINT how) {
     wchar_t w[160];
@@ -4925,17 +4927,22 @@ static float ctrl_w(const SRow *r) {
     return 0;
 }
 static float row_h(const SRow *r, float colw) {
-    float h = r->hint ? 56 : 48;
+    float h = r->hint ? 46 : 40;
     if (r->kind == RK_SEG) { /* the chips go under the name when the name and hint would not fit beside them */
         float text = fmaxf(tw_of(r->label, g_sf_text), r->hint ? fminf(tw_of(r->hint, g_sf_small), 260) : 0);
-        if (seg_w(r) + 16 + text > colw - 32) h += 36;
+        if (seg_w(r) + 16 + text > colw - 32) h += 34;
     }
-    if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 56;
+    if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 46;
     return h;
 }
+/* keys that cannot be changed (RK_CAPS) are not rows but a list of two columns at the card's foot */
+static int caps_cols(float colw) { return colw >= 380 ? 2 : 1; }
+#define CAPS_H 30.0f
 static float sec_h(const SSec *s, float colw) {
-    float h = 36 + 6;
-    for (int i = 0; i < s->n; i++) h += row_h(&s->r[i], colw);
+    float h = 32 + 4;
+    int nc = 0;
+    for (int i = 0; i < s->n; i++) { if (s->r[i].kind == RK_CAPS) nc++; else h += row_h(&s->r[i], colw); }
+    if (nc) h += ((nc + caps_cols(colw) - 1) / caps_cols(colw)) * CAPS_H + (nc < s->n ? 6 : 0);
     return h;
 }
 
@@ -4958,7 +4965,7 @@ static void slider(Pane *pn, float x0, float y, float x1, int row, int n) {
 /* one row: its name (and hint) on the left, its control on the right */
 static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float h) {
     int warn = r->kind == RK_HOTKEY && g_hk_fail[r->row];
-    float base = r->hint || warn ? 56 : 48, lx = x0 + 16, rx = x1 - 16, cy = y + (h > base + 1 ? base / 2 : h / 2);
+    float base = r->hint || warn ? 46 : 40, lx = x0 + 16, rx = x1 - 16, cy = y + (h > base + 1 ? base / 2 : h / 2);
     int wrapped = h > base + 1;
     if (r->icon) { lu_icon(pn, r->icon, lx + 8, cy, 16, S_LABEL); lx += 28; }
     const wchar_t *hint = warn ? L"held by another app: pick another" : r->hint;
@@ -4979,7 +4986,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
         break;
     }
     case RK_SEG: {
-        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 40 : cy - 14;
+        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 34 : cy - 14;
         int cur = set_current(r->row);
         for (int i = 0; i < r->n; i++) {
             float cw = tw_of(r->names[i], g_sf_label) + 24;
@@ -5068,17 +5075,44 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     float cw = x1 - x0;
     int cols = cw >= 820 ? 2 : 1;
     float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
+    int side = 0; /* which column each card goes in (bit k: the right): the split whose taller column is the shortest, in order within each */
+    if (cols == 2) {
+        float best = 1e9f;
+        for (int m = 0; m < 1 << n; m += 2) { /* (the first card always on the left) */
+            float h2[2] = {0, 0};
+            for (int k = 0; k < n; k++) h2[m >> k & 1] += sec_h(&s[k], colw) + 12;
+            float t = fmaxf(h2[0], h2[1]);
+            if (t < best - 0.5f) { best = t; side = m; }
+        }
+    }
     for (int k = 0; k < n; k++) {
-        int c = cols == 2 && colh[1] < colh[0] ? 1 : 0;
+        int c = side >> k & 1;
         float x = x0 + c * (colw + 12), y = y0 + colh[c], h = sec_h(&s[k], colw);
         box(pn, x, y, x + colw, y + h, 12, S_CARD, 0, 0);
-        tx(x + 16, y + 12, x + colw - 16, y + 30, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
-        float ry = y + 36;
+        tx(x + 16, y + 10, x + colw - 16, y + 28, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
+        float ry = y + 32;
+        int drawn = 0, nc = 0;
         for (int i = 0; i < s[k].n; i++) {
+            if (s[k].r[i].kind == RK_CAPS) { nc++; continue; }
             float rh = row_h(&s[k].r[i], colw);
-            if (i) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
+            if (drawn++) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
             draw_row(pn, &s[k].r[i], x, ry, x + colw, rh);
             ry += rh;
+        }
+        if (nc) { /* the fixed keys: name and key, two to a line */
+            int cc = caps_cols(colw), j = 0;
+            if (drawn) { box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0); ry += 6; }
+            float cellw = (colw - 32 - 18 * (cc - 1)) / cc;
+            for (int i = 0; i < s[k].n; i++) {
+                const SRow *r = &s[k].r[i];
+                if (r->kind != RK_CAPS) continue;
+                float a = x + 16 + (j % cc) * (cellw + 18), cy = ry + (j / cc) * CAPS_H + CAPS_H / 2, b = a + cellw, kw = tw_of(r->lo, g_sf_label) + 14;
+                if (r->icon) lu_icon(pn, r->icon, a + 8, cy, 14, S_LABEL);
+                tx(a + (r->icon ? 24 : 0), cy - 10, b - kw - 8, cy + 10, r->label, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+                box(pn, b - kw, cy - 11, b, cy + 11, 6, S_CHIP, 0x44444C, 1);
+                tx(b - kw, cy - 11, b, cy + 11, r->lo, g_sf_label, S_TEXT, DT_CENTER);
+                j++;
+            }
         }
         colh[c] += h + 12;
     }
@@ -5091,44 +5125,59 @@ static void mot_tile(Pane *pn, float x0, float y0, float x1, float y1, int row, 
     int hot = is_hot(K_MTOG, row, id);
     box(pn, x0, y0, x1, y1, 10, hot && !dis ? S_CHIP_HOT : S_TILE, on ? S_OR : dis ? S_EDGE : hot ? S_EDGE_HOT : S_RULE, on ? 1.5f : 1);
     unsigned ink = on ? S_OR : dis ? 0x55555E : S_MUTED;
-    lu_icon(pn, mot_icon(row, id), (x0 + x1) / 2, y0 + 20, 19, ink);
-    txa(x0 + 4, y0 + 32, x1 - 4, y1 - 4, mot_name(row, id), g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
+    lu_icon(pn, mot_icon(row, id), (x0 + x1) / 2, y0 + 15, 17, ink);
+    txa(x0 + 3, y0 + 25, x1 - 3, y1 - 2, mot_name(row, id), g_sf_small, on ? S_TEXT : dis ? 0x55555E : S_CHIP_TXT, DT_CENTER | DT_END_ELLIPSIS);
     if (!dis) hit(x0, y0, x1, y1, K_MTOG, row, id);
 }
+static int g_mot_fold, g_mot_more; /* mot_tiles: the rest folded into one line; Asleep's other routines shown anyway (a click on that line) */
 /* the tiles of one kind: those in use, a MORE rule, the rest; returns the height used */
 static float mot_tiles(Pane *pn, int row, float x0, float y0, float x1) {
     int st = g_pv_st;
     uint32_t set = mot_set(row);
-    int first = 1, last = row == 0 ? RT_N : row == 1 ? W_N : own_rdy() ? RA_N : HA_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (96 + 6)));
+    int first = 1, last = row == 0 ? RT_N : row == 1 ? W_N : own_rdy() ? RA_N : HA_N, cols = (int)fmaxf(1, floorf((x1 - x0 + 6) / (80 + 6)));
     float tw = (x1 - x0 - 6 * (cols - 1)) / cols, y = y0;
     wchar_t head[80];
-    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : row == 1 ? L"ACTIONS \x00B7 %d" : own_rdy() ? L"ATTACKS \x00B7 %d" : L"BLACK HOLE \x00B7 %d", bits(set & ~1u));
+    swprintf(head, 80, row == 0 ? L"ROUTINES \x00B7 %d" : row == 1 ? L"ACTIONS \x00B7 %d" : own_rdy() ? L"ATTACKS \x00B7 %d" : L"BLACK HOLE \x00B7 %d", bits(set & ~1u & ~(row == 0 ? 1u << RT_DORMANT : 0u))); /* (Dormant: retired, never counted) */
     float hx = x0;
     if (row == 2) { lu_icon(pn, MOT_RT_ICON[own_rdy() ? RT_RESTLESS : RT_HOLE], x0 + 7, y + 9, 13, S_OR); hx += 20; } /* the black hole's own: marked as its */
     tx(hx, y, hx + 120, y + 18, head, g_sf_cap, row == 2 ? S_TEXT : S_MUTED, DT_LEFT);
     tx(hx + (row == 2 ? 120 : 110), y, x1, y + 18, row == 0 ? L"one picked at random each time it starts" : row == 1 ? L"played now and then while left alone" : own_rdy() ? L"thrown at the pointer every second or two; point at the core to read the reply" : L"its own actions, now and then, once it is a black hole", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-    y += 26;
+    y += 22;
     for (int pass = 0; pass < 2; pass++) {
         float zy = y;
         int k = 0;
+        if (pass && g_mot_fold) { /* the rest folded into one line (Asleep as a black hole): a click shows them */
+            int nrest = 0;
+            for (int id = first; id < last; id++) if (!((set >> id) & 1) && !(row == 0 && id == RT_DORMANT)) nrest++;
+            int hm = is_hot(K_MMORE, row, 0);
+            box(pn, x0, y, x1, y + 30, 8, hm ? S_CHIP_HOT : S_TILE, 0, 0);
+            wchar_t t[80];
+            swprintf(t, 80, L"%d more routines \x00B7 show", nrest);
+            lu_icon(pn, "chevrons", x0 + 16, y + 15, 13, S_MUTED);
+            tx(x0 + 30, y, x1 - 10, y + 30, t, g_sf_small, hm ? S_TEXT : S_MUTED, DT_LEFT);
+            hit(x0, y, x1, y + 30, K_MMORE, row, 0);
+            g_mzone[row][1] = SR(x0 - 4, y - 4, x1 + 4, y + 34);
+            y += 30;
+            break;
+        }
         for (int id = first; id < last; id++) {
             int on = (set >> id) & 1;
             if (on != !pass) continue;
             if (row == 0 && id == RT_DORMANT) continue; /* (retired: asleep, it is the black hole) */
             if (row == 2 && !own_rdy() && (HA_RETIRED >> id & 1)) continue; /* (Jets: retired) */
-            float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 64;
-            mot_tile(pn, a, b, a + tw, b + 58, row, id, on, row == 0 && ((id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY)));
+            float a = x0 + (k % cols) * (tw + 6), b = y + (k / cols) * 46;
+            mot_tile(pn, a, b, a + tw, b + 42, row, id, on, row == 0 && ((id == RT_HOLE && st != ST_SLEEP) || (id == RT_RESTLESS && st != ST_READY)));
             k++;
         }
-        if (!pass && !k) { tx(x0, y + 4, x1, y + 52, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
-        if (pass && !k) { tx(x0, y, x1, y + 30, L"All in use. Drag one down here to stop it.", g_sf_small, 0x6E6E78, DT_CENTER); y += 34; } /* still a place to drop on */
-        y += ((k + cols - 1) / cols) * 64;
+        if (!pass && !k) { tx(x0, y + 4, x1, y + 38, L"None: drag one up here.", g_sf_small, S_MUTED, DT_CENTER); k = cols; }
+        if (pass && !k) { tx(x0, y - 2, x1, y + 22, L"All in use. Drag one down here to stop it.", g_sf_small, 0x6E6E78, DT_CENTER); y += 22; } /* still a place to drop on */
+        y += ((k + cols - 1) / cols) * 46;
         g_mzone[row][pass] = SR(x0 - 4, zy - 4, x1 + 4, y); /* where a dragged tile lands in use (0) or out (1) */
         if (g_md_row == row && g_md_moved && PtInRect(&g_mzone[row][pass], g_md_at)) frame(pn, x0 - 4, zy - 4, x1 + 4, y - 2, 12, S_OR, 1.5f); /* it would land here */
         if (!pass) { /* the rule between those in use and the rest */
-            tx(x0, y + 4, x0 + 50, y + 20, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
-            box(pn, x0 + 44, y + 12, x1, y + 13, 0, S_RULE, 0, 0);
-            y += 26;
+            tx(x0, y + 2, x0 + 50, y + 18, L"MORE", g_sf_cap, 0x6E6E78, DT_LEFT);
+            box(pn, x0 + 44, y + 10, x1, y + 11, 0, S_RULE, 0, 0);
+            y += 22;
         }
     }
     return y - y0;
@@ -5140,92 +5189,101 @@ static const char *HOLE_SHORT[HA_N] = {"", "", "a star torn apart as it swings p
     "a loop of hot gas rises off the disc, snaps and flings a blob out", "", "its disc wobbles round like a top", "a hot clump spirals in, faster as it falls"};
 static float sleep_body(Pane *pn, float a, float y0, float b, int draw) {
     float y = y0;
-    { /* the black hole itself */
-        float h = 30 + 56 + 1 + 56 + 6;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "hole", a + 19, y + 17, 13, S_OR);
-            tx(a + 32, y + 8, b - 12, y + 26, L"THE BLACK HOLE", g_sf_cap, S_TEXT, DT_LEFT);
-            SRow lens = {RK_TOGGLE, R_HOLELENS, 1, L"Lensing", L"the stars behind it, bent round its shadow", NULL, NULL, NULL, "scanEye"};
-            SRow tilt = {RK_SLIDER, R_HOLETILT, 5, L"Tilt", L"how fast it tilts and rolls on its own", TILT_NAMES, NULL, NULL, "rotateCcw"};
-            draw_row(pn, &lens, a, y + 30, b, 56);
-            box(pn, a + 16, y + 86, b - 16, y + 87, 0, S_RULE, 0, 0);
-            draw_row(pn, &tilt, a, y + 87, b, 56);
-        }
-        y += h + 12;
+    int two = b - a >= 600; /* the hole and its actions side by side when there is room */
+    float mid = two ? a + (b - a - 12) / 2 : b;
+    int n = 0;
+    for (int id = 1; id < HA_N; id++) if (id != HA_LENS && !(HA_RETIRED >> id & 1)) n++;
+    float hh = 30 + 46 + 1 + 46 + 6, ah = 30 + n * 42 + 6;
+    float ax0 = two ? mid + 12 : a, ay = two ? y : y + hh + 12;
+    if (draw) { /* the black hole itself */
+        box(pn, a, y, mid, y + hh, 12, S_TILE, S_RULE, 1);
+        lu_icon(pn, "hole", a + 19, y + 17, 13, S_OR);
+        tx(a + 32, y + 8, mid - 12, y + 26, L"THE BLACK HOLE", g_sf_cap, S_TEXT, DT_LEFT);
+        SRow lens = {RK_TOGGLE, R_HOLELENS, 1, L"Lensing", L"the stars behind it, bent round its shadow", NULL, NULL, NULL, "scanEye"};
+        SRow tilt = {RK_SLIDER, R_HOLETILT, 5, L"Tilt", L"how fast it tilts and rolls on its own", TILT_NAMES, NULL, NULL, "rotateCcw"};
+        draw_row(pn, &lens, a, y + 30, mid, 46);
+        box(pn, a + 16, y + 76, mid - 16, y + 77, 0, S_RULE, 0, 0);
+        draw_row(pn, &tilt, a, y + 77, mid, 46);
     }
-    { /* its actions */
-        int n = 0;
-        for (int id = 1; id < HA_N; id++) if (id != HA_LENS && !(HA_RETIRED >> id & 1)) n++;
-        float h = 30 + n * 52 + 6;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "sparkles", a + 19, y + 17, 13, S_OR);
-            wchar_t head[64];
-            swprintf(head, 64, L"ITS ACTIONS \x00B7 %d", bits(HOLE_ACTS & ~1u & ~(1u << HA_LENS) & ~HA_RETIRED));
-            tx(a + 32, y + 8, a + 200, y + 26, head, g_sf_cap, S_TEXT, DT_LEFT);
-            tx(a + 150, y + 8, b - 16, y + 26, L"one now and then, while it sleeps", g_sf_small, S_MUTED, DT_RIGHT | DT_END_ELLIPSIS);
-            int k = 0;
-            for (int id = 1; id < HA_N; id++) {
-                if (id == HA_LENS || (HA_RETIRED >> id & 1)) continue;
-                float ry = y + 30 + 52 * k++;
-                int on = HOLE_ACTS >> id & 1, hr = is_hot(K_HPLAY, 2, id), hs = is_hot(K_HTOG, 2, id);
-                if (k > 1) box(pn, a + 16, ry, b - 16, ry + 1, 0, S_RULE, 0, 0);
-                if (hr) box(pn, a + 6, ry + 3, b - 6, ry + 49, 9, S_CHIP_HOT, 0, 0);
-                lu_icon(pn, HOLE_ICON[id], a + 30, ry + 26, 18, on ? S_OR : S_MUTED);
-                txa(a + 52, ry + 8, b - 120, ry + 27, HOLE_ACT_NAME[id], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
-                txa(a + 52, ry + 27, b - 120, ry + 45, HOLE_SHORT[id], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-                /* play: a round button with a triangle; the row plays it too */
-                float px = b - 88, cy = ry + 26;
-                aa_disc(pn, S(px), S(cy), S(14), hexc(hr ? S_OR : S_CHIP), 1);
-                float P[6] = {S(px - 4), S(cy - 6), S(px - 4), S(cy + 6), S(px + 6), S(cy)};
-                aa_tri(pn, P, hexc(hr ? S_ON_OR : S_TEXT), 1);
-                hit(a, ry, b - 70, ry + 52, K_HPLAY, 2, id);
-                /* its switch */
-                box(pn, b - 58, cy - 12, b - 16, cy + 12, 12, on ? S_OR : (hs ? S_EDGE_HOT : S_EDGE), 0, 0);
-                aa_disc(pn, S(on ? b - 28 : b - 46), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
-                hit(b - 66, ry + 6, b - 10, ry + 46, K_HTOG, 2, id);
-            }
+    if (draw) { /* its actions: played with the button or a click on the row, switched with the switch */
+        float x = ax0, e = b, yy = ay;
+        box(pn, x, yy, e, yy + ah, 12, S_TILE, S_RULE, 1);
+        lu_icon(pn, "sparkles", x + 19, yy + 17, 13, S_OR);
+        wchar_t head[64];
+        swprintf(head, 64, L"ITS ACTIONS \x00B7 %d", bits(HOLE_ACTS & ~1u & ~(1u << HA_LENS) & ~HA_RETIRED));
+        tx(x + 32, yy + 8, x + 200, yy + 26, head, g_sf_cap, S_TEXT, DT_LEFT);
+        tx(x + 150, yy + 8, e - 16, yy + 26, L"now and then, asleep", g_sf_small, S_MUTED, DT_RIGHT | DT_END_ELLIPSIS);
+        int k = 0;
+        for (int id = 1; id < HA_N; id++) {
+            if (id == HA_LENS || (HA_RETIRED >> id & 1)) continue;
+            float ry = yy + 30 + 42 * k++;
+            int on = HOLE_ACTS >> id & 1, hr = is_hot(K_HPLAY, 2, id), hs = is_hot(K_HTOG, 2, id);
+            if (k > 1) box(pn, x + 16, ry, e - 16, ry + 1, 0, S_RULE, 0, 0);
+            if (hr) box(pn, x + 6, ry + 2, e - 6, ry + 40, 9, S_CHIP_HOT, 0, 0);
+            lu_icon(pn, HOLE_ICON[id], x + 28, ry + 21, 16, on ? S_OR : S_MUTED);
+            txa(x + 48, ry + 3, e - 104, ry + 21, HOLE_ACT_NAME[id], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+            txa(x + 48, ry + 21, e - 104, ry + 38, HOLE_SHORT[id], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+            float px = e - 84, cy = ry + 21; /* play: a round button with a triangle */
+            aa_disc(pn, S(px), S(cy), S(13), hexc(hr ? S_OR : S_CHIP), 1);
+            float P[6] = {S(px - 4), S(cy - 6), S(px - 4), S(cy + 6), S(px + 6), S(cy)};
+            aa_tri(pn, P, hexc(hr ? S_ON_OR : S_TEXT), 1);
+            hit(x, ry, e - 66, ry + 42, K_HPLAY, 2, id);
+            box(pn, e - 58, cy - 12, e - 16, cy + 12, 12, on ? S_OR : (hs ? S_EDGE_HOT : S_EDGE), 0, 0);
+            aa_disc(pn, S(on ? e - 28 : e - 46), S(cy), S(9), hexc(on ? S_ON_OR : S_LABEL), 1);
+            hit(e - 66, ry + 4, e - 10, ry + 38, K_HTOG, 2, id);
         }
-        y += h + 12;
     }
-    { /* hands on: what the mouse does to it */
+    y = two ? y + fmaxf(hh, ah) + 12 : ay + ah + 12;
+    { /* hands on: what the mouse does to it, one line (or two) */
         static const char *IC[5] = {"pointer", "hand", "mouse", "move", "eye"};
-        static const wchar_t *VERB[5] = {L"Click", L"Hold", L"Scroll", L"Drag or swipe", L"Rest on it"};
-        static const wchar_t *WHAT[5] = {L"drops a star in from that side", L"pulls a stream of gas off the pointer", L"spins its gas; keep going and it speeds up", L"turns it over", L"for 2 s, untouched: it wakes"};
-        int cols = b - a >= 560 ? 2 : 1, rows = (5 + cols - 1) / cols;
-        float h = 30 + rows * 32 + 8, cw = (b - a - 16) / cols;
-        if (draw) {
-            box(pn, a, y, b, y + h, 12, S_TILE, S_RULE, 1);
-            lu_icon(pn, "hand", a + 19, y + 17, 13, S_OR);
-            tx(a + 32, y + 8, b - 12, y + 26, L"HANDS ON", g_sf_cap, S_TEXT, DT_LEFT);
-            for (int i = 0; i < 5; i++) {
-                float cx = a + 8 + (i % cols) * cw, cy = y + 30 + (i / cols) * 32 + 16;
-                lu_icon(pn, IC[i], cx + 14, cy, 15, S_LABEL);
-                float vw = tw_of(VERB[i], g_sf_label);
-                tx(cx + 32, cy - 10, cx + 32 + vw + 2, cy + 10, VERB[i], g_sf_label, S_TEXT, DT_LEFT);
-                tx(cx + 40 + vw, cy - 10, cx + cw - 8, cy + 10, WHAT[i], g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+        static const wchar_t *VERB[5] = {L"Click", L"Hold", L"Scroll", L"Drag", L"Rest 2 s"};
+        static const wchar_t *WHAT[5] = {L"drops a star in", L"pulls gas off the pointer", L"spins its gas", L"turns it over", L"wakes it"};
+        float x = a + 4, line = 0;
+        for (int i = 0; i < 5; i++) {
+            float vw = tw_of(VERB[i], g_sf_label), ww = tw_of(WHAT[i], g_sf_small), w = 20 + vw + 6 + ww;
+            if (x + w > b && x > a + 4) { x = a + 4; line++; }
+            float cy = y + line * 24 + 12;
+            if (draw) {
+                lu_icon(pn, IC[i], x + 7, cy, 14, S_LABEL);
+                tx(x + 20, cy - 10, x + 20 + vw + 2, cy + 10, VERB[i], g_sf_label, S_TEXT, DT_LEFT);
+                tx(x + 26 + vw, cy - 10, x + w + 2, cy + 10, WHAT[i], g_sf_small, S_MUTED, DT_LEFT);
             }
+            x += w + 20;
         }
-        y += h + 16;
+        y += (line + 1) * 24 + 10;
     }
-    y += mot_tiles(pn, 0, a, draw ? y : -10000, b); /* the routines Asleep may pick from */
+    g_mot_fold = !g_mot_more; /* the routines Asleep may pick from: the other ones folded */
+    y += mot_tiles(pn, 0, a, draw ? y : -10000, b);
+    g_mot_fold = 0;
     if (draw) { g_mzone[2][0] = g_mzone[2][1] = SR(0, 0, 0, 0); } /* (no tiles of the black hole's to drag here) */
     return y - y0;
 }
 static float motions_page(Pane *pn, float x0, float y0, float x1) {
-    float cw = x1 - x0, lw = cw >= 720 ? 250 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
+    float cw = x1 - x0, lw = cw >= 720 ? 200 : cw, ex0 = cw >= 720 ? x0 + lw + 12 : x0;
     /* the list: each state with the icons of its routines and how many actions it has */
-    float lh = 8 + 2 * 26 + ST_N * 36 + 8, y = y0;
+    /* Claude Code's states or the panel's: two tabs over the list, six states each */
+    int grp = mot_grp(g_pv_st);
+    float lh = 8 + 28 + 8 + 6 * 30 + 6, y = y0;
     box(pn, x0, y, x0 + lw, y + lh, 12, S_CARD, 0, 0);
     y += 8;
-    for (int i = 0; i < ST_N; i++) {
-        if (i == 0 || i == 6) { tx(x0 + 16, y + 6, x0 + lw - 16, y + 22, i ? L"PANEL" : L"CLAUDE CODE", g_sf_cap, S_MUTED, DT_LEFT); y += 26; }
+    {
+        float a = x0 + 8, c = x0 + lw - 8, m = (a + c) / 2;
+        box(pn, a, y, c, y + 28, 14, S_TILE, 0, 0);
+        for (int k = 0; k < 2; k++) {
+            float p0 = k ? m + 1 : a + 2, p1 = k ? c - 2 : m - 1;
+            int on = grp == k, hot = is_hot(K_MGRP, 0, k);
+            if (on || hot) box(pn, p0, y + 2, p1, y + 26, 12, on ? S_CHIP_HOT : S_CHIP, S_OR, on ? 1.2f : 0);
+            tx(p0, y, p1, y + 28, k ? L"Panel" : L"Claude Code", g_sf_label, on || hot ? S_TEXT : S_MUTED, DT_CENTER);
+            hit(p0, y, p1, y + 28, K_MGRP, 0, k);
+        }
+        y += 36;
+    }
+    for (int i = grp * 6; i < grp * 6 + 6; i++) {
         int st = MOT_STATES[i], on = st == g_pv_st, hot = is_hot(K_MSTATE, 0, st);
         float a = x0 + 8, b = y, c = x0 + lw - 8;
-        box(pn, a, b, c, b + 34, 9, hot ? S_CHIP_HOT : S_CARD, S_OR, on ? 1.5f : 0);
-        aa_disc(pn, S(a + 14), S(b + 17), S(4), LOOKS[st].halo, 1);
-        tx(a + 26, b, c - 100, b + 34, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
+        box(pn, a, b, c, b + 28, 8, hot ? S_CHIP_HOT : S_CARD, S_OR, on ? 1.5f : 0);
+        aa_disc(pn, S(a + 14), S(b + 14), S(4), LOOKS[st].halo, 1);
+        tx(a + 26, b, c - 84, b + 28, MOT_STATE_NAMES[i], g_sf_text, on ? S_TEXT : S_CHIP_TXT, DT_LEFT | DT_END_ELLIPSIS);
         /* its routines' icons (up to four), then +n, then the actions' count */
         uint32_t rt = MOTION_MAP[st].rt & ~1u;
         int na = st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1) ? 0 : bits(MOTION_MAP[st].act & ~1u), shown = 0, more = 0; /* (a black hole plays none of them) */
@@ -5234,58 +5292,54 @@ static float motions_page(Pane *pn, float x0, float y0, float x1) {
         if (na) {
             swprintf(num, 12, L"%d", na);
             float w = tw_of(num, g_sf_small);
-            tx(ix - w - 2, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT);
-            lu_icon(pn, "sparkles", ix - w - 10, b + 17, 11, S_MUTED);
+            tx(ix - w - 2, b, ix, b + 28, num, g_sf_small, S_MUTED, DT_RIGHT);
+            lu_icon(pn, "sparkles", ix - w - 10, b + 14, 11, S_MUTED);
             ix -= w + 20;
         }
         int ids[4];
         for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1) { if (shown < 4) ids[shown++] = id; else more++; }
-        if (more) { swprintf(num, 12, L"+%d", more); tx(ix - 24, b, ix, b + 34, num, g_sf_small, S_MUTED, DT_RIGHT); ix -= 28; }
-        for (int k = shown - 1; k >= 0; k--) lu_icon(pn, MOT_RT_ICON[ids[k]], ix - 8 - (shown - 1 - k) * 18, b + 17, 14, on ? S_OR : S_MUTED);
-        hit(a, b, c, b + 34, K_MSTATE, 0, st);
-        y += 36;
+        if (shown > 3) { more += shown - 3; shown = 3; } /* (a narrower list: three icons) */
+        if (more) { swprintf(num, 12, L"+%d", more); tx(ix - 24, b, ix, b + 28, num, g_sf_small, S_MUTED, DT_RIGHT); ix -= 28; }
+        for (int k = shown - 1; k >= 0; k--) lu_icon(pn, MOT_RT_ICON[ids[k]], ix - 8 - (shown - 1 - k) * 18, b + 14, 13, on ? S_OR : S_MUTED);
+        hit(a, b, c, b + 28, K_MSTATE, 0, st);
+        y += 30;
     }
     /* the editor */
     float ey = cw >= 720 ? y0 : y0 + lh + 12;
     int st = g_pv_st;
-    float iy = ey + 16 + 30 + 10, ty = iy + 44 + 16;
+    float ty = ey + 50; /* (the hint sits in the header, beside the name) */
     int hole = (st == ST_SLEEP && (MOTION_MAP[st].rt >> RT_HOLE & 1)) || (st == ST_READY && (MOTION_MAP[st].rt >> RT_RESTLESS & 1)); /* asleep as a black hole, or READY: their own first */
     int no_acts = hole && st == ST_SLEEP; /* (a black hole plays only its own: the shell's actions never run on it, so they are not offered) */
     int sleepy = hole && st == ST_SLEEP; /* (Asleep as a black hole: its own page) */
     float th = sleepy ? sleep_body(pn, ex0 + 16, ty, x1 - 16, 0) : mot_tiles(pn, 0, ex0 + 16, -10000, x1 - 16) + (no_acts ? 0 : 16 + mot_tiles(pn, 1, ex0 + 16, -10000, x1 - 16)) + (hole ? 16 + 24 + mot_tiles(pn, 2, ex0 + 28, -10000, x1 - 28) : 0); /* (measured off the page) */
-    float eh = (ty - ey) + th + 16;
+    float eh = (ty - ey) + th + 12;
     box(pn, ex0, ey, x1, ey + eh, 12, S_CARD, 0, 0);
-    aa_disc(pn, S(ex0 + 22), S(ey + 31), S(5), LOOKS[st].halo, 1);
-    tx(ex0 + 34, ey + 16, x1 - 180, ey + 46, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
+    float hy = ey + 12, hc = hy + 14; /* the header: the state, the hint (or what the tile under the pointer does), Try it, Reset */
+    aa_disc(pn, S(ex0 + 22), S(hc), S(5), LOOKS[st].halo, 1);
+    float nx = ex0 + 34 + tw_of(state_wname(st), g_sf_card) + 12;
+    tx(ex0 + 34, hy, nx, hy + 28, state_wname(st), g_sf_card, S_TEXT, DT_LEFT);
     if (sleepy) { /* (marked: it is a black hole) */
-        float nw = tw_of(state_wname(st), g_sf_card), bx = ex0 + 34 + nw + 10;
-        box(pn, bx, ey + 21, bx + 92, ey + 41, 10, S_CHIP, S_OR, 1);
-        lu_icon(pn, "hole", bx + 13, ey + 31, 11, S_OR);
-        tx(bx + 22, ey + 21, bx + 88, ey + 41, L"black hole", g_sf_small, S_OR, DT_LEFT);
+        box(pn, nx, hc - 10, nx + 92, hc + 10, 10, S_CHIP, S_OR, 1);
+        lu_icon(pn, "hole", nx + 13, hc, 11, S_OR);
+        tx(nx + 22, hc - 10, nx + 88, hc + 10, L"black hole", g_sf_small, S_OR, DT_LEFT);
+        nx += 104;
     }
     int htr = is_hot(K_MTRY, 0, 0), hrs = is_hot(K_MRESET, 0, 0);
-    box(pn, x1 - 152, ey + 18, x1 - 80, ey + 44, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
-    float P[6] = {S(x1 - 138), S(ey + 26), S(x1 - 138), S(ey + 36), S(x1 - 130), S(ey + 31)};
+    box(pn, x1 - 152, hc - 13, x1 - 80, hc + 13, 13, htr ? S_CHIP_HOT : S_CHIP, 0, 0);
+    float P[6] = {S(x1 - 138), S(hc - 5), S(x1 - 138), S(hc + 5), S(x1 - 130), S(hc)};
     aa_tri(pn, P, hexc(S_TEXT), 1);
-    tx(x1 - 126, ey + 18, x1 - 84, ey + 44, L"Try it", g_sf_label, S_TEXT, DT_LEFT);
-    hit(x1 - 152, ey + 18, x1 - 80, ey + 44, K_MTRY, 0, 0);
-    tx(x1 - 74, ey + 18, x1 - 16, ey + 44, L"Reset", g_sf_label, hrs ? S_TEXT : S_MUTED, DT_CENTER);
-    hit(x1 - 74, ey + 18, x1 - 16, ey + 44, K_MRESET, 0, 0);
-    /* the info line: what the tile under the pointer does */
-    box(pn, ex0 + 16, iy, x1 - 16, iy + 44, 9, S_TILE, 0, 0);
+    tx(x1 - 126, hc - 13, x1 - 84, hc + 13, L"Try it", g_sf_label, S_TEXT, DT_LEFT);
+    hit(x1 - 152, hc - 13, x1 - 80, hc + 13, K_MTRY, 0, 0);
+    tx(x1 - 74, hc - 13, x1 - 16, hc + 13, L"Reset", g_sf_label, hrs ? S_TEXT : S_MUTED, DT_CENTER);
+    hit(x1 - 74, hc - 13, x1 - 16, hc + 13, K_MRESET, 0, 0);
     char line[400];
     if (g_hot >= 0 && (g_hits[g_hot].kind == K_MTOG || g_hits[g_hot].kind == K_HPLAY || g_hits[g_hot].kind == K_HTOG)) {
         int row = g_hits[g_hot].row, id = g_hits[g_hot].val;
-        lu_icon(pn, mot_icon(row, id), ex0 + 36, iy + 22, 18, S_OR);
+        lu_icon(pn, mot_icon(row, id), nx + 8, hc, 14, S_OR);
         snprintf(line, sizeof line, "%s: %s", mot_name(row, id), mot_about(row, id));
-        txa(ex0 + 54, iy, x1 - 26, iy + 44, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
-    } else if (wall() < g_mot_msg_until) tx(ex0 + 28, iy, x1 - 26, iy + 44, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT);
-    else {
-        wchar_t t[200];
-        if (sleepy) swprintf(t, 200, L"Click an action to watch it above; its switch says whether it plays on its own.");
-        else swprintf(t, 200, L"Click a motion to try it above; drag it up to use it in %ls, down to stop.", state_wname(st));
-        tx(ex0 + 28, iy, x1 - 26, iy + 44, t, g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-    }
+        txa(nx + 22, hy, x1 - 162, hy + 28, line, g_sf_small, S_LABEL, DT_LEFT | DT_END_ELLIPSIS);
+    } else if (wall() < g_mot_msg_until) tx(nx, hy, x1 - 162, hy + 28, L"A state needs at least one routine: switch another on first.", g_sf_small, 0xFFB877, DT_LEFT | DT_END_ELLIPSIS);
+    else tx(nx, hy, x1 - 162, hy + 28, sleepy ? L"click an action to watch it; its switch: plays on its own" : L"click to try it \x00B7 drag up to use, down to stop", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     if (sleepy) { sleep_body(pn, ex0 + 16, ty, x1 - 16, 1); return fmaxf(cw >= 720 ? lh : lh + 12 + eh, cw >= 720 ? eh : 0); }
     float hh = 0;
     if (hole) { /* the black hole's own actions, in a frame of their own above the state's */
@@ -5314,7 +5368,7 @@ static void set_build(void) {
     HDC mdc = pn->mem;
     box(pn, 0, 0, WL, HL, 14, S_BG, 0x2A2A30, 1);
     /* the page first (it scrolls under the preview), then everything round it */
-    float pvh = clampf(HL * 0.4f, 180, 420), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
+    float pvh = clampf(HL * 0.285f, 170, 380), bandT = SET_TOP, bandB = bandT + pvh, ct = bandB + 14, cb = HL - 14;
     g_set_view_h = cb - ct;
     g_set_scroll = clampf(g_set_scroll, 0, fmaxf(0, g_set_content_h - g_set_view_h));
     g_set_scroll_to = clampf(g_set_scroll_to, 0, fmaxf(0, g_set_content_h - g_set_view_h));
@@ -5747,8 +5801,10 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_PVBG: g_pv_light = !g_pv_light; g_sl_dirty = 1; settings_applied(1); break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
-            case K_MSTATE: g_pv_st = sh->val; g_sl_dirty = 1; break;
+            case K_MSTATE: g_pv_st = sh->val; g_mot_last[mot_grp(g_pv_st)] = g_pv_st; g_sl_dirty = 1; break;
+            case K_MGRP: if (mot_grp(g_pv_st) != sh->val) { g_mot_last[!sh->val] = g_pv_st; g_pv_st = g_mot_last[sh->val]; g_sl_dirty = 1; } break;
             case K_MTOG: g_md_row = sh->row; g_md_id = sh->val; g_md_moved = 0; g_md_from = g_md_at = p; SetCapture(w); break; /* a click or a drag: told apart on the move */
+            case K_MMORE: g_mot_more = 1; g_sl_dirty = 1; break;
             case K_MTRY: { uint32_t rt = MOTION_MAP[g_pv_st].rt & ~1u; int n = bits(rt), k = n ? rand() % n : 0; for (int id = 1; id < RT_N; id++) if ((rt >> id) & 1 && k-- == 0) { mot_play(0, id); break; } break; }
             case K_MRESET: { MotionMap def[ST_N]; motion_map_default(def); MOTION_MAP[g_pv_st] = def[g_pv_st]; if (g_pv_st == ST_SLEEP) { HOLE_ACTS = HOLE_ACTS_DEF; HOLE_TILT = 2.5f; } if (g_pv_st == ST_READY) READY_ATKS = (1u << RA_N) - 2; settings_applied(1); break; }
             case K_HPLAY: mot_play(2, sh->val); break;
