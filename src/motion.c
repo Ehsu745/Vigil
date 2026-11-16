@@ -1844,6 +1844,7 @@ static void tri_centre(const Shape *sh, int ti, float *o) { for (int i = 0; i < 
  * asFree). Going home it blends from M0 into the live turn (home_turn) and docks exactly. */
 static const float *R_FREE_M;
 static int R_FREE_ON;
+static const float *R_ANC; /* (view) set round r_place calls for a piece of several triangles: their shared perspective centre */
 static void as_free(const float *M0) { R_FREE_ON = 1; R_FREE_M = M0; }
 static float R_FLAT; /* 0..1, set after as_free: see flat_m */
 static void free_end(void) { R_FREE_ON = 0; R_FREE_M = NULL; R_FLAT = 0; }
@@ -1901,6 +1902,8 @@ static void r_place(Ctx *c, const RFrame *f, int ti, const float *atv, const flo
     m3_mul(B, R0, MOF(f));
     if (!R_FREE_ON) m3_scale(B, f->sc);
     for (int i = 0; i < 3; i++) m->tt[ti][i] = st[i] * CIRCUM;
+    if (R_ANC) { float sa[3]; r_from_view(f, R_ANC, sa); for (int i = 0; i < 3; i++) m->tanc[ti][i] = sa[i] * CIRCUM; }
+    else memcpy(m->tanc[ti], m->tt[ti], sizeof m->tanc[ti]);
     m->tt_on = 1;
     m->tmi[ti] = (unsigned char)tm_add(m, B);
     m->loose[ti] = R_FREE_ON ? 2 : 1; m->loose_on = 1; /* (2: loose, its own plain shape; 1: still the shell's, spikes and all) */
@@ -2191,6 +2194,7 @@ static int shard_place(Ctx *c, const RFrame *f, RShard *q, float t) { /* 1 once 
 /* a missile pulled into the core (Bestiary's coreCrash): a blast at I on the shell's edge (In: out from the core there),
  * and the shell breaks there, the missile and the 7 triangles nearest the blast blown out as shards */
 static void core_crash(Ctx *c, const RFrame *f, ReadyRS *R, RPiece *p, const float *I, const float *In) {
+    { Session *s = c->s; if (s->game_on && s->hearts > 0 && s->hearts < GAME_HEARTS) { s->hearts++; s->heal_at = c->now; } } /* you led it into the core: a heart back */
     const Shape *sh = c->sh;
     int near[7], nn = 0;
     float best[7];
@@ -2441,7 +2445,7 @@ static void r_restless(Ctx *c) {
     for (int i = 0; i < R->nsh; i++) if (!R->sh[i].home) out = 1;
     if (!out || R->rt > 14) {
         if (!R->hits && s->aim_on && !s->game_on && !m->atk_want) { s->game_on = 1; s->hearts = GAME_HEARTS; s->game_at = c->now; } /* dodged whole: a run starts */
-        R->atk = 0; R->n = 0; R->next = c->now + rnd(s, 1.2f, 2.6f);
+        R->atk = 0; R->n = 0; R->next = c->now + (s->game_on ? rnd(s, .45f, 1.1f) : rnd(s, 1.2f, 2.6f)); /* (a run on: faster) */
     }
 }
 
@@ -2757,7 +2761,7 @@ void motion_tick(Session *s, const Shape *sh, int shown, double now, float dt) {
     m->ang_on = 0; m->scan_a = 0; m->inner = 0;
     /* what a routine sets afresh every frame */
     memset(m->tmi, 0, sizeof m->tmi);
-    m->ntm = 0; m->tt_on = m->ta_on = m->sharp_on = m->trail_on = m->edge_on = 0; m->squash = 0; m->hole = 0;
+    m->ntm = 0; m->tt_on = m->ta_on = m->sharp_on = m->trail_on = m->edge_on = m->trail_stage = 0; m->squash = 0; m->hole = 0;
     memset(m->tt, 0, sizeof m->tt); memset(m->sharp_k, 0, sizeof m->sharp_k); memset(m->edge_k, 0, sizeof m->edge_k);
     memset(m->loose, 0, sizeof m->loose); m->loose_on = m->atk_busy = 0;
     if (m->rt != RT_RESTLESS) m->rage *= expf(-dt * 3);

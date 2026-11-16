@@ -37,6 +37,7 @@ static void forge_part_turn(const float *R, float u, float *out) {
 static void forge_place(Ctx *c, const RFrame *f, const ForgeBlock *B, const float *at, const float *R9) {
     float atv[3], ks = R_FREE_ON && f->sc > 0 ? 1 / f->sc : 1; /* (r_place keeps a loose piece its own size) */
     r_to_view(f, at, atv);
+    R_ANC = atv; /* (one perspective for the whole clump: it stays one piece) */
     for (int j = 0; j < B->nt; j++) {
         float cm[3], d[3], dv[3], o[3], cv[3];
         tri_centre(c->sh, B->tris[j], cm);
@@ -45,6 +46,7 @@ static void forge_place(Ctx *c, const RFrame *f, const ForgeBlock *B, const floa
         for (int i = 0; i < 3; i++) cv[i] = atv[i] + o[i] * ks;
         r_place(c, f, B->tris[j], cv, R9);
     }
+    R_ANC = NULL;
 }
 static void forge_glow(Ctx *c, const ForgeBlock *B, float a) { for (int j = 0; j < B->nt; j++) r_glow(c, B->tris[j], a); }
 static int forge_used(const unsigned char *used, const Shape *sh, int ti) { return used[ti] || used[sh->tnb[ti][0]] || used[sh->tnb[ti][1]] || used[sh->tnb[ti][2]]; }

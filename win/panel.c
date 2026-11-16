@@ -1810,7 +1810,12 @@ static void hearts_draw(double now) {
     for (int k = 0; k < GAME_HEARTS; k++) {
         float in = clampf01(((float)(now - g->game_at) - k * 0.06f) / 0.25f), pop = in * in * (3 - 2 * in) * (1 + 0.25f * sinf(3.14159265f * in));
         float cx = W * 0.5f, cy = 12 * dp + gap * (k + 0.5f);
-        int full = k < g->hearts, lost = k == g->hearts && g->heart_at > g->game_at && now - g->heart_at < 0.6;
+        int full = k < g->hearts, lost = k == g->hearts && g->heart_at > g->game_at && g->heart_at > g->heal_at && now - g->heart_at < 0.6;
+        if (full && k == g->hearts - 1 && g->heal_at > g->game_at && now - g->heal_at < 0.5) { /* just won back: it swells in, a white flash round it */
+            float u = (float)(now - g->heal_at) / 0.5f;
+            pop *= 1 + 0.6f * (1 - u) * (1 - u);
+            heart_at(&g_hearts, cx, cy, sz * (1.3f + 0.6f * u), white, 0.5f * (1 - u) * out);
+        }
         if (full) { heart_at(&g_hearts, cx, cy, sz * 1.25f * pop, red, 0.22f * in * out); heart_at(&g_hearts, cx, cy, sz * pop, red, in * out); heart_at(&g_hearts, cx - sz * 0.18f, cy - sz * 0.2f, sz * 0.22f * pop, white, 0.55f * in * out); }
         else {
             heart_at(&g_hearts, cx, cy, sz * pop, dim, in * out);
