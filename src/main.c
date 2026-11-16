@@ -321,7 +321,7 @@ int main(int argc, char **argv) {
 
     static Room room, ghost;
     static Event ev[1024];
-    Canvas cv = {0, 0, NULL, 0, 0, 0};
+    Canvas cv = {0};
     Demo demo = {0};
     Col bg = {0, 0, 0};
     uint8_t *rgb = NULL;

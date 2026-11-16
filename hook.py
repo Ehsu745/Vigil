@@ -2,16 +2,18 @@
 """Claude Code hook for vigil.
 
 Appends one JSON line per event to ~/.dodeca-core/events.jsonl:
-time, session id, event name, folder name, tool name, notification type.
+time, session id, event name, folder name, tool name, notification type, and for a subagent's events its
+id and type (e.g. "Explore"), so it can be shown as a core of its own.
 It never stores prompts, tool input/output or full paths in that file.
 
 With DODECA_RICH=1 it also keeps one small file per session, ~/.dodeca-core/msg/<session id>.json,
 for the floating panel's chat box and voice features: Claude's last reply, the last notification text
-(e.g. a permission prompt), the iTerm2 session or tmux pane the conversation runs in (where a reply
-typed in the panel goes), and the last few turns as the terminal shows them: each prompt, its reply and
+(e.g. a permission prompt), the iTerm2 session, Windows Terminal tab, tmux pane or vigil-claude launcher the
+conversation runs in (where a reply typed in the panel goes), and the last few turns as the terminal shows them: each prompt, its reply and
 its steps (a tool name with a short detail: a command's first line, a file's name without its folder,
 a search pattern), plus the step running now. The text never goes into the event file; a reply only
-adds "m": 1 to its Stop line. The file is deleted when the session ends.
+adds "m": 1 to its Stop line. A subagent's final reply goes into a file of its own,
+msg/<session id>-<agent id>.json. The files are deleted when the session ends.
 
 Always exits 0 and prints nothing, so it cannot block or change Claude Code.
 """
@@ -31,7 +33,7 @@ PATH = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events
 MSG_DIR = os.path.join(os.path.dirname(PATH), "msg")
 RICH = os.environ.get("DODECA_RICH") == "1"
 KNOWN = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
-         "PostToolUse", "Notification", "Stop"}
+         "PostToolUse", "Notification", "Stop", "SubagentStart", "SubagentStop"}
 MAX_TEXT = 4000
 MAX_PROMPT = 2000
 TURNS = 5                  # turns kept: prompt, reply and steps; the last is the one going on
@@ -39,6 +41,11 @@ STEPS = 8                  # steps kept per turn (the count and the tally keep t
 MSG_BUDGET = 24000         # the oldest turns go first when the file grows past this
 STALE = 24 * 3600          # msg files of sessions that never sent SessionEnd
 TRANSCRIPT_TAIL = 262144   # how much of the transcript the fallback reads, from the end
+
+
+def sub_sid(sid, aid):
+    """A subagent's own id, as the panel and the terminal make it: its session's id and its agent id."""
+    return (sid + "-" + aid)[:64]
 
 
 def msg_path(sid):
@@ -271,6 +278,13 @@ def drop_msg(sid):
     p = msg_path(sid)
     if p and os.path.exists(p):
         os.remove(p)
+    if p and os.path.isdir(MSG_DIR):  # its subagents' replies too
+        for name in os.listdir(MSG_DIR):
+            if name.startswith(sid + "-") and name.endswith(".json"):
+                try:
+                    os.remove(os.path.join(MSG_DIR, name))
+                except OSError:
+                    pass
 
 
 def drop_stale():
@@ -289,11 +303,42 @@ def drop_stale():
 
 
 def rich(d, ev, sid, rec):
+    aid = rec.get("aid")
+    if aid:  # a subagent's: only its final reply is kept, in a file of its own (its steps stay out of the session's turns)
+        sub = sub_sid(sid, aid)
+        if ev == "PreToolUse" and d.get("tool_name") == "SubagentHandback":  # its report, handed back as a tool call
+            text = (d.get("tool_input") or {}).get("message")
+            if isinstance(text, str) and text.strip():
+                with Locked():
+                    update_msg(sub, {"reply": text[:MAX_TEXT], "hb": 1})
+        elif ev == "SubagentStop":
+            text = d.get("last_assistant_message")
+            with Locked():
+                if read_msg(sub).get("hb"):  # (its closing words after the report: the report stays)
+                    rec["m"] = 1
+                elif isinstance(text, str) and text.strip() and update_msg(sub, {"reply": text[:MAX_TEXT]}):
+                    rec["m"] = 1
+        return
     if ev == "SessionStart":
         drop_stale()
         pane = os.environ.get("TMUX_PANE", "")
-        update_msg(sid, {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
-                         "tmux": pane if re.fullmatch(r"%\d{1,6}", pane) else ""})
+        inbox = os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
+        fields = {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
+                  "tmux": pane if re.fullmatch(r"%\d{1,6}", pane) else "",
+                  "inbox": inbox if re.fullmatch(r"\d{1,9}", inbox) else "",
+                  # the Windows Terminal tab it runs in (WT passes its id into WSL): where the Windows panel types a reply
+                  "wt": wt if re.fullmatch(r"[0-9A-Fa-f-]{36}", wt := os.environ.get("WT_SESSION", "")) else ""}
+        with Locked():
+            if d.get("source") == "resume" and not turns_of(read_msg(sid)):
+                # resumed (its file went when it ended): its turns and last reply again, from the transcript, at once
+                try:
+                    old = backfill(d.get("transcript_path"))
+                except Exception:
+                    old = []
+                if old:  # (none yet in the transcript: left to the next prompt or Stop, as before)
+                    fields.update(turns=fit(old), filled=True,
+                                  reply=next((t["r"] for t in reversed(old) if t.get("r")), ""))
+            update_msg(sid, fields)
     elif ev == "SessionEnd":
         drop_msg(sid)
     elif ev == "Stop":
@@ -328,6 +373,12 @@ def main():
         "tool": str(d.get("tool_name", ""))[:32],
         "n": str(d.get("notification_type", ""))[:24],
     }
+    aid = d.get("agent_id")
+    if isinstance(aid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", aid):  # fired in (or for) a subagent
+        rec["aid"] = aid
+        rec["at"] = re.sub(r"[^A-Za-z0-9_ .:-]", "", str(d.get("agent_type") or ""))[:32]
+    if ev in ("SubagentStart", "SubagentStop") and not rec.get("at"):
+        return  # Claude Code's own internal agents (no type): not shown
     os.makedirs(os.path.dirname(PATH), mode=0o700, exist_ok=True)
     if RICH:
         try:

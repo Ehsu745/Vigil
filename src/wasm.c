@@ -102,6 +102,21 @@ EXPORT(v_render) uint8_t *v_render(int i, int px, float glow, float core, double
     }
     return g_px;
 }
+/* the black hole (web/blackhole-mock.html): its look's tunables by number (BhTune's order), its actions, its view */
+EXPORT(v_tune) void v_tune(int k, float v) { if (k >= 0 && k < (int)(sizeof(BhTune) / sizeof(float))) ((float *)&BH_TUNE)[k] = v; }
+EXPORT(v_b2_progress) int v_b2_progress(void) { return bh2_progress(); }
+EXPORT(v_tune_get) float v_tune_get(int k) { return k >= 0 && k < (int)(sizeof(BhTune) / sizeof(float)) ? ((float *)&BH_TUNE)[k] : 0; }
+EXPORT(v_hole_acts) void v_hole_acts(unsigned mask) { HOLE_ACTS = mask; }
+EXPORT(v_hole_play) void v_hole_play(int i, int a) { Session *s = slot(i); if (s) hole_play(s, a); }
+EXPORT(v_hole_tilt) void v_hole_tilt(float speed) { HOLE_TILT = speed; }
+EXPORT(v_pad) void v_pad(int i, float pad) { Session *s = slot(i); if (s) s->pad = pad; }
+/* hold its disc's axis where the page puts it (x right, y up, z toward you), as a hand would */
+EXPORT(v_hole_view) void v_hole_view(int i, float nx, float ny, float nz, double now) {
+    Session *s = slot(i);
+    if (!s) return;
+    HoleRS *H = &s->mo.rs.hole;
+    H->nv[0] = nx; H->nv[1] = ny; H->nv[2] = nz; H->nvel[0] = H->nvel[1] = H->nvel[2] = 0; H->touched = now;
+}
 /* turned by the hand (a drag), radians */
 EXPORT(v_turn) void v_turn(int i, float dax, float day) { Session *s = slot(i); if (s) { s->ax += dax; s->ay += day; } }
 

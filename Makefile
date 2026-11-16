@@ -3,7 +3,7 @@ CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE
 LDLIBS   = -lz -lm
 SRC      = src/main.c src/events.c src/geom.c src/session.c src/motion.c src/render.c
 
-vigil: $(SRC) src/vigil.h
+vigil: $(SRC) src/vigil.h $(wildcard src/ready_*.inc)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 # the shared C as WebAssembly for the Core Bestiary page (web/bestiary.html); needs clang, lld and wasi-libc
@@ -11,7 +11,7 @@ WASM_CC  ?= clang
 WASM_SRC  = src/wasm.c src/geom.c src/session.c src/motion.c src/render.c
 wasm: web/vigil-wasm.js
 
-web/vigil.wasm: $(WASM_SRC) src/vigil.h
+web/vigil.wasm: $(WASM_SRC) src/vigil.h $(wildcard src/ready_*.inc)
 	$(WASM_CC) --target=wasm32-wasi --sysroot=/usr -isystem /usr/include/wasm32-wasi -L/usr/lib/wasm32-wasi \
 	  -O2 -std=c11 -Wall -Wextra -D_DEFAULT_SOURCE -mexec-model=reactor -Wl,--strip-all -o $@ $(WASM_SRC) -lm
 
