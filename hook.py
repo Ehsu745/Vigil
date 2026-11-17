@@ -371,7 +371,8 @@ def rich(d, ev, sid, rec):
             on_turn(sid, ev, d)
     elif ev == "Notification":
         text = d.get("message")
-        if isinstance(text, str) and text.strip() and d.get("notification_type") != "idle_prompt":
+        asks = d.get("notification_type") in (None, "", "permission_prompt", "elicitation_dialog")  # (a login or a quota notice asks nothing)
+        if isinstance(text, str) and text.strip() and asks:
             update_msg(sid, {"notice": text[:MAX_TEXT]})
 
 
