@@ -1,12 +1,12 @@
 # CLAUDE.md
 
-Vigil (formerly dodeca-core) shows every running Claude Code session as a glowing polyhedron, in the terminal or in a floating panel (macOS, Windows). A Claude Code hook appends events to a JSONL file; a C program reads it, runs a state machine per session and draws the result with its own software renderer.
+Vigil shows every running Claude Code session as a glowing polyhedron, in the terminal or in a floating panel (macOS, Windows). A Claude Code hook appends events to a JSONL file; a C program reads it, runs a state machine per session and draws the result with its own software renderer.
 
 ```
-Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──▶ state machine ──▶ renderer ──▶ terminal / panel
+Claude Code ──hook.py──▶ ~/.vigil/events.jsonl ──tail──▶ state machine ──▶ renderer ──▶ terminal / panel
 ```
 
-The data folder `~/.dodeca-core` and the `DODECA_*` variables keep the old name until the hooks are reinstalled (`install_hooks.py --apply`, which needs the user's OK).
+The data folder is `~/.vigil` and the variables are `VIGIL_*`. The old names (`~/.dodeca-core`, `DODECA_*`) are still read: the folder is moved to `~/.vigil` the first time, so an old hook command keeps working until `install_hooks.py --apply` is run again (with the user's OK).
 
 ## The vault
 
@@ -50,7 +50,7 @@ Where to change things: colours and looks are `LOOKS` in `src/session.c`; a new 
 
 - **After any change, restart the panel for the user**: stop it (`taskkill.exe /IM vigil-panel.exe /F`, or quit `Vigil.app`), rebuild, start it on the real sessions in the background (`./vigil-win` or `./vigil-panel`). A running `vigil-panel.exe` locks the file.
 - **The hook must never get in Claude Code's way**: `hook.py` always exits 0, prints nothing, finishes fast, and writes each event with one `O_APPEND` write. Never call `claude` from it.
-- **Privacy**: `events.jsonl` holds only time, session id, event name, folder name (not the path), tool name, notification type, and a subagent's id and type. Never prompts, tool input or output, or paths. Mode 600, folder 700. Text (replies, turns) is kept only with opt-in `DODECA_RICH=1`, in `msg/<sid>.json`, never in `events.jsonl`. The full rule is in the Hook and privacy note.
+- **Privacy**: `events.jsonl` holds only time, session id, event name, folder name (not the path), tool name, notification type, and a subagent's id and type. Never prompts, tool input or output, or paths. Mode 600, folder 700. Text (replies, turns) is kept only with opt-in `VIGIL_RICH=1`, in `msg/<sid>.json`, never in `events.jsonl`. The full rule is in the Hook and privacy note.
 - **No dependencies**: Python uses only the standard library; C uses libc, libm, zlib (plus Cocoa on macOS and libraries that are part of Windows).
 - **Ask before** running `install_hooks.py --apply` or `--remove` (they edit `~/.claude/settings.json`; no flags is a safe dry run).
 - **Blades is Zaviel's; Skein is Ehsu745's.** `r_blades` stays as in `f9d16a1`; don't change it without the user's OK. Skein (`r_skein`) is off by default. Tell Zaviel when a change to the shared motions changes the Windows panel.

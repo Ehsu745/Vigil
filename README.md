@@ -25,8 +25,6 @@ In the window you can point at a session's core to read its last reply, and doub
 
 A Claude Code hook appends one line per event to a file; a C program reads the file and draws the cores with its own renderer. Everything runs locally, with no network access, and needs only libc, libm and zlib.
 
-<sub>Formerly dodeca-core: the data folder `~/.dodeca-core` and the `DODECA_*` variables keep their old names for now.</sub>
-
 <p align="center">
   <a href="#states">States</a> ·
   <a href="#quick-start">Quick start</a> ·
@@ -89,7 +87,7 @@ sh win/build.sh && ./vigil-win --demo       # Windows: run from WSL (needs mingw
 - **One core or all.** In single-core mode one large core shows the session that needs you (else the one with the newest reply), and the other sessions are small cores around it; in all-cores mode each session is its own core. The Windows panel starts in single-core mode (`--all` for all cores, each placed where you like); the macOS panel starts with all cores in a column on the right edge (`--single` or `⌃⌥C` for single-core mode).
 - **Replying.** Double-click a core, type, Enter; images can be dropped on the core. On macOS you can also hold a core and speak (push-to-talk, recognised on the Mac); the text goes into that session's iTerm2 pane.
 - **Spoken reports** (macOS, `--voice`): clicking a core reads a short summary of its reply.
-- **Settings** (Windows: right-click > Settings): a resizable window with a live, zoomable preview and six pages (Look, Cluster, Replies, Motions, Shortcuts, Performance): shape, glow, size, gravity, focus frame, the chat box's font and colours, which motions each state uses, and global hotkeys you can record. The Mac has a similar, simpler window (right-click > Settings...), with a Voice row added; there the wheel keeps setting the speech volume and ⌥ + the wheel spins the core (see below).
+- **Settings** (Windows: right-click > Settings): a resizable window with a live, zoomable preview and six pages (Look, Cluster, Chat, Motions, Shortcuts, Performance): shape, glow, size, gravity, focus frame, the chat box's font and colours, which motions each state uses, and global hotkeys you can record. The Mac has a similar, simpler window (right-click > Settings...), with a Voice row added; there the wheel keeps setting the speech volume and ⌥ + the wheel spins the core (see below).
 
 <table>
   <tr>

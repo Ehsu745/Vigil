@@ -25,8 +25,6 @@
 
 Claude Code 的 hook 每個事件在檔案裡加一行；一個 C 程式讀這個檔案，用自己的渲染器畫出核心。全部在本機執行，不連網路，只需要 libc、libm 和 zlib。
 
-<sub>舊名 dodeca-core：資料夾 `~/.dodeca-core` 和 `DODECA_*` 環境變數暫時沿用舊名。</sub>
-
 <p align="center">
   <a href="#狀態">狀態</a> ·
   <a href="#快速開始">快速開始</a> ·
@@ -89,7 +87,7 @@ sh win/build.sh && ./vigil-win --demo       # Windows：在 WSL 裡執行（需�
 - **一顆或全部。** 單核心模式是一顆大核心顯示需要你的 session（沒有的話是最新回覆的那個），其他 session 是旁邊的小核心；全部核心模式則每個 session 各自一顆。Windows 面板預設是單核心模式（`--all` 切成全部核心，每顆放在你想放的位置）；macOS 面板預設是全部核心，排在螢幕右緣一列（`--single` 或 `⌃⌥C` 切成單核心模式）。
 - **回覆。** 雙擊核心、輸入、按 Enter，可以把圖片拖到核心上。macOS 也可以按住核心說話（按住說話，在 Mac 上辨識），文字會打進那個 session 的 iTerm2 窗格。
 - **語音回報**（macOS，`--voice`）：點核心會念出它回覆的簡短摘要。
-- **設定**（Windows：右鍵 > Settings）：可以調整大小的視窗，附可放大的即時預覽和六頁（Look、Cluster、Replies、Motions、Shortcuts、Performance）：形狀、光暈、大小、重力、對焦框、對話框的字型和顏色、每個狀態用哪些動作，以及可以自己錄的全域快捷鍵。Mac 也有類似但較簡單的視窗（右鍵 > Settings...），另外多了 Voice 一列；在 Mac 上滾輪仍是調語音音量，⌥ + 滾輪才會轉動核心（見下方）。
+- **設定**（Windows：右鍵 > Settings）：可以調整大小的視窗，附可放大的即時預覽和六頁（Look、Cluster、Chat、Motions、Shortcuts、Performance）：形狀、光暈、大小、重力、對焦框、對話框的字型和顏色、每個狀態用哪些動作，以及可以自己錄的全域快捷鍵。Mac 也有類似但較簡單的視窗（右鍵 > Settings...），另外多了 Voice 一列；在 Mac 上滾輪仍是調語音音量，⌥ + 滾輪才會轉動核心（見下方）。
 
 <table>
   <tr>

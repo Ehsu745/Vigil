@@ -5,9 +5,9 @@
 
 It runs `claude` in a pseudo-terminal of its own and passes everything through unchanged (keys, output, window
 size), so it looks and behaves exactly as `claude` does. Besides, it listens on a pipe of its own,
-~/.dodeca-core/inbox/<its pid> (mode 600, next to the events file, or $DODECA_EVENTS's folder): what the panel
+~/.vigil/inbox/<its pid> (mode 600, next to the events file, or $VIGIL_EVENTS's folder): what the panel
 writes there, ended by a NUL, is pasted into Claude Code as typed text and Enter is pressed after it, while the
-terminal stays where it is. The hook notes the pid at SessionStart (DODECA_INBOX, with DODECA_RICH=1), which is
+terminal stays where it is. The hook notes the pid at SessionStart (VIGIL_INBOX, with VIGIL_RICH=1), which is
 how the panel finds the pipe. Alias it: alias claude=vigil-claude.
 
 Only the standard library. Without a terminal (stdin not a tty) it simply runs claude.
@@ -26,8 +26,19 @@ import tty
 PASTE_ON, PASTE_OFF = b"\x1b[?2004h", b"\x1b[?2004l"   # the app asking for bracketed paste, and dropping it
 
 
+def data_dir():
+    """~/.vigil; the old ~/.dodeca-core is moved there the first time (the name before Vigil)."""
+    new, old = os.path.expanduser("~/.vigil"), os.path.expanduser("~/.dodeca-core")
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:
+            os.rename(old, new)
+        except OSError:  # (another hook moved it at the same moment: fine)
+            return new if os.path.exists(new) else old
+    return new
+
+
 def inbox_dir():
-    ev = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events.jsonl"))
+    ev = os.environ.get("VIGIL_EVENTS") or os.environ.get("DODECA_EVENTS") or os.path.join(data_dir(), "events.jsonl")
     return os.path.join(os.path.dirname(ev), "inbox")
 
 
@@ -50,7 +61,7 @@ def main():
     except FileNotFoundError:
         pass
     os.mkfifo(fifo, 0o600)
-    os.environ["DODECA_INBOX"] = str(os.getpid())
+    os.environ["VIGIL_INBOX"] = str(os.getpid())
 
     pid, master = pty.fork()
     if pid == 0:

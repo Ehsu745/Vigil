@@ -201,8 +201,9 @@ void room_apply(Room *r, const Event *e) {
         return;
     }
     if (!strncmp(ev, "Subagent", 8)) return; /* (from an older hook: no agent id) */
-    /* Claude Code also notifies when a prompt has sat idle; that is not a request for approval */
-    if (!strcmp(ev, "Notification") && !strcmp(e->ntype, "idle_prompt")) return;
+    /* only a notice that asks you something is NEEDS YOU: a permission prompt, an MCP server asking for input, or one
+     * with no type (older Claude Code); a prompt left idle, a login, a quota notice and the like change nothing */
+    if (!strcmp(ev, "Notification") && e->ntype[0] && strcmp(e->ntype, "permission_prompt") && strcmp(e->ntype, "elicitation_dialog")) return;
     if (!s) {
         if (r->n >= MAX_SESS) return;
         s = &r->s[r->n++];
