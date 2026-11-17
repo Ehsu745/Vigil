@@ -3175,6 +3175,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 int cx = r.right - pad / 2 - (int)g_dpi, inset = (int)(6 * g_dpi);
                 int y0 = view.bottom - inset, y1 = view.top + inset;
                 if (y0 - y1 < 6 * (int)(7 * g_dpi)) y1 = y0 - 6 * (int)(7 * g_dpi); /* (a short box: they stay apart, over the title if need be) */
+                if (y0 - y1 > 6 * (int)(22 * g_dpi)) y1 = y0 - 6 * (int)(22 * g_dpi); /* (a tall box: no longer than this, climbing from the bottom) */
                 #define FADE(c) mixc(c, bgc, fade)
                 for (int i = 0; i < HIST_PUSH - 1; i++) { /* the thread */
                     int ya = y0 - (y0 - y1) * i / (HIST_PUSH - 1), yb = y0 - (y0 - y1) * (i + 1) / (HIST_PUSH - 1);
