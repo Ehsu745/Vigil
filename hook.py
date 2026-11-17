@@ -366,6 +366,7 @@ def on_turn(sid, ev, d):
             t["c"] = c
             fields["run"] = step
         elif ev == "PostToolUse":
+            t["ts"] = int(time.time())  # (the last sign of life: the running line reddens after a long quiet)
             fields["run"] = None
         elif ev == "Stop":
             t["r"] = d.get("_reply", "")[:MAX_TEXT]

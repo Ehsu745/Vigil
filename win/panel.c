@@ -2044,7 +2044,7 @@ static const char *js_next(const char **c) {
 /* The last few turns as Claude Code's terminal shows them: the prompt, its steps (a tool and what it works on),
  * the reply; the hook keeps up to 5 in "turns" (the last one is going on), and the step running now in "run". */
 enum { MT_MAX = 5, MT_STEPS = 16 }; /* (hook.py's TURNS, STEPS) */
-typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; long long t0; long k; } MTurn; /* t0: when it began (Unix seconds), k: Claude's output tokens so far */
+typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; long long t0, ts; long k; } MTurn; /* t0: when it began, ts: its last step began or ended (Unix seconds); k: Claude's output tokens so far */
 static MTurn g_mt[MT_MAX];
 static int g_mt_n;
 static char *g_run_tool, *g_run_what;
@@ -2072,7 +2072,7 @@ static void mt_load(const char *buf) {
         t->p = json_unq(js_key(all[i], "p"));
         t->r = json_unq(js_key(all[i], "r"));
         t->n = js_int(js_key(all[i], "n"));
-        { const char *v = js_key(all[i], "t0"); t->t0 = v ? _atoi64(v) : 0; v = js_key(all[i], "k"); t->k = v ? atol(v) : 0; }
+        { const char *v = js_key(all[i], "t0"); t->t0 = v ? _atoi64(v) : 0; v = js_key(all[i], "ts"); t->ts = v ? _atoi64(v) : 0; v = js_key(all[i], "k"); t->k = v ? atol(v) : 0; }
         const char *s = js_key(all[i], "s"), *st;
         if (s && *s == '[')
             for (const char *c = s; (st = js_next(&c)) && t->ns < MT_STEPS;) {
@@ -2535,7 +2535,8 @@ void chat_more_fonts(int h, const wchar_t *text, DWORD pitch) {
 #define ID_SPIN 77                     /* the chat box's timer while the running line shows */
 static int g_spin_on, g_spin_x, g_spin_y; /* its baseline in the laid-out body, and where its words start */
 static wchar_t g_spin_verb[24];
-static long long g_spin_t0;
+static long long g_spin_t0, g_spin_ts; /* the turn's start, its last step (began or ended) */
+static int g_spin_tool;              /* a tool running: never stalled */
 static long g_spin_k;
 static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     g_runs_n = 0; g_lay_len = 0; g_lay_w = 0; g_spin_on = 0;
@@ -2647,7 +2648,9 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 while (c < end && *c != 0x1F && n < 23) g_spin_verb[n++] = *c++;
                 g_spin_verb[n] = 0;
                 g_spin_t0 = c < end ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : 0;
-                g_spin_k = c < end && *c == 0x1F ? wcstol(c + 1, NULL, 10) : 0;
+                g_spin_k = c < end && *c == 0x1F ? wcstol(c + 1, (wchar_t **)&c, 10) : 0;
+                g_spin_ts = c < end && *c == 0x1F ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : g_spin_t0;
+                g_spin_tool = c < end && *c == 0x1F ? wcstol(c + 1, NULL, 10) : 0;
                 g_spin_y = y + asc; g_spin_x = text_w(dc, F_BODY, L"\x25CF ", 2); g_spin_on = 1;
                 if (g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46) > g_lay_w) g_lay_w = g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46);
                 y += lh; blank = 0; marked = 0;
@@ -2924,47 +2927,105 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
     }
 }
 
-/* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back (a plain * where ✳ would be: that
- * one comes out as an emoji) and breathing between the accent and a lighter shade, the word in bold in the accent with a
- * soft lighter band gliding across it, then the time and the tokens; repainted 25 times a second by its own timer */
+/* the running line's star, drawn (not a font's glyph: Windows puts in another face's character, an emoji or a box,
+ * depending on the face and the system's language): Claude Code's shapes · ✢ * ✶ ✻ ✽ as spokes from the middle,
+ * each spoke as wide as w0 at r0 growing to w1 at r1; 4x4 samples a pixel, over the box's own background */
+static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col, COLORREF bg) {
+    typedef struct { int n; float rot, r0, r1, w0, w1, dot; } Shape;
+    static const Shape SH[6] = {
+        {0, 0, 0, 0, 0, 0, .22f},           /* · */
+        {4, 0, .10f, .95f, .06f, .30f, 0},  /* ✢ four teardrops */
+        {6, 0, 0, .78f, .17f, .17f, 0},     /* * */
+        {6, 0, 0, 1.0f, .55f, 0, 0},        /* ✶ six points */
+        {8, 0, .22f, .98f, .06f, .26f, 0},  /* ✻ eight teardrops, open in the middle */
+        {8, 0, .12f, 1.0f, .10f, .38f, 0},  /* ✽ eight heavy teardrops */
+    };
+    int S = size < 6 ? 6 : size;
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    uint32_t *px = NULL;
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0);
+    if (!bm) { DeleteDC(mem); return; }
+    HGDIOBJ old = SelectObject(mem, bm);
+    const Shape *h = &SH[shape % 6];
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            int in = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    float u = ((x + (sx + .5f) / 4) / S) * 2 - 1, v = ((y + (sy + .5f) / 4) / S) * 2 - 1, r = hypotf(u, v);
+                    int hit = h->dot > 0 && r < h->dot;
+                    for (int k = 0; k < h->n && !hit; k++) {
+                        float a = h->rot + (float)M_PI * 2 * k / h->n - (float)M_PI / 2, ax = cosf(a), ay = sinf(a);
+                        float along = u * ax + v * ay, across = fabsf(-u * ay + v * ax);
+                        if (along < h->r0 || along > h->r1) continue;
+                        float t = (along - h->r0) / fmaxf(.01f, h->r1 - h->r0), w = h->w0 + (h->w1 - h->w0) * t;
+                        if (h->w1 > h->w0 && t > .7f) w *= sqrtf(fmaxf(0, 1 - (t - .7f) / .3f * (t - .7f) / .3f)); /* (a teardrop's round end) */
+                        hit = across < w / 2;
+                    }
+                    in += hit;
+                }
+            float a = in / 16.0f;
+            px[y * S + x] = RGB(GetBValue(bg) + (int)((GetBValue(col) - GetBValue(bg)) * a), GetGValue(bg) + (int)((GetGValue(col) - GetGValue(bg)) * a), GetRValue(bg) + (int)((GetRValue(col) - GetRValue(bg)) * a));
+        }
+    BitBlt(dc, cx - S / 2, cy - S / 2, S, S, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+}
+
+/* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back, the word in bold in the accent with
+ * a soft lighter band gliding across it, then the time and the tokens. After 10 s with no step (and no tool running)
+ * it eases toward the theme's error red over the next 10 s, as the CLI does when no tokens come (it counts tokens; the
+ * hook only sees steps). Repainted 25 times a second by its own timer */
 static void spin_paint(HDC dc, int x0, int base) {
-    static const wchar_t STAR[] = L"\x00B7\x2722*\x2736\x273B\x273D\x273D\x273B\x2736*\x2722\x00B7";
+    static const int SEQ[12] = {0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0};
+    static double stall, at_last;
     double now = wall();
-    COLORREF acc = tint(MD_RUN);
-    int ar = GetRValue(acc), ag = GetGValue(acc), ab = GetBValue(acc);
-    int sr = min(255, ar + 40), sg = min(255, ag + 70), sb = min(255, ab + 70); /* the lighter shade (claude 215,119,87 → claudeShimmer 235,159,127, a little further) */
-    #define SPIN_MIX(k) RGB(ar + (int)((sr - ar) * (k)), ag + (int)((sg - ag) * (k)), ab + (int)((sb - ab) * (k)))
-    SetTextAlign(dc, TA_BASELINE | TA_LEFT);
+    COLORREF acc = tint(MD_RUN), bgc = chat_bg();
+    int light = GetRValue(bgc) * 299 + GetGValue(bgc) * 587 + GetBValue(bgc) * 114 > 140000;
+    COLORREF err = light ? RGB(171, 43, 63) : RGB(255, 107, 128); /* (Claude Code's error colour, dark and light) */
+    { /* how stalled: eased, as the CLI eases it (a tenth of the way every 50 ms) */
+        double quiet = g_spin_tool ? 0 : (double)time(NULL) - (double)g_spin_ts, want = quiet > 10 ? fmin((quiet - 10) / 10, 1) : 0;
+        double dt = fmin(1, now - at_last);
+        at_last = now;
+        stall += (want - stall) * (1 - pow(0.9, dt / 0.05));
+    }
+    #define MIXC(a, b, k) RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * (k)), GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * (k)), GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * (k)))
+    COLORREF base_c = MIXC(acc, err, stall);
+    COLORREF shim = RGB(min(255, GetRValue(base_c) + (light ? 30 : 20)), min(255, GetGValue(base_c) + (light ? 30 : 40)), min(255, GetBValue(base_c) + (light ? 30 : 40))); /* (claude → claudeShimmer) */
+    TEXTMETRICW tm;
     SelectObject(dc, g_chat_bf);
-    SetTextColor(dc, SPIN_MIX((1 - cos(2 * M_PI * now / 2.0)) / 2)); /* the star breathes between them, every 2 s */
-    const wchar_t *st = STAR + (int)(now / 0.12) % 12;
-    SIZE sz; GetTextExtentPoint32W(dc, st, 1, &sz);
-    TextOutW(dc, x0 + max(0, (g_spin_x - sz.cx) / 2), base, st, 1);
+    GetTextMetricsW(dc, &tm);
+    int S = (int)(tm.tmAscent * 0.95f);
+    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.42f), S, SEQ[(int)(now / 0.12) % 12],
+              MIXC(base_c, shim, (1 - cos(2 * M_PI * now / 2.0)) / 2), bgc); /* (it breathes between the two shades, every 2 s) */
+    SetTextAlign(dc, TA_BASELINE | TA_LEFT);
     SelectObject(dc, lay_font(F_BOLD));
-    int x = x0 + max(g_spin_x, (int)sz.cx + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
+    int x = x0 + max(g_spin_x, S + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
+    SIZE sz;
     double span = n + 1 + 12, at = fmod(now / 0.075, span) - 6; /* the band's middle, in letters, gliding on 6 past each end */
     for (int i = 0; i <= n; i++) {
         wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
         double d = fabs(i - at) / 2.5, k = d < 1 ? (1 + cos(M_PI * d)) / 2 : 0; /* soft edges: a gradient, not a step */
-        SetTextColor(dc, SPIN_MIX(k));
+        SetTextColor(dc, MIXC(base_c, shim, k));
         TextOutW(dc, x, base, &ch, 1);
         GetTextExtentPoint32W(dc, &ch, 1, &sz);
         x += sz.cx;
     }
     SelectObject(dc, g_chat_bf);
-    wchar_t tail[64], tm[24] = L"", tk[24] = L"";
+    wchar_t tail[64], tmx[24] = L"", tk[24] = L"";
     long long el = g_spin_t0 ? (long long)time(NULL) - g_spin_t0 : -1;
-    if (el >= 3600) swprintf(tm, 24, L"%lldh %lldm", el / 3600, el / 60 % 60);
-    else if (el >= 60) swprintf(tm, 24, L"%lldm %llds", el / 60, el % 60);
-    else if (el >= 0) swprintf(tm, 24, L"%llds", el);
+    if (el >= 3600) swprintf(tmx, 24, L"%lldh %lldm", el / 3600, el / 60 % 60);
+    else if (el >= 60) swprintf(tmx, 24, L"%lldm %llds", el / 60, el % 60);
+    else if (el >= 0) swprintf(tmx, 24, L"%llds", el);
     if (g_spin_k >= 1000) swprintf(tk, 24, L"\x2193 %.1fk tokens", g_spin_k / 1000.0);
     else if (g_spin_k > 0) swprintf(tk, 24, L"\x2193 %ld tokens", g_spin_k);
-    if (tm[0] && tk[0]) swprintf(tail, 64, L" (%ls \x00B7 %ls)", tm, tk);
-    else if (tm[0] || tk[0]) swprintf(tail, 64, L" (%ls)", tm[0] ? tm : tk);
+    if (tmx[0] && tk[0]) swprintf(tail, 64, L" (%ls \x00B7 %ls)", tmx, tk);
+    else if (tmx[0] || tk[0]) swprintf(tail, 64, L" (%ls)", tmx[0] ? tmx : tk);
     else tail[0] = 0;
-    SetTextColor(dc, acc);
+    SetTextColor(dc, base_c);
     TextOutW(dc, x, base, tail, (int)wcslen(tail));
-    #undef SPIN_MIX
+    #undef MIXC
 }
 
 static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
@@ -3242,10 +3303,10 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
 }
 /* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
  * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step).
- * Passed on as "word\x1Fstart\x1Ftokens": the box draws it on every frame (spin_paint), so the layout stays as it is */
+ * Passed on as "word\x1Fstart\x1Ftokens\x1Flast step\x1Fa tool running": the box draws it on every frame (spin_paint), so the layout stays as it is */
 static char g_verbs[2][4096];          /* spinnerVerbs from ~/.claude/settings.json, one a line, written by the reader thread into the one not in use */
 static volatile LONG g_verbs_cur, g_verbs_replace;
-static void conv_running(char *o, size_t n, const MTurn *t) {
+static void conv_running(char *o, size_t n, const MTurn *t, int tool) {
     static const char *VERB[] = {"Thinking", "Working", "Pondering", "Musing", "Brewing", "Cooking", "Crafting", "Building",
                                  "Tinkering", "Sketching", "Shaping", "Figuring", "Puzzling", "Wondering", "Mulling", "Planning",
                                  "Exploring", "Digging", "Untangling", "Weaving", "Polishing", "Noodling", "Hatching", "Conjuring"};
@@ -3264,7 +3325,7 @@ static void conv_running(char *o, size_t n, const MTurn *t) {
         snprintf(word, sizeof word, "%.*s", (int)(e - c), c);
         v = word;
     }
-    snprintf(o, n, "%s\x1F%lld\x1F%ld", v ? v : "Thinking", t->t0, t->k); /* (not a tab: conv_put keeps nothing under 10) */
+    snprintf(o, n, "%s\x1F%lld\x1F%ld\x1F%lld\x1F%d", v ? v : "Thinking", t->t0, t->k, t->ts > t->t0 ? t->ts : t->t0, tool); /* (not a tab: conv_put keeps nothing under 10) */
 }
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
@@ -3284,7 +3345,7 @@ static void conv_steps(char **o, const MTurn *t, int st) {
         k0 = k + 1;
     }
     if (run) { snprintf(line, sizeof line, "%s\t%s", t->tool[t->ns - 1], t->what[t->ns - 1] ? t->what[t->ns - 1] : ""); conv_put(o, 3, line, 1); }
-    if (st == ST_THINK || st == ST_WORK) { conv_running(line, sizeof line, t); conv_put(o, 7, line, 1); }
+    if (st == ST_THINK || st == ST_WORK) { conv_running(line, sizeof line, t, run); conv_put(o, 7, line, 1); }
 }
 static char *chat_conv(int st) {
     if (!g_mt_n) return NULL;
