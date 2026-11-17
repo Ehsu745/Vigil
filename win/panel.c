@@ -2250,9 +2250,7 @@ static int g_hist_land;              /* 1: they were just let in, the view stays
 static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
 static double g_push_at;
 enum { HIST_PUSH = 7 };              /* the fuse's beads */
-static int g_push_start = 2;         /* when a push past an edge starts counting (Settings > Chat > Start): 0 at once, 1 after 2 notches, 2 after a pause */
-static int g_edge_flow;              /* the wheel scrolled the view into an edge and has not paused since: (Start: after a pause) not a push yet */
-static int g_edge_slack;             /* notches past the edge not counted yet (Start: after 2) */
+static int g_edge_flow;              /* the wheel scrolled the view into an edge and has not paused since: the rest of that scroll is no push */
 static double g_last_notch;          /* (the last notch over the box: a pause starts a new scroll) */
 static int g_push_need = HIST_PUSH;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
 static int g_gap_lit;                /* the fuse's beads lit: one a notch */
@@ -2968,15 +2966,7 @@ static void chat_scroll(float notches) {
     int out = notches < 0 && g_chat_hist && !g_end_hold && (g_fuse_dir == -1 || bottom); /* on down past the end: the fuse burns out, then only the latest turn */
     if (in || out) {
         double now = wall();
-        /* scrolled into the edge, the scroll going on is not a push: only after a pause (or a few notches), as set */
-        if (!g_fuse_dir || g_fuse_done > 0) {
-            if (g_push_start == 2 && g_edge_flow) return;
-            if (g_push_start == 1) {
-                if (now - g_push_at > 0.6) g_edge_slack = 0;
-                g_push_at = now;
-                if (g_edge_slack < 2) { g_edge_slack++; g_push = 0; return; }
-            }
-        }
+        if (g_edge_flow && (!g_fuse_dir || g_fuse_done > 0)) return; /* the scroll that reached the edge stops there: a push is the next one */
         if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
         g_push_at = now; g_push += notches;
         int dir = in ? 1 : -1;
@@ -2994,7 +2984,7 @@ static void chat_scroll(float notches) {
     if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
     if (to != g_chat_scroll) {
         int edge = to == 0 || to == g_chat_body_h - g_chat_view_h;
-        g_edge_flow = edge; g_edge_slack = 0; /* (scrolled into the top or the end: the rest of this scroll stays there) */
+        g_edge_flow = edge; /* (scrolled into the top or the end: the rest of this scroll stays there) */
         g_chat_scroll = to; g_chat_auto = 0; InvalidateRect(g_chat, NULL, FALSE);
     }
 }
