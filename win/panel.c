@@ -102,7 +102,6 @@ static int g_turns_all;              /* Settings > Chat > Turns: the box opens o
 static int g_steps_mode;             /* Settings > Chat > Steps: 0 folded to a line, 1 every step, 2 none */
 static int g_push_need;              /* Settings > Chat > Push: notches past an edge that switch (3, 7 or 12; set with the chat box) */
 static const int PUSH_NOTCHES[3] = {3, 7, 12};
-static int g_push_start;             /* Settings > Chat > Start: when a push past an edge starts counting (set with the chat box) */
 static int g_fuse_at;                /* Settings > Chat > Fuse: where the fuse sits beside the box, 0 bottom right, 1 top right */
 static int g_chat_bg;                /* Settings > Box colour: the chat box's background, one of CHAT_BGS, or 5: g_chat_custom */
 static unsigned g_chat_custom = 0x2A2F3A; /* the colour picked in the palette window (0xRRGGBB) */
@@ -518,7 +517,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.vigil/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows, chat_fitw, chat_fith; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_pref, hover_pause, chat_pop, turns_all, steps_mode, push_need, fuse_at, push_start, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows, chat_fitw, chat_fith; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_pref, hover_pause, chat_pop, turns_all, steps_mode, push_need, fuse_at, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -530,7 +529,7 @@ static void remember_launch(void) {
     g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom; g_launch.threads = g_threads;
     g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.chat_cols = g_chat_cols; g_launch.chat_rows = g_chat_rows; g_launch.chat_fitw = g_chat_fitw; g_launch.chat_fith = g_chat_fith; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.backdrop = g_backdrop; g_launch.bd_w = g_bd_w; g_launch.bd_a = g_bd_a; g_launch.bd_core = BACKDROP_CORE; g_launch.shade_col = g_shade_col; g_launch.shade_custom = g_shade_custom; g_launch.away = g_away_after; g_launch.chat_middle = g_chat_middle; g_launch.chat_mono = g_chat_mono;
-    g_launch.chat_pref = g_chat_pref; g_launch.hover_pause = g_hover_pause; g_launch.chat_pop = g_chat_pop; g_launch.turns_all = g_turns_all; g_launch.steps_mode = g_steps_mode; g_launch.push_need = g_push_need; g_launch.fuse_at = g_fuse_at; g_launch.push_start = g_push_start;
+    g_launch.chat_pref = g_chat_pref; g_launch.hover_pause = g_hover_pause; g_launch.chat_pop = g_chat_pop; g_launch.turns_all = g_turns_all; g_launch.steps_mode = g_steps_mode; g_launch.push_need = g_push_need; g_launch.fuse_at = g_fuse_at;
     g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom; g_launch.theme = g_theme;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
@@ -544,7 +543,7 @@ static void restore_launch(void) {
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads;
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_fitw = g_launch.chat_fitw; g_chat_fith = g_launch.chat_fith; g_others = g_launch.others;
     g_labels = g_launch.labels; g_backdrop = g_launch.backdrop; g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); g_shade_col = g_launch.shade_col; g_shade_custom = g_launch.shade_custom; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
-    g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at; g_push_start = g_launch.push_start;
+    g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at;
     g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom; g_theme = g_launch.theme;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
@@ -620,7 +619,6 @@ static void settings_load(void) {
     if (json_num(buf, "chatSteps", &v) && v >= 0 && v <= 2) g_steps_mode = (int)v;
     if (json_num(buf, "chatPush", &v) && v >= 1 && v <= 30) g_push_need = (int)v;
     if (json_num(buf, "fuseAt", &v) && v >= 0 && v <= 1) g_fuse_at = (int)v;
-    if (json_num(buf, "pushStart", &v) && v >= 0 && v <= 2) g_push_start = (int)v;
     if (json_num(buf, "tipMono", &v)) g_chat_mono = v != 0;
     if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_chat_bg = (int)v;
     if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_chat_custom = (unsigned)v;
@@ -702,7 +700,7 @@ static void settings_save(void) {
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
             g_font, g_core, g_scale, g_glow, g_gravity, g_chat_size, g_others, g_labels, g_chat_middle, g_chat_mono, g_chat_bg, g_chat_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
-    fprintf(f, ", \"chatSide\": %d, \"hoverPause\": %d, \"chatPop\": %d, \"chatTurns\": %d, \"chatSteps\": %d, \"chatPush\": %d, \"fuseAt\": %d, \"pushStart\": %d", g_chat_pref, g_hover_pause, g_chat_pop, g_turns_all, g_steps_mode, g_push_need, g_fuse_at, g_push_start);
+    fprintf(f, ", \"chatSide\": %d, \"hoverPause\": %d, \"chatPop\": %d, \"chatTurns\": %d, \"chatSteps\": %d, \"chatPush\": %d, \"fuseAt\": %d", g_chat_pref, g_hover_pause, g_chat_pop, g_turns_all, g_steps_mode, g_push_need, g_fuse_at);
     fprintf(f, ", \"chatCols\": %d, \"chatRows\": %d, \"chatFitW\": %d, \"chatFitH\": %d", g_chat_cols, g_chat_rows, g_chat_fitw, g_chat_fith);
     fprintf(f, ", \"chatTheme\": %d, \"myThemes\": [", g_theme);
     for (int i = 0; i < g_my_n * 9; i++) fprintf(f, "%s%u", i ? ", " : "", ((const unsigned *)g_mine)[i]);
@@ -5487,7 +5485,7 @@ static double tick_interval(void) {
  * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
 #include "lucide.h"
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
-       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG, R_HOVERP, R_POP, R_TURNS, R_STEPS, R_CHATW, R_CHATH, R_CHATWFIT, R_CHATHFIT, R_PUSH, R_FUSEAT, R_PUSHSTART };
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG, R_HOVERP, R_POP, R_TURNS, R_STEPS, R_CHATW, R_CHATH, R_CHATWFIT, R_CHATHFIT, R_PUSH, R_FUSEAT };
 /* Settings > Performance: pictures a second for each kind of moment (0: the monitor's refresh rate), the steps a
  * slider stops at; and how many threads draw */
 #define NRATES 12
@@ -5595,7 +5593,6 @@ static int set_current(int row) {
         case R_STEPS: return g_steps_mode;
         case R_PUSH: return g_push_need <= 4 ? 0 : g_push_need >= 10 ? 2 : 1;
         case R_FUSEAT: return g_fuse_at;
-        case R_PUSHSTART: return g_push_start;
         case R_CHATFONT: return !g_chat_mono;
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
         case R_LABELS: return g_labels;
@@ -5857,7 +5854,6 @@ static void set_choose(int row, int val) {
     case R_STEPS: g_steps_mode = val; chat_hide(); break;
     case R_PUSH: if (val >= 0 && val < 3) g_push_need = PUSH_NOTCHES[val]; break;
     case R_FUSEAT: g_fuse_at = val; chat_hide(); break;
-    case R_PUSHSTART: g_push_start = val; break;
     case R_CHATFONT: g_chat_mono = !val; chat_refont(); break;
     case R_TEXT: g_font = FONTS[val]; chat_refont(); break;
     case R_LABELS: g_labels = val; break;
@@ -5948,7 +5944,7 @@ static void page_reset(int pg) {
     case PG_CHAT:
         g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_fitw = g_launch.chat_fitw; g_chat_fith = g_launch.chat_fith; g_chat_bg = g_launch.chat_bg;
         g_text_col = g_launch.text_col; g_chat_middle = g_launch.chat_middle; chat_refont(); chat_hide();
-        g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at; g_push_start = g_launch.push_start; break;
+        g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at; break;
     case PG_MOTIONS: motion_map_default(MOTION_MAP); HOLE_ACTS = (1u << HA_N) - 2; READY_ATKS = (1u << RA_N) - 2; break;
     case PG_KEYS:
         snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
@@ -6199,7 +6195,7 @@ static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAM
                      *CHAT_ROWS_N[14] = {L"8", L"12", L"16", L"20", L"24", L"28", L"32", L"36", L"40", L"44", L"48", L"52", L"56", L"60"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
                      *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[6] = {L"Auto", L"Left", L"Right", L"Below", L"Above", L"Middle"}, *PAUSE_NAMES[4] = {L"Instant", L"0.3 s", L"0.6 s", L"1 s"},
-                     *POP_NAMES[2] = {L"On hover", L"Pops open"}, *TURN_NAMES[2] = {L"Latest", L"All kept"}, *STEP_NAMES[3] = {L"Folded", L"Every step", L"Hidden"}, *PUSH_NAMES[3] = {L"Light", L"Normal", L"Firm"}, *FUSE_NAMES[2] = {L"Bottom right", L"Top right"}, *START_NAMES[3] = {L"At once", L"After 2", L"Pause"},
+                     *POP_NAMES[2] = {L"On hover", L"Pops open"}, *TURN_NAMES[2] = {L"Latest", L"All kept"}, *STEP_NAMES[3] = {L"Folded", L"Every step", L"Hidden"}, *PUSH_NAMES[3] = {L"Light", L"Normal", L"Firm"}, *FUSE_NAMES[2] = {L"Bottom right", L"Top right"},
                      *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
                      *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *BACKDROP_NAMES[3] = {L"Off", L"On", L"Auto"}, *BDW_NAMES[4] = {L"Thin", L"Medium", L"Thick", L"Heavy"}, *BDA_NAMES[4] = {L"Light", L"Medium", L"Strong", L"Max"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
 static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
@@ -6250,7 +6246,6 @@ static int page_sections(int pg, SSec *s) {
         ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past the top or the end to switch", TURN_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
         ROW(5, RK_SEG, R_PUSH, 3, L"Push", L"notches past the top or end: 3, 7 or 12", PUSH_NAMES, NULL, NULL, NULL);
-        ROW(5, RK_SEG, R_PUSHSTART, 3, L"Start", L"after scrolling into the edge", START_NAMES, NULL, NULL, NULL);
         ROW(5, RK_SEG, R_FUSEAT, 2, L"Fuse", L"where its beads fill, beside the box", FUSE_NAMES, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
@@ -6837,7 +6832,7 @@ static void set_build(void) {
         SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
         float th = tm.tmHeight / (float)g_sdpi;
         SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
-        float bh = tm.tmHeight / (float)g_sdpi, sh = 22 + th + 6 + bh * 3, bx1 = cx1 - 14, bx0 = fmaxf(cx0 + 160, bx1 - 320);
+        float bh = tm.tmHeight / (float)g_sdpi, sh = 22 + th + 6 + bh * 3, bx1 = cx1 - 14 - 30, bx0 = fmaxf(cx0 + 160, bx1 - 320); /* (room on its right for the fuse) */
         float t0 = bandT + 12;
         const ChatPal *p = pal();
         box(pn, bx0, t0, bx1, t0 + sh, 8, p->bg, 0, 0);
@@ -6856,6 +6851,28 @@ static void set_build(void) {
             }
         }
         ovr_add(bx0, t0, bx1, t0 + sh, 8);
+        { /* the fuse beside it, where Settings > Chat > Fuse puts it: half lit, as a push up leaves it */
+            float fw = 22, gy = 13, fh = gy * 6 + 24, fx = bx1 + 8, fy = g_fuse_at ? t0 : t0 + sh - fh, cx = fx + fw / 2;
+            box(pn, fx, fy, fx + fw, fy + fh, fw / 2, p->bg, 0, 0);
+            int lit = 4;
+            for (int i = 0; i < 6; i++) { /* the thread */
+                float ya = fy + fh - 12 - gy * i, yb = ya - gy;
+                aa_seg(pn, S(cx), S(yb), S(cx), S(ya), S(1.2f), hexc(i + 1 < lit ? p->accent : p->dim), i + 1 < lit ? .8f : .5f);
+            }
+            for (int i = 0; i < 7; i++) {
+                float by = fy + fh - 12 - gy * i;
+                if (i == 6) { /* the star, not lit yet */
+                    for (int k = 0; k < 8; k++) { float a = (float)M_PI * k / 4; aa_seg(pn, S(cx + cosf(a) * 1.8f), S(by + sinf(a) * 1.8f), S(cx + cosf(a) * 5.5f), S(by + sinf(a) * 5.5f), S(1.3f), hexc(p->dim), 1); }
+                } else if (i < lit) {
+                    aa_disc(pn, S(cx), S(by), S(7), hexc(p->accent), .18f); /* its glow */
+                    aa_disc(pn, S(cx), S(by), S(i == lit - 1 ? 3.6f : 2.9f), hexc(p->accent), 1); /* (the newest a little bigger) */
+                } else {
+                    aa_disc(pn, S(cx), S(by), S(2.6f), hexc(p->bg), 1);
+                    aa_ring(pn, S(cx), S(by), S(2.3f), S(1.1f), hexc(p->dim), 1);
+                }
+            }
+            ovr_add(fx, fy, fx + fw, fy + fh, fw / 2);
+        }
     }
     /* the top bar: the page's name and hint, its reset, close (the bar drags the window) */
     int ch = is_hot(K_CLOSE, 0, 0);
