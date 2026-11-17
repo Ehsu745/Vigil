@@ -2252,6 +2252,8 @@ static float g_scroll_d, g_box_y, g_box_h; /* as drawn: the scroll, the box's to
 static int g_sd;                     /* g_scroll_d as painted (a link's click uses it too) */
 static int g_chat_anim;              /* any of them still on its way: the panel ticks at the display's rate */
 static int g_end_hold;               /* the latest turn only again: its end held at the bottom while the box finishes shrinking */
+static int g_grow_hold;              /* the earlier turns kept: the scroll still worked out from the box's height while it finishes growing */
+static float g_peek_extra;           /* (1) what a push shows of the earlier turns beyond the box's growth (the box at its tallest), eased */
 static int g_chat_most;              /* the tallest the view may be */
 static RECT g_box_beside, g_box_wa;  /* where the box was laid out last (chat_ease places it at each height from there) */
 static int g_box_cy, g_box_x, g_box_w, g_box_below;
@@ -2919,7 +2921,7 @@ static void chat_refont(void) {
 static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
 /* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
 static void hist_commit(void) {
-    if (g_peek == 1) { g_chat_hist = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
+    if (g_peek == 1) { g_chat_hist = 1; g_grow_hold = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
     else { g_chat_hist = 0; g_hist_land = 2; g_end_hold = 1; }
     g_peek = 0; g_push = 0; g_chat_auto = 0;
 }
@@ -3117,8 +3119,37 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
         chat_runs(dc, 0, g_runs_n, view, body.top);
         if (g_spin_on) spin_paint(dc, view.left, body.top + g_spin_y);
+        /* the prompt of the turn being read stays at the top as one line once it has scrolled away (as in the
+         * terminal); the pointer on it shows it whole, a click goes back to it */
+        g_pin = -1;
+        SetRectEmpty(&g_pin_rc);
+        for (int i = 0; i < g_pr_n; i++) if (g_pr[i].y0 <= sd) g_pin = i; /* the turn at the top */
+        if (g_pin >= 0 && g_pr[g_pin].y0 == sd) g_pin = -1;             /* its prompt in full view there */
+        if (g_pin >= 0) {
+            const PromptAt *pa = &g_pr[g_pin];
+            int full = g_pin_hot && pa->y1 - pa->y0 < vh, sh = full ? pa->y1 - pa->y0 : g_chat_line + (int)(8 * g_dpi);
+            RECT strip = {view.left, view.top, view.right, view.top + sh};
+            HBRUSH fb = CreateSolidBrush(chat_band(1));
+            FillRect(dc, &strip, fb);
+            DeleteObject(fb);
+            if (full) chat_runs(dc, pa->r0, pa->r1, view, view.top - pa->y0);
+            else {
+                SetTextAlign(dc, TA_TOP | TA_LEFT);
+                RECT tr = {view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), view.top, view.right - (int)(6 * g_dpi), view.top + sh};
+                wchar_t line[220];
+                swprintf(line, 220, L"> %ls", pa->line);
+                SelectObject(dc, g_chat_bf);
+                SetTextColor(dc, text_body());
+                DrawTextW(dc, line, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+            RECT edge = {view.left, strip.bottom, view.right, strip.bottom + (int)fmax(1, g_dpi)};
+            HBRUSH eb = CreateSolidBrush(tint(MD_RULE));
+            FillRect(dc, &edge, eb);
+            DeleteObject(eb);
+            g_pin_rc = strip;
+        }
         g_push_drawn = hist_push_now();
-        if (g_peek && g_push_drawn > 0) { /* a strip on the edge being pushed, as the terminal would say it: what the push does, a dot a notch */
+        if (g_peek && g_push_drawn > 0) { /* (over the pinned prompt) a strip on the edge being pushed, as the terminal would say it: what the push does, a dot a notch */
             int gh = g_chat_line + (int)(8 * g_dpi);
             RECT gap_rc = g_peek > 0 ? (RECT){view.left, view.top, view.right, view.top + gh} : (RECT){view.left, view.bottom - gh, view.right, view.bottom};
             { HBRUSH gb = CreateSolidBrush(chat_band(1)); FillRect(dc, &gap_rc, gb); DeleteObject(gb); }
@@ -3142,36 +3173,6 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 x += sz.cx;
             }
             RestoreDC(dc, -1);
-        }
-        /* the prompt of the turn being read stays at the top as one line once it has scrolled away (as in the
-         * terminal); the pointer on it shows it whole, a click goes back to it */
-        g_pin = -1;
-        SetRectEmpty(&g_pin_rc);
-        for (int i = 0; i < g_pr_n; i++) if (g_pr[i].y0 <= sd) g_pin = i; /* the turn at the top */
-        if (g_pin >= 0 && g_pr[g_pin].y0 == sd) g_pin = -1;             /* its prompt in full view there */
-        if (g_peek) g_pin = -1;                                         /* (none while a push grows or shrinks the box) */
-        if (g_pin >= 0) {
-            const PromptAt *pa = &g_pr[g_pin];
-            int full = g_pin_hot && pa->y1 - pa->y0 < vh, sh = full ? pa->y1 - pa->y0 : g_chat_line + (int)(8 * g_dpi);
-            RECT strip = {view.left, view.top, view.right, view.top + sh};
-            HBRUSH fb = CreateSolidBrush(chat_band(1));
-            FillRect(dc, &strip, fb);
-            DeleteObject(fb);
-            if (full) chat_runs(dc, pa->r0, pa->r1, view, view.top - pa->y0);
-            else {
-                SetTextAlign(dc, TA_TOP | TA_LEFT);
-                RECT tr = {view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), view.top, view.right - (int)(6 * g_dpi), view.top + sh};
-                wchar_t line[220];
-                swprintf(line, 220, L"> %ls", pa->line);
-                SelectObject(dc, g_chat_bf);
-                SetTextColor(dc, text_body());
-                DrawTextW(dc, line, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-            }
-            RECT edge = {view.left, strip.bottom, view.right, strip.bottom + (int)fmax(1, g_dpi)};
-            HBRUSH eb = CreateSolidBrush(tint(MD_RULE));
-            FillRect(dc, &edge, eb);
-            DeleteObject(eb);
-            g_pin_rc = strip;
         }
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
@@ -3491,9 +3492,11 @@ static void chat_ease(double now, int snap) {
     last = now;
     float p = hist_push_now(), pe = 1 - (1 - p) * (1 - p);
     float view_to = (float)g_chat_view_h, scroll_to = (float)g_chat_scroll;
-    if (g_peek == 1) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
-        float r = pe * g_peek_rfin;
-        view_to = fminf(g_peek_h0 + r, (float)g_chat_view_h);
+    float extra_to = 0;
+    if (g_peek == 1 || g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
+        float r = g_peek == 1 ? pe * g_peek_rfin : g_peek_rfin;
+        view_to = g_peek == 1 ? fminf(g_peek_h0 + r, (float)g_chat_view_h) : (float)g_chat_view_h;
+        extra_to = fmaxf(0, r - (view_to - g_peek_h0));
         scroll_to = g_lat_y - r;
     } else if (g_peek == -1) { /* the box shrinks toward the latest turn's height, its end staying in view */
         int y_lat = g_pr_n ? g_pr[g_pr_n - 1].y0 : 0, h_lat = g_chat_body_h - y_lat;
@@ -3506,14 +3509,25 @@ static void chat_ease(double now, int snap) {
     else {
         float k = 1 - expf(-dt * 16); /* (critically damped: no bounce) */
         g_scroll_d += (scroll_to - g_scroll_d) * k; g_box_h += (h_to - g_box_h) * k; g_box_y += (y_to - g_box_y) * k;
+        g_peek_extra += (extra_to - g_peek_extra) * k;
     }
+    if (snap || !IsWindowVisible(g_chat)) g_peek_extra = extra_to;
     g_chat_anim = p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
-    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; g_end_hold = 0; }
+    if ((g_end_hold || g_grow_hold) && fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f && fabsf(extra_to - g_peek_extra) < .5f) {
+        g_end_hold = g_grow_hold = 0; /* the box has settled: from here the scroll is its own again (the wheel may have moved it meanwhile) */
+        g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to;
+        g_chat_anim = 1;
+    }
+    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to; }
     /* both edges rounded, not the top and the height: the bottom edge then never wobbles a pixel against the top */
     int x = g_box_x, y = (int)lroundf(g_box_y), w = g_box_w, h = (int)lroundf(g_box_y + g_box_h) - y;
-    if (g_peek == -1 || g_end_hold) { /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
-        int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
+    int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
+    if (g_peek == -1 || g_end_hold) /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
         g_scroll_d = (float)(g_chat_body_h > vh ? g_chat_body_h - vh : 0);
+    else if (g_peek == 1 || g_grow_hold) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
+                                            * the box grows this frame, and past its tallest they come down into it */
+        float sd = g_lat_y + g_peek_h0 - vh - g_peek_extra;
+        g_scroll_d = sd < 0 ? 0 : sd;
     }
     static RECT was;
     RECT now_rc = {x, y, x + w, y + h};
@@ -3620,6 +3634,8 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
         if (!snap && was_full >= 0 && full != was_full) {
             int d = g_chat_body_h - old_body;
             g_scroll_d += d; g_chat_scroll += d;
+            if (g_scroll_d < 0) g_scroll_d = 0;
+            if (g_chat_scroll < 0) g_chat_scroll = 0; /* (sprung back: at the latest turn's top, where a push starts again) */
             if (full && g_peek == 1) { g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
         }
         was_full = full;
