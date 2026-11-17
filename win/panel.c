@@ -2248,8 +2248,9 @@ static int g_hist_land;              /* 1: they were just let in, the view stays
 static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
 static double g_push_at;
 enum { HIST_PUSH = 7 };              /* the fuse's beads */
-static float g_edge_flow;            /* the wheel scrolled the view into an edge: this much more of that scroll (notches) is taken up there, no push */
-enum { EDGE_BUMP_X10 = 15 };         /* (1.5 notches: a wheel's last click or a touchpad's glide stops at the edge; on past it, it pushes) */
+static double g_halt_until;          /* scrolled into the top or the end: on that way the wheel does nothing till then (0.2 s), then it pushes */
+static int g_halt_dir;               /* (that way: 1 up, -1 down) */
+static int g_halt_flow;              /* a push just let the earlier turns in or out: the rest of that scroll does nothing (till a 0.2 s pause) */
 static double g_last_notch;          /* (the last notch over the box: a pause starts a new scroll) */
 static int g_push_need = HIST_PUSH;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
 static int g_gap_lit;                /* the fuse's beads lit: one a notch */
@@ -2958,21 +2959,22 @@ static void hist_commit(int in) {
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
     double now_n = wall();
-    if (now_n - g_last_notch >= .35) g_edge_flow = 0; /* the wheel paused: what comes now is meant, at once */
+    if (g_halt_flow && now_n - g_last_notch < .2) { g_last_notch = now_n; return; } /* (a flick or a touchpad's glide going on) */
+    g_halt_flow = 0;
     g_last_notch = now_n;
+    if (now_n < g_halt_until && (notches > 0 ? 1 : -1) == g_halt_dir) return; /* just scrolled into the edge: a halt there first */
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
     int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0; /* (nothing moves in the box while the fuse fills) */
     int out = notches < 0 && g_chat_hist && !g_end_hold && (g_fuse_dir == -1 || bottom); /* on down past the end: the fuse burns out, then only the latest turn */
     if (in || out) {
         double now = wall();
-        if (g_edge_flow > 0 && (!g_fuse_dir || g_fuse_done > 0)) { g_edge_flow -= fabsf(notches); return; } /* the scroll that reached the edge: a bump there first */
         if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
         g_push_at = now; g_push += notches;
         int dir = in ? 1 : -1;
         if (g_fuse_dir != dir || (g_fuse_done > 0 && now - g_fuse_done > .05)) { g_fuse_dir = dir; g_fuse_from = now; g_fuse_done = 0; }
         g_fuse_n = (int)fminf(HIST_PUSH, ceilf(HIST_PUSH * fabsf(g_push) / g_push_need - .01f)); /* (seven beads, however many notches fill them) */
         g_gap_lit = g_fuse_n;
-        if (fabsf(g_push) >= g_push_need) { hist_commit(in); g_fuse_done = now; }
+        if (fabsf(g_push) >= g_push_need) { hist_commit(in); g_fuse_done = now; g_halt_flow = 1; } /* (the rest of this scroll stays put) */
         InvalidateRect(g_chat, NULL, FALSE);
         return;
     }
@@ -2983,7 +2985,7 @@ static void chat_scroll(float notches) {
     if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
     if (to != g_chat_scroll) {
         int edge = to == 0 || to == g_chat_body_h - g_chat_view_h;
-        g_edge_flow = edge ? EDGE_BUMP_X10 / 10.0f : 0; /* (scrolled into the top or the end: a bump before a push) */
+        if (edge) { g_halt_until = wall() + .2; g_halt_dir = notches > 0 ? 1 : -1; } /* (scrolled into the top or the end: a halt before a push) */
         g_chat_scroll = to; g_chat_auto = 0; InvalidateRect(g_chat, NULL, FALSE);
     }
 }
