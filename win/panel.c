@@ -2384,6 +2384,7 @@ static void lay_put(int x, int base, int f, COLORREF c, const wchar_t *t, int n,
 /* where each prompt is in the laid-out conversation: its band (y0..y1), its runs, its first line (for the pinned strip) */
 typedef struct { int y0, y1, r0, r1; wchar_t line[200]; } PromptAt;
 static PromptAt g_pr[8];
+static int g_reply_y = -1;            /* where the latest turn's reply starts in the laid-out conversation (-1: none yet) */
 static int g_pr_n;
 static void lay_shape(int kind, int x, int y, int len, COLORREF c) { lay_add((Run){.x = x, .y = y, .f = kind, .n = kind == SH_RULE ? 0 : len, .w = kind == SH_RULE ? len : 0, .url = -1, .c = c}, NULL); }
 
@@ -2568,6 +2569,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     /* Terminal mode looks like Claude Code: the reply opens with its mark, and every line sits two columns in */
     int lead = g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0, marked = 0;
     g_pr_n = 0;
+    g_reply_y = -1;
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
@@ -2576,6 +2578,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
             in_code = 0;
             if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
             else if (kind == 1) { /* the prompt: every line of it in one band, "> " before the first, like the terminal */
+                g_reply_y = -1; /* (a reply before it is an earlier turn's) */
                 if (!blank) y += gap;
                 int fi = g_runs_n, top = y, first = 1, gw = text_w(dc, F_BODY, L"> ", 2);
                 lay_shape(SH_FILL, 0, top, 0, MD_RULE); /* its height once the lines are laid out */
@@ -2680,6 +2683,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
             ln = nl ? nl + 1 : NULL;
             continue;
         }
+        if (g_reply_y < 0) g_reply_y = y; /* the reply starts here (after the latest prompt): where the box opens on a finished turn */
         const wchar_t *c = ln;
         int sp = 0;
         while (c < end && (*c == L' ' || *c == L'\t')) { sp += *c == L'\t' ? 4 : 1; c++; }
@@ -3418,7 +3422,7 @@ static char *chat_conv(int st) {
             else snprintf(line, sizeof line, "Background task");
             conv_put(&o, 9, line, 1);
         } else if (t->p) { char *ps = prompt_shown(t->p); conv_put(&o, 1, ps, 1); free(ps); }
-        if (live) conv_steps(&o, t, st); /* going on: Claude's words, the steps under each folded to a line, the running one */
+        if (live || (i == g_mt_n - 1 && t->ns)) conv_steps(&o, t, st); /* going on, or the latest done: Claude's words, the steps under each folded to a line (and the running one) */
         else if (g_steps_mode == 1 && t->ns) { steps_earlier(&o, t); steps_put(&o, t, 0, t->ns); } /* done: every step kept, not the tally */
         else if (t->tally && g_steps_mode != 2) conv_put(&o, 4, t->tally, 1);
         if (t->r) conv_put(&o, 0, t->r, 0);
@@ -3507,7 +3511,8 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (g_chat_scroll > g_chat_body_h - g_chat_view_h) g_chat_scroll = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0;
     if (g_chat_auto && g_pr_n) { /* following: the newest prompt at the top, or the end while the turn runs */
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
-        g_chat_scroll = live || g_pr[g_pr_n - 1].y0 > mx ? mx : g_pr[g_pr_n - 1].y0;
+        int at = !live && g_reply_y > 0 ? g_reply_y - g_chat_line : g_pr[g_pr_n - 1].y0; /* done: at its reply (a line of what came before it showing) */
+        g_chat_scroll = live || at > mx ? mx : at < 0 ? 0 : at;
     }
     if (g_hist_land && g_pr_n) { /* the earlier turns just came in above: a little of the one before shows over the latest prompt; just left out: the end, where the wheel was */
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_hist_land == 2 ? mx : g_hist_land == 3 ? 0 : g_pr[g_pr_n - 1].y0 - 3 * g_chat_line;
