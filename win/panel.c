@@ -3179,6 +3179,42 @@ static int harness_p(const char *p) {
     for (int i = 0; i < 7; i++) if (!strncmp(p, H[i], strlen(H[i]))) return 1;
     return 0;
 }
+/* a prompt as the terminal's input line shows it: no empty lines before or after, and each paste
+ * (<pasted_content ...>...</pasted_content>, its end cut off when the hook kept only the start) as one line,
+ * "[Pasted text +12 lines] its first line"; the rest as typed. Freed by the caller */
+static char *prompt_shown(const char *p) {
+    size_t n = strlen(p);
+    char *o = malloc(n * 2 + 128), *e = o;
+    for (const char *c = p; *c;) {
+        const char *tag = strstr(c, "<pasted_content");
+        const char *upto = tag ? tag : c + strlen(c);
+        memcpy(e, c, (size_t)(upto - c)); e += upto - c;
+        if (!tag) break;
+        const char *in = strchr(tag, '>');
+        if (!in) { c = tag + 15; continue; }
+        in++;
+        const char *close = strstr(in, "</pasted_content>"), *end = close ? close : in + strlen(in);
+        int lines = 0; const char *first = NULL, *first_end = NULL;
+        for (const char *l = in; l < end;) {
+            const char *nl = memchr(l, '\n', (size_t)(end - l)), *le = nl ? nl : end;
+            const char *a = l; while (a < le && (*a == ' ' || *a == '\t' || *a == '\r')) a++;
+            if (a < le) { lines++; if (!first) { first = a; first_end = le; } }
+            l = nl ? nl + 1 : end;
+        }
+        if (e > o && e[-1] != '\n') *e++ = '\n';
+        e += sprintf(e, "[Pasted text +%d line%s%s]", lines, lines == 1 ? "" : "s", close ? "" : " or more");
+        if (first) { *e++ = ' '; size_t k = (size_t)(first_end - first); if (k > 200) k = 200; memcpy(e, first, k); e += k; }
+        *e++ = '\n';
+        c = close ? close + 17 : end;
+        if (*c == '\n') c++;
+    }
+    *e = 0;
+    char *a = o; /* the empty lines before and after */
+    while (*a == '\n' || *a == ' ' || *a == '\r' || *a == '\t') { char *nl = strchr(a, '\n'); if (!nl) break; int blank = 1; for (char *q = a; q < nl; q++) if (*q != ' ' && *q != '\r' && *q != '\t') blank = 0; if (!blank) break; a = nl + 1; }
+    memmove(o, a, strlen(a) + 1);
+    for (e = o + strlen(o); e > o && (e[-1] == '\n' || e[-1] == ' ' || e[-1] == '\r' || e[-1] == '\t'); ) *--e = 0;
+    return o;
+}
 /* the steps folded as the terminal folds them: "Ran 2 shell commands, read 3 files" */
 static void steps_line(char **o, const MTurn *t, int k0, int k1) {
     static const char *TOOLS[] = {"Bash", "Read", "Grep", "Glob", "Edit", "MultiEdit", "NotebookEdit", "Write", "WebFetch", "WebSearch", "Task", "Agent", "Skill"};
@@ -3231,7 +3267,7 @@ static void conv_steps(char **o, const MTurn *t, int st) {
         if (k == end) break;
         if (!strcmp(t->tool[k], "@say")) conv_put(o, 8, t->what[k] ? t->what[k] : "", 1);
         else if (!strcmp(t->tool[k], "@notice")) { snprintf(line, sizeof line, "Background task: %s", t->what[k] ? t->what[k] : ""); conv_put(o, 9, line, 1); }
-        else if (!strcmp(t->tool[k], "@you")) conv_put(o, 1, t->what[k] ? t->what[k] : "", 1); /* a message you sent while it ran */
+        else if (!strcmp(t->tool[k], "@you")) { char *ps = prompt_shown(t->what[k] ? t->what[k] : ""); conv_put(o, 1, ps, 1); free(ps); } /* a message you sent while it ran */
         k0 = k + 1;
     }
     if (run) { snprintf(line, sizeof line, "%s\t%s", t->tool[t->ns - 1], t->what[t->ns - 1] ? t->what[t->ns - 1] : ""); conv_put(o, 3, line, 1); }
@@ -3258,7 +3294,7 @@ static char *chat_conv(int st) {
             if (a && b) snprintf(line, sizeof line, "Background task: %.*s", (int)fmin(100, b - a - 9), a + 9);
             else snprintf(line, sizeof line, "Background task");
             conv_put(&o, 9, line, 1);
-        } else if (t->p) conv_put(&o, 1, t->p, 1);
+        } else if (t->p) { char *ps = prompt_shown(t->p); conv_put(&o, 1, ps, 1); free(ps); }
         if (live) conv_steps(&o, t, st); /* going on: Claude's words, the steps under each folded to a line, the running one */
         else if (t->tally) conv_put(&o, 4, t->tally, 1);
         if (t->r) conv_put(&o, 0, t->r, 0);
