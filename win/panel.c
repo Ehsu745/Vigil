@@ -2918,7 +2918,10 @@ static void chat_scroll(float notches) {
     if (g_halt_flow && now_n - g_last_notch < .2) { g_last_notch = now_n; return; } /* (a flick or a touchpad's glide going on) */
     g_halt_flow = 0;
     g_last_notch = now_n;
-    if (now_n < g_halt_until && (notches > 0 ? 1 : -1) == g_halt_dir) return; /* just scrolled into the edge: a halt there first */
+    if ((notches > 0 ? 1 : -1) == g_halt_dir && now_n < g_halt_until + 1) { /* just scrolled into the edge: a halt there first */
+        if (fabsf(g_scroll_d - g_chat_scroll) > 1) { g_halt_until = now_n + .2; return; } /* (the text still gliding there: the 0.2 s counts from when it arrives) */
+        if (now_n < g_halt_until) return;
+    }
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
     int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0; /* (nothing moves in the box while the fuse fills) */
     int out = notches < 0 && g_chat_hist && !g_end_hold && (g_fuse_dir == -1 || bottom); /* on down past the end: the fuse burns out, then only the latest turn */
