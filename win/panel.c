@@ -64,7 +64,7 @@ static Demo g_demo;
 static int g_demo_n, g_width;
 static float g_glow = 1.0f, g_core = 0.35f, g_font = 14, g_scale = 1; /* g_scale: Settings > Panel size */
 static float g_chat_size = 1;        /* (the old Box size S/M/L/XL: read once from an older settings file into the two below) */
-static int g_chat_fitw, g_chat_fith;   /* Width / Height > Fit: as wide as the room beside the cores (the screen in the middle), as tall as the screen */
+static int g_chat_fitw = 1, g_chat_fith = 1;   /* Width / Height > Fit: as wide as the room beside the cores (the screen in the middle), as tall as the screen */
 static int g_chat_cols = 64, g_chat_rows = 18; /* Settings > Replies > Width and Height: the chat box is always this many characters across,
                                          * and this many lines tall at most before it scrolls (both cut to the screen) */
 static float g_gravity = 2;         /* how hard the main core holds the small ones on their orbit (Settings > Gravity) */
