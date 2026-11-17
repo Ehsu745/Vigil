@@ -2210,7 +2210,16 @@ static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notc
 static double g_push_at;
 enum { HIST_PUSH = 7 };              /* notches past an edge that flip the earlier turns in or out, a dot each */
 static int g_gap_lit;                /* the gap's dots lit: one a notch, kept while it springs back */
-static float g_pull;                 /* the rubber band: the body pulled away from the edge being pushed (pixels, + down), easing back after a pause */
+static int g_peek;                   /* a push under way: 1 the earlier turns laid out above the latest and the box growing to show them,
+                                        -1 the box shrinking toward the latest turn; a pause springs it back, HIST_PUSH notches keep it */
+static int g_lat_y, g_peek_h0;       /* (1) where the latest turn starts with the earlier turns above it; the view's height before */
+static float g_peek_rfin;            /* (1) how much of the earlier turns a full push shows: what letting them in shows */
+static float g_scroll_d, g_box_y, g_box_h; /* as drawn: the scroll, the box's top and height, each easing toward its target */
+static int g_sd;                     /* g_scroll_d as painted (a link's click uses it too) */
+static int g_chat_anim;              /* any of them still on its way: the panel ticks at the display's rate */
+static int g_chat_most;              /* the tallest the view may be */
+static RECT g_box_beside, g_box_wa;  /* where the box was laid out last (chat_ease places it at each height from there) */
+static int g_box_cy, g_box_x, g_box_w, g_box_below;
 static int g_chat_auto = 1;          /* the box follows the conversation: the newest turn from its prompt, or its end while it runs */
 static int g_pin = -1, g_pin_hot;    /* the prompt pinned at the top while its turn is scrolled through; the pointer on it shows it whole */
 static RECT g_pin_rc;
@@ -2850,7 +2859,7 @@ static void chat_hide(void) {
     if (input_open()) return; /* a reply being typed keeps its box */
     if (g_chat && IsWindowVisible(g_chat)) ShowWindow(g_chat, SW_HIDE);
     g_chat_sid[0] = 0;
-    g_chat_hist = 0; /* opened again: the latest turn only */
+    g_chat_hist = 0; g_peek = 0; /* opened again: the latest turn only */
     void chat_forget_side(void);
     chat_forget_side(); /* shown again: the side is chosen afresh */
 }
@@ -2869,8 +2878,12 @@ static void chat_refont(void) {
 
 /* how far the wheel has gone on past an edge, 0 to 1 (nothing after a 0.6 s pause) */
 static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
-/* the earlier turns in (above the latest, the view staying on it) or out (the latest turn from its top) */
-static void chat_hist_set(int on) { g_chat_hist = on; g_chat_auto = 0; g_hist_land = on ? 1 : 3; g_push = 0; }
+/* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
+static void hist_commit(void) {
+    if (g_peek == 1) { g_chat_hist = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
+    else { g_chat_hist = 0; g_hist_land = 2; }
+    g_peek = 0; g_push = 0; g_chat_auto = 0;
+}
 
 /* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; going on
  * for HIST_PUSH notches (no pause over 0.6 s) past the top lets the earlier turns in above the latest, and past the bottom
@@ -2878,16 +2891,18 @@ static void chat_hist_set(int on) { g_chat_hist = on; g_chat_auto = 0; g_hist_la
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
-    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0, out = notches < 0 && g_chat_hist && bottom;
+    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && (g_peek == 1 || g_chat_scroll == 0), out = notches < 0 && g_chat_hist && (g_peek == -1 || bottom);
     if (in || out) {
         double now = wall();
         if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
         g_push_at = now; g_push += notches;
         g_gap_lit = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
-        if (fabsf(g_push) >= HIST_PUSH) { chat_hist_set(in); if (!in) g_hist_land = 2; }
+        if (!g_peek) { g_peek = in ? 1 : -1; g_chat_auto = 0; } /* the box starts growing (or shrinking) with the push */
+        if (fabsf(g_push) >= HIST_PUSH) hist_commit();
         InvalidateRect(g_chat, NULL, FALSE);
         return;
     }
+    if (g_peek) { g_push = 0; g_push_at = 0; return; } /* the other way mid-push: it springs back */
     if (g_chat_body_h <= g_chat_view_h) return;
     int to = g_chat_scroll - (int)(notches * 3 * g_chat_line);
     if (to < 0) to = 0;
@@ -3051,9 +3066,11 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SelectObject(dc, g_chat_tf);
         if (g_chat_title) DrawTextW(dc, g_chat_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         int top = t.bottom + chat_gap(), sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
-        RECT view = {t.left, top, r.right - pad - sb, top + g_chat_view_h};
-        int pl = (int)lroundf(g_pull); /* the rubber band */
-        RECT body = {view.left, top - g_chat_scroll + pl, view.right, top - g_chat_scroll + pl + g_chat_body_h};
+        int vh = r.bottom - pad - top, sd = (int)lroundf(g_scroll_d); /* the view as the box is now (it grows and shrinks with a push), and the scroll as it glides */
+        if (vh < 0) vh = 0;
+        g_sd = sd;
+        RECT view = {t.left, top, r.right - pad - sb, top + vh};
+        RECT body = {view.left, top - sd, view.right, top - sd + g_chat_body_h};
         g_chat_view = view;
         SetTextColor(dc, text_body());
         SelectObject(dc, g_chat_bf);
@@ -3062,11 +3079,13 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         chat_runs(dc, 0, g_runs_n, view, body.top);
         if (g_spin_on) spin_paint(dc, view.left, body.top + g_spin_y);
         g_push_drawn = hist_push_now();
-        if (abs(pl) >= g_chat_line * 3 / 4) { /* in the rubber band's gap, as the terminal would say it: what the push does, a dot a notch */
-            RECT gap_rc = pl > 0 ? (RECT){view.left, view.top, view.right, view.top + pl} : (RECT){view.left, view.bottom + pl, view.right, view.bottom};
+        if (g_peek && g_push_drawn > 0) { /* a strip on the edge being pushed, as the terminal would say it: what the push does, a dot a notch */
+            int gh = g_chat_line + (int)(8 * g_dpi);
+            RECT gap_rc = g_peek > 0 ? (RECT){view.left, view.top, view.right, view.top + gh} : (RECT){view.left, view.bottom - gh, view.right, view.bottom};
+            { HBRUSH gb = CreateSolidBrush(chat_band(1)); FillRect(dc, &gap_rc, gb); DeleteObject(gb); }
             wchar_t what[64];
             int n = g_mt_n - 1;
-            if (pl > 0) swprintf(what, 64, L"\x2191 %d earlier turn%ls ", n, n == 1 ? L"" : L"s");
+            if (g_peek > 0) swprintf(what, 64, L"\x2191 %d earlier turn%ls ", n, n == 1 ? L"" : L"s");
             else swprintf(what, 64, L"\x2193 latest turn only ");
             SaveDC(dc);
             IntersectClipRect(dc, gap_rc.left, gap_rc.top, gap_rc.right, gap_rc.bottom);
@@ -3089,11 +3108,12 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
          * terminal); the pointer on it shows it whole, a click goes back to it */
         g_pin = -1;
         SetRectEmpty(&g_pin_rc);
-        for (int i = 0; i < g_pr_n; i++) if (g_pr[i].y0 <= g_chat_scroll) g_pin = i; /* the turn at the top */
-        if (g_pin >= 0 && g_pr[g_pin].y0 == g_chat_scroll) g_pin = -1;             /* its prompt in full view there */
+        for (int i = 0; i < g_pr_n; i++) if (g_pr[i].y0 <= sd) g_pin = i; /* the turn at the top */
+        if (g_pin >= 0 && g_pr[g_pin].y0 == sd) g_pin = -1;             /* its prompt in full view there */
+        if (g_peek) g_pin = -1;                                         /* (none while a push grows or shrinks the box) */
         if (g_pin >= 0) {
             const PromptAt *pa = &g_pr[g_pin];
-            int full = g_pin_hot && pa->y1 - pa->y0 < g_chat_view_h, sh = full ? pa->y1 - pa->y0 : g_chat_line + (int)(8 * g_dpi);
+            int full = g_pin_hot && pa->y1 - pa->y0 < vh, sh = full ? pa->y1 - pa->y0 : g_chat_line + (int)(8 * g_dpi);
             RECT strip = {view.left, view.top, view.right, view.top + sh};
             HBRUSH fb = CreateSolidBrush(chat_band(1));
             FillRect(dc, &strip, fb);
@@ -3116,9 +3136,10 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         }
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
-        if (sb) { /* where in the reply the box is */
-            int th = g_chat_view_h * g_chat_view_h / g_chat_body_h, ty = top + (g_chat_view_h - th) * g_chat_scroll / (g_chat_body_h - g_chat_view_h);
-            RECT track = {r.right - pad - (int)(3 * g_dpi), top, r.right - pad, top + g_chat_view_h}, thumb = {track.left, ty, track.right, ty + th};
+        if (sb && g_chat_body_h > vh) { /* where in the reply the box is */
+            int sc = sd < 0 ? 0 : sd > g_chat_body_h - vh ? g_chat_body_h - vh : sd;
+            int th = vh * vh / g_chat_body_h, ty = top + (vh - th) * sc / (g_chat_body_h - vh);
+            RECT track = {r.right - pad - (int)(3 * g_dpi), top, r.right - pad, top + vh}, thumb = {track.left, ty, track.right, ty + th};
             HBRUSH tb = CreateSolidBrush(tint(MD_RULE)), hb = CreateSolidBrush(tint(MD_MARK));
             FillRect(dc, &track, tb); FillRect(dc, &thumb, hb);
             DeleteObject(tb); DeleteObject(hb);
@@ -3156,7 +3177,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             for (int i = 0; i < g_runs_n && found < 0; i++) {
                 const Run *rn = &g_runs[i];
                 if (rn->f < 0 || rn->url < 0) continue;
-                int bx = g_chat_view.left + rn->x, by = g_chat_view.top - g_chat_scroll + rn->y;
+                int bx = g_chat_view.left + rn->x, by = g_chat_view.top - g_sd + rn->y;
                 if (pt.x >= bx && pt.x < bx + rn->w && pt.y >= by - g_fasc[rn->f] && pt.y < by + g_chat_line / 3) found = i;
             }
         if (msg == WM_SETCURSOR) { if (found >= 0) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; } }
@@ -3388,6 +3409,65 @@ static char *chat_conv(int st) {
     return out;
 }
 
+/* the box's top at a height, on the side it was laid out on (chat_place's rule, without choosing a side again) */
+static int box_top_for(int h) {
+    RECT wa = g_box_wa;
+    int gap = (int)(10 * g_dpi), bh = h + g_box_below, y;
+    if (g_chat_middle) y = wa.top + (wa.bottom - wa.top - bh) / 2;
+    else if (g_chat_side == 2) y = g_box_beside.bottom + gap;
+    else if (g_chat_side == 3) y = g_box_beside.top - gap - bh;
+    else y = g_box_cy - bh / 2;
+    if (y + bh > wa.bottom) y = wa.bottom - bh;
+    if (y < wa.top) y = wa.top;
+    return y;
+}
+
+/* every tick: where a push takes the view and the scroll, and the box and the scroll eased there (the wheel glides) */
+static void chat_ease(double now, int snap) {
+    static double last;
+    float dt = (float)fmin(0.1, now - last);
+    last = now;
+    float p = hist_push_now(), pe = 1 - (1 - p) * (1 - p);
+    float view_to = (float)g_chat_view_h, scroll_to = (float)g_chat_scroll;
+    if (g_peek == 1) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
+        float r = pe * g_peek_rfin;
+        view_to = fminf(g_peek_h0 + r, (float)g_chat_view_h);
+        scroll_to = g_lat_y - r;
+    } else if (g_peek == -1) { /* the box shrinks toward the latest turn's height, its end staying in view */
+        int y_lat = g_pr_n ? g_pr[g_pr_n - 1].y0 : 0, h_lat = g_chat_body_h - y_lat;
+        if (h_lat > g_chat_view_h) h_lat = g_chat_view_h;
+        view_to = g_chat_view_h - pe * (g_chat_view_h - h_lat);
+        scroll_to = g_chat_body_h - view_to;
+    }
+    float h_to = 2 * chat_pad() + g_chat_title_h + chat_gap() + view_to, y_to = (float)box_top_for((int)lroundf(h_to));
+    if (snap || !IsWindowVisible(g_chat)) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; }
+    else {
+        float k = 1 - expf(-dt * 16); /* (critically damped: no bounce) */
+        g_scroll_d += (scroll_to - g_scroll_d) * k; g_box_h += (h_to - g_box_h) * k; g_box_y += (y_to - g_box_y) * k;
+    }
+    g_chat_anim = p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
+    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; }
+    int x = g_box_x, y = (int)lroundf(g_box_y), w = g_box_w, h = (int)lroundf(g_box_h);
+    static RECT was;
+    RECT now_rc = {x, y, x + w, y + h};
+    if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_chat)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
+        SetWindowPos(g_chat, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (w != was.right - was.left || h != was.bottom - was.top) {
+            int rad = (int)(12 * g_dpi);
+            SetWindowRgn(g_chat, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
+            InvalidateRect(g_chat, NULL, FALSE);
+        }
+        was = now_rc;
+        if (input_open()) input_place();
+        for (int i = 0; i < g_core_n && i < MAX_SESS; i++) { /* a core it covers stays in front of it */
+            RECT o;
+            if (g_pane[i].w && g_pane[i].shown && IntersectRect(&o, &now_rc, &g_core_rc[i]))
+                SetWindowPos(g_pane[i].w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    if ((int)lroundf(g_scroll_d) != g_sd) InvalidateRect(g_chat, NULL, FALSE);
+}
+
 static void chat_show(const Session *s, RECT beside, int cy, double now) {
     msg_load(s, now);
     int st = session_shown(s, now);
@@ -3400,18 +3480,9 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_pend && !strcmp(g_pend_sid, s->sid)) strncat(title, " \xC2\xB7 your reply waits for your answer in the terminal", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
-    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_pull = 0; } /* opened, or another session's: its latest turn only */
-    else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's fill fades after a pause */
-    { /* the rubber band: up to 46 px away from the edge as the push grows, eased (critically damped, no bounce), back after a pause */
-        static double last;
-        float p = hist_push_now(), want = p > 0 ? (g_push > 0 ? 1.0f : -1.0f) * 46 * (float)g_dpi * (1 - (1 - p) * (1 - p)) : 0;
-        float dt = (float)fmin(0.1, now - last), k = 1 - expf(-dt * (want ? 22.0f : 11.0f));
-        last = now;
-        if (want != g_pull) {
-            g_pull = fabsf(want - g_pull) < 0.3f ? want : g_pull + (want - g_pull) * k;
-            InvalidateRect(g_chat, NULL, FALSE);
-        }
-    }
+    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_peek = 0; } /* opened, or another session's: its latest turn only */
+    else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's strip goes after a pause */
+    if (g_peek && hist_push_now() == 0 && !g_chat_anim) g_peek = 0; /* sprung back all the way: the latest turn alone again, the same picture */
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -3428,6 +3499,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     int moved = memcmp(&beside, &last_beside, sizeof beside) != 0 || last_middle != g_chat_middle || last_input != input_open() || last_rows != g_in_rows;
     last_input = input_open(); last_rows = g_in_rows;
     int changed = !g_chat_title || wcscmp(wt, g_chat_title) || body_new || !IsWindowVisible(g_chat) || moved || other;
+    int snap = !IsWindowVisible(g_chat) || other; /* opened, or another session's: no glide into place */
     if (other || turn_key != last_turn) { g_chat_scroll = 0; g_chat_auto = 1; } /* another reply starts at its top */
     last_turn = turn_key;
     snprintf(g_chat_sid, sizeof g_chat_sid, "%s", s->sid);
@@ -3438,7 +3510,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     COLORREF acc = tint(MD_RUN); /* the theme's accent: the core shows the state, the box need not */
     if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
     { static int ticking; if (g_spin_on != ticking) { ticking = g_spin_on; if (ticking) SetTimer(g_chat, ID_SPIN, 40, NULL); else KillTimer(g_chat, ID_SPIN); } } /* the running line moves on its own timer (25 a second), whatever the cores do */
-    if (!changed) return;
+    if (!changed) { chat_ease(now, 0); return; }
     chat_fonts();
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
     { int m = (int)(12 * g_dpi); InflateRect(&wa, -m, -m); } /* never against the screen's edge */
@@ -3455,6 +3527,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     TEXTMETRICW tm; GetTextMetricsW(dc, &tm);
     g_chat_line = tm.tmHeight;
     RECT b = {0, 0, maxw, 0};
+    int old_body = g_chat_body_h, old_view = g_chat_view_h;
     g_chat_body_h = chat_layout(dc, wb, maxw);
     b.right = g_lay_w;
     ReleaseDC(g_chat, dc);
@@ -3464,6 +3537,17 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (most > wh - below - chrome - (int)(16 * g_dpi)) most = wh - below - chrome - (int)(16 * g_dpi);
     if (most < g_chat_line * 3) most = g_chat_line * 3;
     g_chat_view_h = g_chat_body_h < most ? g_chat_body_h : most;
+    g_chat_most = most;
+    { /* the earlier turns came in above or went: the scroll moves with them, so the same lines stay in view */
+        static int was_full = -1;
+        int full = g_chat_hist || g_peek == 1;
+        if (!snap && was_full >= 0 && full != was_full) {
+            int d = g_chat_body_h - old_body;
+            g_scroll_d += d; g_chat_scroll += d;
+            if (full && g_peek == 1) { g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
+        }
+        was_full = full;
+    }
     if (g_chat_scroll > g_chat_body_h - g_chat_view_h) g_chat_scroll = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0;
     if (g_chat_auto && g_pr_n) { /* following: the newest prompt at the top, or the end while the turn runs */
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
@@ -3479,30 +3563,16 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (input_open()) w = maxw; /* a reply being typed gets the whole width (the reply line is as wide as the box): a short answer made it a narrow slot */
     if (w > maxw) w = maxw;
     w += chat_bar() + 2 * pad + sb;
-    int x, y;
-    if (g_chat_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
+    int x, y = 0;
+    if (g_peek && !snap) x = g_box_x; /* a push under way: the box stays on its side */
+    else if (g_chat_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
     else chat_place(beside, cy, w, h + below, wa, &x, &y);
     if (x + w > wa.right) x = wa.right - w;
     if (x < wa.left) x = wa.left;
-    if (y + h + below > wa.bottom) y = wa.bottom - h - below;
-    if (y < wa.top) y = wa.top;
-    static RECT was;
-    RECT now_rc = {x, y, x + w, y + h};
-    if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_chat)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
-        SetWindowPos(g_chat, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (w != was.right - was.left || h != was.bottom - was.top) {
-            int rad = (int)(12 * g_dpi);
-            SetWindowRgn(g_chat, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
-        }
-        was = now_rc;
-        if (input_open()) input_place();
-        for (int i = 0; i < g_core_n && i < MAX_SESS; i++) { /* a core it covers stays in front of it */
-            RECT o;
-            if (g_pane[i].w && g_pane[i].shown && IntersectRect(&o, &now_rc, &g_core_rc[i]))
-                SetWindowPos(g_pane[i].w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-    }
+    (void)y; /* (chat_ease puts it at each height) */
+    g_box_beside = beside; g_box_cy = cy; g_box_wa = wa; g_box_x = x; g_box_w = w; g_box_below = below;
     InvalidateRect(g_chat, NULL, FALSE);
+    chat_ease(now, snap);
 }
 
 /* ---- typing a reply: a double-click on a core opens a line under its box. Enter sends it to the session
@@ -5091,7 +5161,7 @@ static void tick(void) {
 static double tick_interval(void) {
     double hand = smooth_now()->hand, mv = hand <= 0 || hand > g_hz ? g_hz : hand < 30 ? 30 : hand; /* moving windows: smooth, aligned to the display */
     if (layer_shown()) return 1.0 / g_hz; /* READY's pieces are out: every refresh */
-    if (g_moving || g_dragging || g_carrying || g_down_sid[0] || g_hover >= 0 || set_open() || g_orbiting) return 1.0 / mv;
+    if (g_moving || g_dragging || g_carrying || g_down_sid[0] || g_hover >= 0 || set_open() || g_orbiting || g_chat_anim) return 1.0 / mv;
     double need = g_need_hz < 10 ? 10 : g_need_hz;
     return 1.0 / (need > g_hz ? g_hz : need);
 }
