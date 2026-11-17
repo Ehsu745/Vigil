@@ -2992,7 +2992,9 @@ static void spin_paint(HDC dc, int x0, int base) {
     }
     #define MIXC(a, b, k) RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * (k)), GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * (k)), GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * (k)))
     COLORREF base_c = MIXC(acc, err, stall);
-    COLORREF shim = MIXC(err, acc, stall); /* the moving letters in the other colour: red over orange, orange over red */
+    COLORREF shim = light ? RGB(245, 149, 117) : RGB(235, 159, 127); /* the moving letters: Claude Code's lighter orange ("claudeShimmer"),
+                                                                    * which stays orange while the rest goes red */
+    COLORREF grey = light ? RGB(102, 102, 102) : RGB(153, 153, 153);   /* the time and tokens, as the CLI greys them */
     TEXTMETRICW tm;
     SelectObject(dc, g_chat_bf);
     GetTextMetricsW(dc, &tm);
@@ -3000,7 +3002,7 @@ static void spin_paint(HDC dc, int x0, int base) {
     double wave = (1 - cos(2 * M_PI * fmod(now, 2.0) / 2.0)) / 2; /* 0 → 1 → 0 every 2 s, eased at both ends */
     star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.36f), S, (int)lround(wave * 5), base_c, bgc); /* · → ✽ → · */
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
-    SelectObject(dc, lay_font(F_BOLD));
+    SelectObject(dc, g_chat_bf); /* (not bold: the CLI draws it in the plain face) */
     int x = x0 + max(g_spin_x, S + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
     SIZE sz;
     long long step = (long long)floor(now / 0.2); /* the lighter letters, as the CLI moves them: one letter every 200 ms, right to left,
@@ -3024,7 +3026,7 @@ static void spin_paint(HDC dc, int x0, int base) {
     if (tmx[0] && tk[0]) swprintf(tail, 64, L" (%ls \x00B7 %ls)", tmx, tk);
     else if (tmx[0] || tk[0]) swprintf(tail, 64, L" (%ls)", tmx[0] ? tmx : tk);
     else tail[0] = 0;
-    SetTextColor(dc, base_c);
+    SetTextColor(dc, grey);
     TextOutW(dc, x, base, tail, (int)wcslen(tail));
     #undef MIXC
 }
