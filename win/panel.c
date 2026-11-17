@@ -228,6 +228,9 @@ static wchar_t g_my_name[MY_MAX][24];
 static int g_renaming;                /* the chosen theme's name being typed (Settings > YOUR THEME > Rename); g_ren_was to go back to */
 static wchar_t g_ren_was[24];
 static RECT g_cp_anchor;             /* the swatch whose colour is being changed, in the Settings window's pixels: the picker's window opens under it */
+static int g_pk_edit = -1, g_pk_fresh; /* the picker's value being typed into (PF_*), and whether the next key replaces it all */
+static wchar_t g_pk_buf[12];
+enum { PF_HEX, PF_R, PF_G, PF_B, PF_H, PF_S, PF_V, PF_N };
 static int g_pick_role = -1, g_cdrag; /* the colour being changed in the theme card (its picker open), and the picker's part held (K_CSV, K_CHUE) */
 static int g_pick_arg = -1;
 static float g_pk_h, g_pk_s, g_pk_v;   /* its hue (0-1), saturation and brightness */
@@ -5207,7 +5210,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE, K_PKF, K_CPMOVE };
 enum { PG_LOOK, PG_CLUSTER, PG_CHAT, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Chat", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -5421,6 +5424,111 @@ static void cpick_apply(void) {
     if (g_chat) InvalidateRect(g_chat, NULL, FALSE);
     if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); }
     g_sl_dirty = 1;
+}
+/* ---- the picker's values to type into: HEX, R G B (0-255), H (degrees) S V (percent) */
+static unsigned pk_cur(void) { return hsv_x(g_pk_h, g_pk_s, g_pk_v); }
+static void pk_set(unsigned c) { float h = g_pk_h; x_hsv(c, &g_pk_h, &g_pk_s, &g_pk_v); if (g_pk_s <= 0) g_pk_h = h; } /* (a grey keeps the hue it had) */
+static void pk_text(int f, wchar_t *o) { /* a value as its field shows it */
+    unsigned c = pk_cur();
+    switch (f) {
+    case PF_HEX: swprintf(o, 12, L"%06X", c); break;
+    case PF_R: swprintf(o, 12, L"%u", c >> 16 & 255); break;
+    case PF_G: swprintf(o, 12, L"%u", c >> 8 & 255); break;
+    case PF_B: swprintf(o, 12, L"%u", c & 255); break;
+    case PF_H: swprintf(o, 12, L"%ld", lroundf(g_pk_h * 360) % 360); break;
+    case PF_S: swprintf(o, 12, L"%ld", lroundf(g_pk_s * 100)); break;
+    default: swprintf(o, 12, L"%ld", lroundf(g_pk_v * 100)); break;
+    }
+}
+static void pk_put(int f, long v) { /* value f set to v, clamped (H goes round) */
+    if (f >= PF_R && f <= PF_B) {
+        int sh = f == PF_R ? 16 : f == PF_G ? 8 : 0;
+        v = v < 0 ? 0 : v > 255 ? 255 : v;
+        pk_set((pk_cur() & ~(255u << sh)) | (unsigned)v << sh);
+    } else if (f == PF_H) g_pk_h = fminf((float)(((v % 360) + 360) % 360) / 360.0f, 0.9999f);
+    else if (f == PF_S) g_pk_s = (v < 0 ? 0 : v > 100 ? 100 : v) / 100.0f;
+    else if (f == PF_V) g_pk_v = (v < 0 ? 0 : v > 100 ? 100 : v) / 100.0f;
+}
+static long pk_hex(const wchar_t *t) { /* "#1a2b3c", "1A2B3C" or "#abc": the colour, or -1 */
+    while (*t == ' ' || *t == '#') t++;
+    wchar_t d[8]; int n = 0;
+    for (; *t && *t != ' '; t++) { if (!iswxdigit(*t) || n == 6) return -1; d[n++] = *t; }
+    d[n] = 0;
+    if (n == 3) { wchar_t e[7] = {d[0], d[0], d[1], d[1], d[2], d[2], 0}; return wcstol(e, NULL, 16); }
+    return n == 6 ? wcstol(d, NULL, 16) : -1;
+}
+static void pk_done(void) { cpick_apply(); settings_save(); }
+static void pk_edit_end(int keep) { /* the value being typed: kept (applied), or back as it was */
+    int f = g_pk_edit;
+    g_pk_edit = -1; g_sl_dirty = 1;
+    if (!keep || f < 0 || !g_pk_buf[0]) return;
+    if (f == PF_HEX) { long c = pk_hex(g_pk_buf); if (c < 0) return; pk_set((unsigned)c); }
+    else pk_put(f, wcstol(g_pk_buf, NULL, 10));
+    pk_done();
+}
+static void pk_edit_start(int f) {
+    if (g_pk_edit >= 0 && g_pk_edit != f) pk_edit_end(1);
+    g_pk_edit = f; g_pk_fresh = 1; pk_text(f, g_pk_buf); g_sl_dirty = 1;
+}
+static void pk_nudge(int f, int d) { /* the arrow keys or the wheel on a value: one up or down (Shift: ten); on the hex, brighter or darker */
+    if (f == PF_HEX) f = PF_V;
+    wchar_t t[12]; pk_text(f, t);
+    pk_put(f, wcstol(t, NULL, 10) + d);
+    pk_done();
+    if (g_pk_edit >= 0) { pk_text(g_pk_edit, g_pk_buf); g_pk_fresh = 1; }
+}
+static void pk_close(void) { g_pick_role = -1; g_pk_edit = -1; g_sl_dirty = 1; }
+/* a key for the picker; 1 when it was the picker's */
+static int pk_key(WPARAM vk) {
+    if (g_pick_role < 0 || g_theme < TH_N) return 0;
+    int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (ctrl && vk == 'V') { /* a hex colour from the clipboard */
+        long c = -1;
+        if (OpenClipboard(NULL)) {
+            HANDLE hd = GetClipboardData(CF_UNICODETEXT);
+            const wchar_t *t = hd ? GlobalLock(hd) : NULL;
+            if (t) { wchar_t b[24]; wcsncpy(b, t, 23); b[23] = 0; for (wchar_t *q = b; *q; q++) if (*q == '\r' || *q == '\n' || *q == '\t') *q = 0; c = pk_hex(b); GlobalUnlock(hd); }
+            CloseClipboard();
+        }
+        if (c >= 0) { g_pk_edit = -1; pk_set((unsigned)c); pk_done(); }
+        return 1;
+    }
+    if (ctrl && vk == 'C') { /* the colour as hex, to the clipboard */
+        wchar_t t[12]; swprintf(t, 12, L"#%06X", pk_cur());
+        if (OpenClipboard(NULL)) {
+            EmptyClipboard();
+            HGLOBAL m = GlobalAlloc(GMEM_MOVEABLE, sizeof t);
+            if (m) { memcpy(GlobalLock(m), t, sizeof t); GlobalUnlock(m); if (!SetClipboardData(CF_UNICODETEXT, m)) GlobalFree(m); }
+            CloseClipboard();
+        }
+        return 1;
+    }
+    if (vk == VK_UP || vk == VK_DOWN) { pk_nudge(g_pk_edit >= 0 ? g_pk_edit : PF_V, (vk == VK_UP ? 1 : -1) * (shift ? 10 : 1)); return 1; }
+    if (g_pk_edit >= 0) {
+        if (vk == VK_RETURN) pk_edit_end(1);
+        else if (vk == VK_ESCAPE) pk_edit_end(0);
+        else if (vk == VK_TAB) { int f = g_pk_edit; pk_edit_end(1); pk_edit_start((f + (shift ? PF_N - 1 : 1)) % PF_N); }
+        else if (vk == VK_BACK) { size_t n = wcslen(g_pk_buf); if (g_pk_fresh) g_pk_buf[0] = 0; else if (n) g_pk_buf[n - 1] = 0; g_pk_fresh = 0; g_sl_dirty = 1; }
+        else if (vk == VK_DELETE) { g_pk_buf[0] = 0; g_pk_fresh = 0; g_sl_dirty = 1; }
+        else if (ctrl && vk == 'A') { g_pk_fresh = 1; g_sl_dirty = 1; }
+        return 1; /* (letters and digits come as WM_CHAR) */
+    }
+    if (vk == VK_ESCAPE) { pk_close(); return 1; } /* the picker closes; a second Esc the window */
+    if (vk == VK_TAB || vk == VK_RETURN) { pk_edit_start(PF_HEX); return 1; }
+    return 0;
+}
+/* a character typed into the value being edited */
+static int pk_char(WPARAM ch) {
+    if (g_pk_edit < 0) return 0;
+    if (ch < 32 || ch == 127) return 1;
+    int hex = g_pk_edit == PF_HEX;
+    if (!(hex ? iswxdigit((wint_t)ch) || ch == '#' : iswdigit((wint_t)ch) || (ch == '-' && g_pk_edit == PF_H))) return 1;
+    if (g_pk_fresh) { g_pk_buf[0] = 0; g_pk_fresh = 0; }
+    size_t n = wcslen(g_pk_buf);
+    if (n < (hex ? 7u : 4u)) { g_pk_buf[n] = (wchar_t)towupper((wint_t)ch); g_pk_buf[n + 1] = 0; }
+    if (hex && pk_hex(g_pk_buf) >= 0 && wcslen(g_pk_buf) - (g_pk_buf[0] == '#') == 6) { pk_set((unsigned)pk_hex(g_pk_buf)); cpick_apply(); } /* six digits: shown at once */
+    g_sl_dirty = 1;
+    return 1;
 }
 /* the name being typed: kept (an empty one goes back), or back as it was */
 static void ren_end(int keep) {
@@ -6540,12 +6648,14 @@ static void set_build(void) {
  * (g_pick_role). Drawn with the Settings window's helpers, its hits and text kept apart from the page's. */
 static HWND g_cpw;
 static Pane g_cp;
-static SetHit g_cph[32];
-static int g_cph_n, g_cp_hot = -1, g_cp_drag, g_cp_x, g_cp_y; /* its hits (its own pixels), the one pointed at, the part held (K_CSV, K_CHUE), where it is */
+static SetHit g_cph[48];
+static int g_cph_n, g_cp_hot = -1, g_cp_drag, g_cp_x, g_cp_y; /* its hits (its own pixels), the one pointed at, the part held (K_CSV, K_CHUE, K_CPMOVE), where it is */
+static int g_cp_moved, g_cp_rx, g_cp_ry; /* dragged by its title: kept there, from the Settings window's corner, until it closes */
+static POINT g_cp_grab;                /* where in it the title was taken hold of */
 static unsigned g_cp_key;              /* what it was last drawn for: drawn again when that changes */
-#define CP_W 372.0f
-#define CP_H 200.0f
-static int cp_hot(int kind, int row, int val) { return g_cp_hot >= 0 && g_cph[g_cp_hot].kind == kind && g_cph[g_cp_hot].row == row && g_cph[g_cp_hot].val == val; }
+#define CP_W 404.0f
+#define CP_H 244.0f
+static int cp_hot(int kind, int row, int val) { return g_cp_hot >= 0 && g_cp_hot < g_cph_n && g_cph[g_cp_hot].kind == kind && g_cph[g_cp_hot].row == row && g_cph[g_cp_hot].val == val; }
 static void cp_build(void) {
     Pane *pn = &g_cp;
     if (!pn->mem) pn->mem = CreateCompatibleDC(NULL);
@@ -6556,15 +6666,19 @@ static void cp_build(void) {
     g_clipping = 0;
     g_tx_n = 0; /* (the page's text is drawn already: its queue is free) */
     box(pn, 0, 0, CP_W, CP_H, 12, S_CARD, S_EDGE_HOT, 1);
+    /* the title: drag it to move the window */
+    hit(0, 0, CP_W - 40, 38, K_CPMOVE, 0, 0);
+    if (cp_hot(K_CPMOVE, 0, 0) || g_cp_drag == K_CPMOVE) box(pn, 1, 1, CP_W - 1, 38, 11, S_CHIP, S_CHIP, 0);
+    for (int i = 0; i < 3; i++) box(pn, CP_W / 2 - 10 + i * 8, 6, CP_W / 2 - 7 + i * 8, 9, 1.5f, S_MUTED, S_MUTED, 0); /* (a grip) */
     wchar_t t[96];
     swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
-    tx(16, 10, CP_W - 44, 32, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+    tx(16, 10, CP_W - 44, 34, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
     int xh = cp_hot(K_CLOSE, 0, 0);
-    if (xh) box(pn, CP_W - 36, 7, CP_W - 10, 33, 7, S_CHIP, S_CHIP, 0);
-    lu_icon(pn, "x", CP_W - 23, 20, 14, xh ? S_TEXT : S_MUTED);
-    hit(CP_W - 36, 7, CP_W - 10, 33, K_CLOSE, 0, 0);
+    if (xh) box(pn, CP_W - 36, 8, CP_W - 10, 34, 7, S_CHIP, S_CHIP, 0);
+    lu_icon(pn, "x", CP_W - 23, 21, 14, xh ? S_TEXT : S_MUTED);
+    hit(CP_W - 36, 8, CP_W - 10, 34, K_CLOSE, 0, 0);
     /* saturation across and brightness down at the hue, the hue under it */
-    float sx0 = 16, sx1 = 216, sy0 = 42, sy1 = 152, hy0 = sy1 + 12, hy1 = hy0 + 16;
+    float sx0 = 16, sx1 = 216, sy0 = 46, sy1 = 156, hy0 = sy1 + 10, hy1 = hy0 + 16;
     RECT sq = SR(sx0, sy0, sx1, sy1), hs = SR(sx0, hy0, sx1, hy1);
     for (int k = 0; k < 2; k++) {
         RECT q = k ? hs : sq;
@@ -6577,27 +6691,43 @@ static void cp_build(void) {
     frame(pn, sx0, sy0, sx1, sy1, 0, S_EDGE, 1);
     frame(pn, sx0, hy0, sx1, hy1, 0, S_EDGE, 1);
     float mx = sx0 + g_pk_s * (sx1 - sx0), my = sy0 + (1 - g_pk_v) * (sy1 - sy0), hx = sx0 + g_pk_h * (sx1 - sx0);
-    unsigned cur = hsv_x(g_pk_h, g_pk_s, g_pk_v);
+    unsigned cur = pk_cur();
     box(pn, mx - 7, my - 7, mx + 7, my + 7, 7, cur, 0xFFFFFF, 2);
     box(pn, hx - 3, hy0 - 3, hx + 3, hy1 + 3, 2, hsv_x(g_pk_h, 1, 1), 0xFFFFFF, 1.5f);
     hit_px(sq, K_CSV, R_ROLE, 0, 0, 0, 0);
     hit_px(hs, K_CHUE, R_ROLE, 0, 0, 0, 0);
-    /* the colour, its hex, and the same colour as each built-in theme has it, a click away */
-    float ax = sx1 + 16, ax1 = CP_W - 16;
-    box(pn, ax, sy0, ax1, sy0 + 36, 8, cur, S_EDGE, 1);
-    swprintf(t, 96, L"#%06X", cur);
-    tx(ax, sy0 + 42, ax1, sy0 + 60, t, g_sf_label, S_TEXT, DT_LEFT);
-    tx(ax, sy0 + 64, ax1, sy0 + 80, L"as the themes have it", g_sf_small, S_MUTED, DT_LEFT);
+    /* the colour, and its values to type into: HEX, R G B, H S V (the wheel or the arrow keys nudge one) */
+    float ax = sx1 + 16, ax1 = CP_W - 16, aw = ax1 - ax;
+    box(pn, ax, sy0, ax1, sy0 + 30, 8, cur, S_EDGE, 1);
+    static const wchar_t *NAME[PF_N] = {L"HEX", L"R", L"G", L"B", L"H", L"S", L"V"};
+    for (int f = 0; f < PF_N; f++) {
+        float fy0 = f == PF_HEX ? sy0 + 40 : f <= PF_B ? sy0 + 72 : sy0 + 104, fx0, fx1;
+        if (f == PF_HEX) { fx0 = ax; fx1 = ax1; }
+        else { int i = (f - 1) % 3; float cw = (aw - 8) / 3; fx0 = ax + i * (cw + 4); fx1 = fx0 + cw; }
+        int ed = g_pk_edit == f, hot = cp_hot(K_PKF, 0, f);
+        box(pn, fx0, fy0, fx1, fy0 + 26, 6, ed ? 0x1C1C21 : S_CHIP, ed ? S_OR : hot ? S_EDGE_HOT : S_EDGE, ed ? 1.5f : 1);
+        tx(fx0 + 7, fy0, fx1, fy0 + 26, NAME[f], g_sf_small, S_MUTED, DT_LEFT);
+        wchar_t v[16];
+        if (ed) {
+            swprintf(v, 16, L"%ls%ls", g_pk_buf, g_pk_fresh ? L"" : L"|");
+            if (g_pk_fresh && g_pk_buf[0]) box(pn, fx1 - 8 - tw_of(g_pk_buf, g_sf_label) - 3, fy0 + 5, fx1 - 5, fy0 + 21, 3, 0x6A3A10, 0x6A3A10, 0); /* (all of it chosen: the next key replaces it) */
+        } else pk_text(f, v);
+        tx(fx0, fy0, fx1 - 8, fy0 + 26, v, g_sf_label, ed || hot ? S_TEXT : S_CHIP_TXT, DT_RIGHT);
+        hit(fx0, fy0, fx1, fy0 + 26, K_PKF, 0, f);
+    }
+    /* the same colour as each built-in theme has it, a click away */
+    float ry = hy1 + 14;
+    tx(sx0, ry, ax1, ry + 16, L"as the themes have it \x00B7 Tab, Enter, \x2191\x2193, Ctrl+C / V", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
     for (int i = 0, j = 0; i < TH_N; i++) {
         if (i == TH_FOLLOW) continue;
-        float a = ax + j % 4 * 34, b = sy0 + 86 + j / 4 * 28;
+        float a = sx0 + j * 34, b = ry + 22;
         unsigned c = ((const unsigned *)pal_of(i))[g_pick_role & 15];
         box(pn, a, b, a + 28, b + 22, 6, c, cp_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
         hit(a, b, a + 28, b + 22, K_PICK, R_CSUG, i);
         j++;
     }
     /* its hits and text are its own */
-    g_cph_n = min(g_hits_n - sh, 32);
+    g_cph_n = min(g_hits_n - sh, 48);
     memcpy(g_cph, g_hits + sh, sizeof(SetHit) * (size_t)g_cph_n);
     g_hits_n = sh;
     HDC mdc = pn->mem;
@@ -6614,9 +6744,17 @@ static void cp_build(void) {
     g_clipping = sc;
     for (int i = 0; i < W * H; i++) if (!(pn->px[i] >> 24) && (pn->px[i] & 0xFFFFFF)) pn->px[i] |= 0xff000000u; /* (GDI leaves its text's alpha at 0) */
 }
-static void cp_hide(void) { if (g_cpw && IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_HIDE); g_cp_key = 0; g_cp_hot = -1; }
+static void cp_hide(void) { if (g_cpw && IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_HIDE); g_cp_key = 0; g_cp_hot = -1; g_cp_moved = 0; if (g_pk_edit >= 0) pk_edit_end(1); }
 static void cp_tick(void);
+static int cp_hit_at(POINT p) { for (int i = g_cph_n - 1; i >= 0; i--) if (PtInRect(&g_cph[i].r, p)) return i; return -1; }
 static void cp_drag_at(POINT p) {
+    if (g_cp_drag == K_CPMOVE) { /* the window follows the title held */
+        POINT c; GetCursorPos(&c);
+        RECT wr; GetWindowRect(g_set, &wr);
+        g_cp_moved = 1; g_cp_rx = c.x - g_cp_grab.x - wr.left; g_cp_ry = c.y - g_cp_grab.y - wr.top;
+        cp_tick();
+        return;
+    }
     for (int i = 0; i < g_cph_n; i++) if (g_cph[i].kind == g_cp_drag) {
         RECT r = g_cph[i].r;
         float u = clampf((p.x - r.left) / (float)max(1, r.right - r.left - 1), 0, 1), w = clampf((p.y - r.top) / (float)max(1, r.bottom - r.top - 1), 0, 1);
@@ -6629,53 +6767,73 @@ static void cp_drag_at(POINT p) {
 static LRESULT CALLBACK cp_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
     switch (msg) {
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE; /* the Settings window keeps the keyboard (Esc closes it) */
-    case WM_SETCURSOR: SetCursor(LoadCursor(NULL, IDC_ARROW)); return TRUE;
+    case WM_SETCURSOR: {
+        int k = g_cp_hot >= 0 && g_cp_hot < g_cph_n ? g_cph[g_cp_hot].kind : -1;
+        SetCursor(LoadCursor(NULL, k == K_CPMOVE || g_cp_drag == K_CPMOVE ? IDC_SIZEALL : k == K_PKF ? IDC_IBEAM : IDC_ARROW));
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT te = {sizeof te, TME_LEAVE, w, 0}; TrackMouseEvent(&te);
         if (g_cp_drag) { cp_drag_at(p); return 0; }
-        int h = -1;
-        for (int i = g_cph_n - 1; i >= 0 && h < 0; i--) if (PtInRect(&g_cph[i].r, p)) h = i;
+        int h = cp_hit_at(p);
         if (h != g_cp_hot) { g_cp_hot = h; cp_tick(); }
         return 0;
     }
     case WM_MOUSELEAVE: if (g_cp_hot >= 0 && !g_cp_drag) { g_cp_hot = -1; cp_tick(); } return 0;
     case WM_LBUTTONDOWN: {
-        int h = -1;
-        for (int i = g_cph_n - 1; i >= 0 && h < 0; i--) if (PtInRect(&g_cph[i].r, p)) h = i;
-        if (h < 0) return 0;
+        int h = cp_hit_at(p);
+        if (g_pk_edit >= 0 && (h < 0 || g_cph[h].kind != K_PKF)) pk_edit_end(1); /* a value being typed is kept */
+        if (h < 0) { cp_tick(); return 0; }
         SetHit hh = g_cph[h];
         if (hh.kind == K_CSV || hh.kind == K_CHUE) { g_cp_drag = hh.kind; SetCapture(w); cp_drag_at(p); }
-        else if (hh.kind == K_PICK) { set_choose(hh.row, hh.val); settings_save(); cp_tick(); }
-        else if (hh.kind == K_CLOSE) { g_pick_role = -1; g_sl_dirty = 1; cp_hide(); }
+        else if (hh.kind == K_CPMOVE) { g_cp_drag = K_CPMOVE; g_cp_grab = p; SetCapture(w); }
+        else if (hh.kind == K_PKF) { pk_edit_start(hh.val); SetFocus(w); }
+        else if (hh.kind == K_PICK) { g_pk_edit = -1; set_choose(hh.row, hh.val); settings_save(); }
+        else if (hh.kind == K_CLOSE) { pk_close(); cp_hide(); return 0; }
+        cp_tick();
         return 0;
     }
-    case WM_LBUTTONUP: if (g_cp_drag) { g_cp_drag = 0; ReleaseCapture(); settings_save(); g_sl_dirty = 1; } return 0;
-    case WM_CAPTURECHANGED: if (g_cp_drag) { g_cp_drag = 0; settings_save(); g_sl_dirty = 1; } return 0;
+    case WM_LBUTTONUP: if (g_cp_drag) { int was = g_cp_drag; g_cp_drag = 0; ReleaseCapture(); if (was != K_CPMOVE) { settings_save(); g_sl_dirty = 1; } } return 0;
+    case WM_CAPTURECHANGED: if (g_cp_drag) { if (g_cp_drag != K_CPMOVE) { settings_save(); g_sl_dirty = 1; } g_cp_drag = 0; } return 0;
+    case WM_MOUSEWHEEL: { /* on a value: nudged */
+        POINT c = p; ScreenToClient(w, &c);
+        int h = cp_hit_at(c);
+        if (h >= 0 && g_cph[h].kind == K_PKF) { pk_nudge(g_cph[h].val, (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1) * ((GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1)); cp_tick(); }
+        return 0;
+    }
+    case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        if (msg == WM_KEYDOWN && pk_key(wp)) { if (g_pick_role < 0) { cp_hide(); if (g_set) SetForegroundWindow(g_set); } else cp_tick(); return 0; }
+        break;
+    case WM_CHAR: if (pk_char(wp)) cp_tick(); return 0;
     }
     return DefWindowProc(w, msg, wp, lp);
 }
 /* shown, placed under its swatch (above it when there is no room) and drawn again when what it shows has changed */
 static void cp_tick(void) {
-    if (!g_set || !IsWindowVisible(g_set) || g_pick_role < 0 || g_theme < TH_N || IsRectEmpty(&g_cp_anchor)) { cp_hide(); return; }
+    if (!g_set || !IsWindowVisible(g_set) || g_pick_role < 0 || g_theme < TH_N || (IsRectEmpty(&g_cp_anchor) && !g_cp_moved)) { cp_hide(); return; }
     if (!g_cpw) {
         WNDCLASSW c = {0};
         c.lpfnWndProc = cp_proc; c.hInstance = GetModuleHandle(NULL); c.lpszClassName = L"VigilPicker"; c.hCursor = LoadCursor(NULL, IDC_ARROW);
         RegisterClassW(&c);
-        g_cpw = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"VigilPicker", L"Vigil colour", WS_POPUP, 0, 0, 1, 1, g_set, NULL, c.hInstance, NULL);
+        g_cpw = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"VigilPicker", L"Vigil colour", WS_POPUP, 0, 0, 1, 1, g_set, NULL, c.hInstance, NULL);
         if (!g_cpw) return;
     }
     unsigned key = 2166136261u;
     float kv[6] = {g_pk_h, g_pk_s, g_pk_v, (float)g_pick_role, (float)g_cp_hot, (float)g_sdpi};
     for (int i = 0; i < 6; i++) { unsigned u; memcpy(&u, &kv[i], 4); key = (key ^ u) * 16777619u; }
     key = (key ^ (unsigned)g_theme) * 16777619u;
+    key = (key ^ (unsigned)(g_pk_edit + 2) ^ (unsigned)g_pk_fresh << 8 ^ (unsigned)g_cp_drag << 12) * 16777619u;
+    for (const wchar_t *q = g_pk_buf; *q; q++) key = (key ^ (unsigned)*q) * 16777619u;
     int redraw = key != g_cp_key;
     if (redraw) { cp_build(); g_cp_key = key; }
     RECT wr; GetWindowRect(g_set, &wr);
     int W = g_cp.W, H = g_cp.H, gap = (int)S(8);
     int x = wr.left + (g_cp_anchor.left + g_cp_anchor.right) / 2 - W / 2, y = wr.top + g_cp_anchor.bottom + gap;
+    if (g_cp_moved) { x = wr.left + g_cp_rx; y = wr.top + g_cp_ry; } /* where it was dragged to, going with the Settings window */
     RECT wa = work_at((float)x + W / 2.0f, (float)y);
-    if (y + H > wa.bottom) y = wr.top + g_cp_anchor.top - gap - H; /* no room under it: above it */
+    if (!g_cp_moved && y + H > wa.bottom) y = wr.top + g_cp_anchor.top - gap - H; /* no room under it: above it */
+    if (y + H > wa.bottom) y = wa.bottom - H;
+    if (y < wa.top) y = wa.top;
     if (x + W > wa.right) x = wa.right - W;
     if (x < wa.left) x = wa.left;
     if (!redraw && x == g_cp_x && y == g_cp_y && IsWindowVisible(g_cpw)) return;
@@ -6684,7 +6842,7 @@ static void cp_tick(void) {
     SIZE size = {W, H};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     UpdateLayeredWindow(g_cpw, NULL, &dst, &size, g_cp.mem, &src, 0, &blend, ULW_ALPHA);
-    if (!IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_SHOWNOACTIVATE);
+    if (!IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_SHOWNOACTIVATE); /* (it takes the keyboard once a value is clicked) */
 }
 
 static void settings_tick(double now) {
@@ -7027,7 +7185,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_CSV: case K_CHUE: g_cdrag = sh->kind; SetCapture(w); cpick_at(p); break;
             case K_SLIDE: g_slide = h; g_slide_row = g_hits[h].row; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
             case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
-            case K_PAGE: g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
+            case K_PAGE: if (g_pick_role >= 0) { pk_close(); cp_hide(); } g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_PVBG: g_pv_light = !g_pv_light; g_sl_dirty = 1; settings_applied(1); break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
@@ -7116,13 +7274,11 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == VK_BACK && n) { g_my_name[k][n - 1] = 0; g_sl_dirty = 1; }
             return 0;
         }
-        if (wp == VK_ESCAPE && g_pick_role >= 0) { /* Esc: the colour picker closes first */
-            g_pick_role = -1; g_sl_dirty = 1; cp_hide();
-            return 0;
-        }
+        if (msg == WM_KEYDOWN && pk_key(wp)) { if (g_pick_role < 0) cp_hide(); return 0; } /* the colour picker's keys (Esc closes it first) */
         if (wp == VK_ESCAPE) { set_close(); return 0; }
         break;
     case WM_CHAR:
+        if (pk_char(wp)) return 0; /* a value of the colour picker being typed */
         if (g_renaming && wp >= 32 && wp != 127) {
             int k = g_theme - TH_N;
             size_t n = k >= 0 && k < g_my_n ? wcslen(g_my_name[k]) : 23;
