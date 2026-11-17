@@ -2981,7 +2981,7 @@ static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col,
 static void spin_paint(HDC dc, int x0, int base) {
     static double stall, at_last;
     double now = wall();
-    COLORREF acc = tint(MD_RUN), bgc = chat_bg();
+    COLORREF acc = RGB(215, 119, 87), bgc = chat_bg(); /* Claude Code's own orange ("claude"), whatever the box's theme */
     int light = GetRValue(bgc) * 299 + GetGValue(bgc) * 587 + GetBValue(bgc) * 114 > 140000;
     COLORREF err = light ? RGB(171, 43, 63) : RGB(255, 107, 128); /* (Claude Code's error colour, dark and light) */
     { /* how stalled: eased, as the CLI eases it (a tenth of the way every 50 ms) */
@@ -2992,7 +2992,7 @@ static void spin_paint(HDC dc, int x0, int base) {
     }
     #define MIXC(a, b, k) RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * (k)), GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * (k)), GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * (k)))
     COLORREF base_c = MIXC(acc, err, stall);
-    COLORREF shim = RGB(min(255, GetRValue(base_c) + (light ? 30 : 20)), min(255, GetGValue(base_c) + (light ? 30 : 40)), min(255, GetBValue(base_c) + (light ? 30 : 40))); /* (claude → claudeShimmer) */
+    COLORREF shim = MIXC(err, acc, stall); /* the moving letters in the other colour: red over orange, orange over red */
     TEXTMETRICW tm;
     SelectObject(dc, g_chat_bf);
     GetTextMetricsW(dc, &tm);
