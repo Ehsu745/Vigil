@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Claude Code hook for vigil.
 
-Appends one JSON line per event to ~/.dodeca-core/events.jsonl:
+Appends one JSON line per event to ~/.vigil/events.jsonl:
 time, session id, event name, folder name, tool name, notification type, and for a subagent's events its
 id and type (e.g. "Explore"), so it can be shown as a core of its own.
 It never stores prompts, tool input/output or full paths in that file.
 
-With DODECA_RICH=1 it also keeps one small file per session, ~/.dodeca-core/msg/<session id>.json,
+With VIGIL_RICH=1 it also keeps one small file per session, ~/.vigil/msg/<session id>.json,
 for the floating panel's chat box and voice features: Claude's last reply, the last notification text
 (e.g. a permission prompt), the iTerm2 session, Windows Terminal tab, tmux pane or vigil-claude launcher the
 conversation runs in (where a reply typed in the panel goes), and the last few turns as the terminal shows them: each prompt, its reply and
@@ -29,9 +29,20 @@ try:
 except ImportError:  # not on Windows; the lock is only a nicety
     fcntl = None
 
-PATH = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events.jsonl"))
+def data_dir():
+    """~/.vigil; the old ~/.dodeca-core is moved there the first time (the name before Vigil)."""
+    new, old = os.path.expanduser("~/.vigil"), os.path.expanduser("~/.dodeca-core")
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:
+            os.rename(old, new)
+        except OSError:  # (another hook moved it at the same moment: fine)
+            return new if os.path.exists(new) else old
+    return new
+
+
+PATH = os.environ.get("VIGIL_EVENTS") or os.environ.get("DODECA_EVENTS") or os.path.join(data_dir(), "events.jsonl")  # (DODECA_*: the old names, still read)
 MSG_DIR = os.path.join(os.path.dirname(PATH), "msg")
-RICH = os.environ.get("DODECA_RICH") == "1"
+RICH = "1" in (os.environ.get("VIGIL_RICH"), os.environ.get("DODECA_RICH"))
 KNOWN = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
          "PostToolUse", "Notification", "Stop", "SubagentStart", "SubagentStop"}
 MAX_TEXT = 4000
@@ -443,7 +454,7 @@ def rich(d, ev, sid, rec):
         drop_stale()
         verbs_refresh()
         pane = os.environ.get("TMUX_PANE", "")
-        inbox = os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
+        inbox = os.environ.get("VIGIL_INBOX") or os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
         fields = {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
                   "tmux": pane if re.fullmatch(r"%\d{1,6}", pane) else "",
                   "inbox": inbox if re.fullmatch(r"\d{1,9}", inbox) else "",

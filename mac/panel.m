@@ -98,9 +98,9 @@ static Session *session_by_sid(NSString *sid) {
 
 static NSString *sid_of(const Session *s) { return [NSString stringWithUTF8String:s->sid] ?: @""; }
 
-// Single-core mode: where the cluster was put with ⌥-drag, kept in ~/.dodeca-core/panel-position.json per
+// Single-core mode: where the cluster was put with ⌥-drag, kept in ~/.vigil/panel-position.json per
 // screen size (another monitor setup has its own spot, so it never comes back off-screen).
-static NSString *position_file(void) { return [@"~/.dodeca-core/panel-position.json" stringByExpandingTildeInPath]; }
+static NSString *position_file(void) { return [@"~/.vigil/panel-position.json" stringByExpandingTildeInPath]; }
 static NSString *screen_key(NSScreen *sc) { return [NSString stringWithFormat:@"%.0fx%.0f", sc.frame.size.width, sc.frame.size.height]; }
 static NSMutableDictionary *positions(void) {
     NSData *d = [NSData dataWithContentsOfFile:position_file()];
@@ -137,7 +137,7 @@ static void pointer_visible(BOOL on) {
     hidden = !on;
 }
 
-// The right-click Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings.json (600) and
+// The right-click Settings menu: what it changes is kept in ~/.vigil/panel-settings.json (600) and
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
 static struct {
     int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
@@ -145,7 +145,7 @@ static struct {
 } g_launch;
 // Settings > Follow me: 0 stays in its Space, 1 every Space while iTerm2 is in front (--all-spaces), 2 every Space over any app (--always too)
 static int follow_mode(void) { return g_all_spaces ? (g_always ? 2 : 1) : 0; }
-static NSString *settings_file(void) { return [@"~/.dodeca-core/panel-settings.json" stringByExpandingTildeInPath]; }
+static NSString *settings_file(void) { return [@"~/.vigil/panel-settings.json" stringByExpandingTildeInPath]; }
 static void remember_launch(void) {
     g_launch.voice = g_voice; g_launch.auto_speak = g_auto_speak; g_launch.summarize = g_summarize_claude; g_launch.confirm_send = g_confirm_send;
     g_launch.smooth = g_smooth;
@@ -364,8 +364,8 @@ static NSString *state_line(const Session *s, int st) {
     return [NSString stringWithUTF8String:STATE_TEXT[st]];
 }
 
-// What the hook keeps about a session besides its events (only with DODECA_RICH=1): the msg file
-// ~/.dodeca-core/msg/<sid>.json with "reply", "notice", "iterm", "summary" and "t". Read again only when
+// What the hook keeps about a session besides its events (only with VIGIL_RICH=1): the msg file
+// ~/.vigil/msg/<sid>.json with "reply", "notice", "iterm", "summary" and "t". Read again only when
 // the file changes. --demo makes the same up.
 static const char *DEMO_REPLY[] = {
     "Refactored the channel model so fading is applied per tap.\nAll 42 simulation tests pass; the BER curve now matches the reference within 0.2 dB.\nNext I can add Doppler if you want.",
@@ -2024,7 +2024,7 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     NSString *iterm = msg_text(s, @"iterm");
     NSRange colon = [iterm rangeOfString:@":"];
     if (colon.location != NSNotFound) iterm = [iterm substringFromIndex:colon.location + 1];
-    if (!iterm.length) { [self fail:sid because:@"不知道這個 session 在哪個 iTerm2 窗格，需要用 DODECA_RICH 啟動 hook"]; return; }
+    if (!iterm.length) { [self fail:sid because:@"不知道這個 session 在哪個 iTerm2 窗格，需要用 VIGIL_RICH 啟動 hook"]; return; }
     static NSString *script =
         @"on run argv\n"
          "  tell application \"iTerm2\"\n"
@@ -2482,7 +2482,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        const char *shape = "geo2", *events = getenv("DODECA_EVENTS"), *home = getenv("HOME") ? getenv("HOME") : ".";
+        const char *shape = "geo2", *events = getenv("VIGIL_EVENTS") ? getenv("VIGIL_EVENTS") : getenv("DODECA_EVENTS"), *home = getenv("HOME") ? getenv("HOME") : ".";
         char events_default[1024];
         for (int i = 1; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -2546,8 +2546,13 @@ int main(int argc, char **argv) {
         }
         if (g_summarize_claude && !g_claude) { fprintf(stderr, "vigil-panel: claude not found, using the local summary\n"); g_summarize_claude = 0; }
         if (!shape_make(&g_shape, g_shape_name)) { fprintf(stderr, "unknown shape: %s\n", g_shape_name); return 2; }
+        { /* the data folder: ~/.vigil; the old ~/.dodeca-core (the name before Vigil) is moved there the first time */
+            char nw[900], od[900]; struct stat st;
+            snprintf(nw, sizeof nw, "%.800s/.vigil", home); snprintf(od, sizeof od, "%.800s/.dodeca-core", home);
+            if (stat(nw, &st) != 0 && stat(od, &st) == 0) rename(od, nw);
+        }
         if (!events) {
-            snprintf(events_default, sizeof events_default, "%s/.dodeca-core/events.jsonl", home);
+            snprintf(events_default, sizeof events_default, "%s/.vigil/events.jsonl", home);
             events = events_default;
         }
 
@@ -2561,7 +2566,7 @@ int main(int argc, char **argv) {
             int n = tail_history(&g_tail, now - 1800, g_ev, 1024); // rebuild what the sessions were doing
             for (int i = 0; i < n; i++) room_apply(&g_room, &g_ev[i]);
             char dir[900]; // lets the launcher see that a panel is already open
-            snprintf(dir, sizeof dir, "%.800s/.dodeca-core", home);
+            snprintf(dir, sizeof dir, "%.800s/.vigil", home);
             mkdir(dir, 0700);
             snprintf(g_pidfile, sizeof g_pidfile, "%s/pane.pid", dir);
             FILE *f = fopen(g_pidfile, "w");

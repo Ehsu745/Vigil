@@ -25,8 +25,6 @@
 
 Claude Code 的 hook 每個事件在檔案裡加一行；一個 C 程式讀這個檔案，用自己的渲染器畫出核心。全部在本機執行，不連網路，只需要 libc、libm 和 zlib。
 
-<sub>舊名 dodeca-core：資料夾 `~/.dodeca-core` 和 `DODECA_*` 環境變數暫時沿用舊名。</sub>
-
 <p align="center">
   <a href="#狀態">狀態</a> ·
   <a href="#快速開始">快速開始</a> ·
@@ -104,7 +102,7 @@ sh win/build.sh && ./vigil-win --demo       # Windows：在 WSL 裡執行（需�
 
 事件檔只有時間、session id、事件名、資料夾名稱（不含路徑）、工具名稱和通知類型，子代理（subagent）的事件另外有它的 agent id 和類型（例如 `Explore`），不會記錄 prompt 或工具的輸入輸出。沒有網路連線，沒有常駐程式，檔案權限是 600。
 
-開啟 `DODECA_RICH=1`（`install_hooks.py --rich`）時，hook 另外為每個 session 保留一個檔案 `~/.dodeca-core/msg/<session id>.json`（權限 600，資料夾 700）：**Claude 最後一則回覆的文字**和最後一則通知（例如權限請求）的文字，各最多 4000 字，它所在終端機的 `ITERM_SESSION_ID`，以及**像終端機那樣的最近 5 輪對話**：你輸入的每個提示（最多 2000 字）、它的回覆和它的步驟，也就是工具名稱加一段簡短說明（指令自己的說明，沒有就用第一行、不含資料夾的檔名、搜尋樣式或網站網域），步驟之間 Claude 說的簡短訊息、背景工作的通知，以及這一輪進行中你送出的訊息（每輪保留最後 16 項，其餘只記數量），這一輪開始的時間和 Claude 已寫出的 token 數（用於進行中那一輪底下的那行：「Pondering… (1m 5s · ↓ 2.1k tokens)」，其中的動詞取自 Claude Code 自己的清單，再加上或改用 Claude Code 設定裡你的 `spinnerVerbs`），還有正在執行的那一步（開啟時已經在跑的 session，會從它的 Claude Code 對話紀錄補上之前的幾輪，只補一次；恢復（resume）的 session 一恢復就會補回之前的幾輪和最後一則回覆）。檔案超過約 24 KB 時先丟掉最舊的幾輪。子代理的最後回覆存在它自己的檔案 `msg/<session id>-<agent id>.json`，跟著 session 的檔案一起刪除。新的回覆或通知會蓋掉舊的，session 結束時檔案會刪掉，沒正常結束的 session 留下的檔案 24 小時後刪除。事件檔除了 `Stop` 那行多一個 `"m": 1` 之外不變。因為提示、回覆和指令都會寫到磁碟上，只在你自己的電腦上開。Rich 模式也會在事件檔旁邊保留 `claude-verbs.txt`：Claude Code 自己的 spinner 動詞，由 `spinner_verbs.py` 從你電腦上安裝的 Claude Code 讀出來（Vigil 本身不附這份清單），Claude Code 更新後會在背景重新讀一次。
+開啟 `VIGIL_RICH=1`（`install_hooks.py --rich`）時，hook 另外為每個 session 保留一個檔案 `~/.vigil/msg/<session id>.json`（權限 600，資料夾 700）：**Claude 最後一則回覆的文字**和最後一則通知（例如權限請求）的文字，各最多 4000 字，它所在終端機的 `ITERM_SESSION_ID`，以及**像終端機那樣的最近 5 輪對話**：你輸入的每個提示（最多 2000 字）、它的回覆和它的步驟，也就是工具名稱加一段簡短說明（指令自己的說明，沒有就用第一行、不含資料夾的檔名、搜尋樣式或網站網域），步驟之間 Claude 說的簡短訊息、背景工作的通知，以及這一輪進行中你送出的訊息（每輪保留最後 16 項，其餘只記數量），這一輪開始的時間和 Claude 已寫出的 token 數（用於進行中那一輪底下的那行：「Pondering… (1m 5s · ↓ 2.1k tokens)」，其中的動詞取自 Claude Code 自己的清單，再加上或改用 Claude Code 設定裡你的 `spinnerVerbs`），還有正在執行的那一步（開啟時已經在跑的 session，會從它的 Claude Code 對話紀錄補上之前的幾輪，只補一次；恢復（resume）的 session 一恢復就會補回之前的幾輪和最後一則回覆）。檔案超過約 24 KB 時先丟掉最舊的幾輪。子代理的最後回覆存在它自己的檔案 `msg/<session id>-<agent id>.json`，跟著 session 的檔案一起刪除。新的回覆或通知會蓋掉舊的，session 結束時檔案會刪掉，沒正常結束的 session 留下的檔案 24 小時後刪除。事件檔除了 `Stop` 那行多一個 `"m": 1` 之外不變。因為提示、回覆和指令都會寫到磁碟上，只在你自己的電腦上開。Rich 模式也會在事件檔旁邊保留 `claude-verbs.txt`：Claude Code 自己的 spinner 動詞，由 `spinner_verbs.py` 從你電腦上安裝的 Claude Code 讀出來（Vigil 本身不附這份清單），Claude Code 更新後會在背景重新讀一次。
 
 語音（`vigil-panel --voice`）：語音合成在這台 Mac 上完成，按住說話的辨識強制離線，錄音不會離開這台 Mac，也不會保存。辨識出來的文字會打進它要送去的那個 Claude Code session，就像你自己打字一樣。唯一會用到網路的是 `--summarize claude`：它透過 `claude -p` 把回覆文字送給 Anthropic 來縮短。
 
@@ -142,7 +140,7 @@ sh mac/build.sh
 ./vigil-panel --demo              # 先單獨看效果，Ctrl-C 結束
 ```
 
-`mac/build.sh` 會產生 `Vigil.app` 和一個小的啟動腳本 `./vigil-panel`。啟動腳本透過 macOS 啟動 App（這樣語音功能用到的麥克風和語音辨識權限算在這個 App 身上，而不是你的終端機），一直留在終端機裡直到 App 結束，選項也都一樣。Ctrl-C 或關掉那個終端機窗格兩個會一起結束。App 用 ad-hoc 簽章，每次建置都會變，所以重新建置後 macOS 會再問一次權限；不想這樣的話，在「鑰匙圈存取」建一個「程式碼簽署」憑證，之後用 `DODECA_SIGN_ID="憑證名稱" sh mac/build.sh` 建置。
+`mac/build.sh` 會產生 `Vigil.app` 和一個小的啟動腳本 `./vigil-panel`。啟動腳本透過 macOS 啟動 App（這樣語音功能用到的麥克風和語音辨識權限算在這個 App 身上，而不是你的終端機），一直留在終端機裡直到 App 結束，選項也都一樣。Ctrl-C 或關掉那個終端機窗格兩個會一起結束。App 用 ad-hoc 簽章，每次建置都會變，所以重新建置後 macOS 會再問一次權限；不想這樣的話，在「鑰匙圈存取」建一個「程式碼簽署」憑證，之後用 `VIGIL_SIGN_ID="憑證名稱" sh mac/build.sh` 建置。
 
 建好之後，`open_pane.sh` 會自動改用它：右邊切出來的 iTerm2 窗格保持空白，只負責把那塊位置空出來，面板在裡面啟動、量出窗格的大小、蓋在正上方。關掉那個窗格面板就結束；最後一個 session 結束 15 秒後面板和窗格一起關。
 
@@ -151,7 +149,7 @@ sh mac/build.sh
 - 切到沒有那個空窗格的 iTerm2 分頁時，面板仍會浮在右緣，可能蓋到文字；介意的話用 `--bg 1e1e1e` 給它實心底色。
 - 手動執行時面板寬度是螢幕的 17%，用 `--width`（單位是點）和 `--top` 調整位置，`--inset` 調整第一個 session 上方的留白（預設 30）；由 `open_pane.sh` 啟動時會加 `--fit-pane`，改成跟著那個空窗格的大小。
 - 字體預設 Monaco 12，用 `--font`、`--font-size` 對齊你的 iTerm2 設定。
-- 想退回終端機窗格版：`export DODECA_PANE_MODE=terminal`。
+- 想退回終端機窗格版：`export VIGIL_PANE_MODE=terminal`。
 - 核心會對滑鼠和快捷鍵起反應：見[互動與語音](#參考)。
 
 </details>
@@ -170,7 +168,7 @@ sh mac/build.sh
 | 單擊 | 念出回報，或停止；回覆標成已讀 | 被點的碎片凹進去，這一下會往周圍的碎片傳出去；然後 SPEAKING（青綠色） |
 | 長按（> 0.35 秒）後放開 | 按住說話：說的話會在核心下方顯示 1.5 秒，然後打進那個 session 並按 Enter；這段時間內點核心可以取消 | 按住時 LISTENING（綠色、外殼停轉、光暈隨麥克風音量變大），放開後 TRANSCRIBING（紫色光點沿邊線快速繞行） |
 | 雙擊 | 在核心的提示框下方打開回覆框：輸入後按 Enter 送到那個 session（Shift+Enter 換行，窗格收到時會合成一行），Esc 或右上角的 ✕ 會關閉並保留草稿；點其他地方時回覆框不會關，方便你到 Finder 或截圖縮圖上拿圖片。拖到核心或回覆框上、或用 ⌘V 貼上的圖片，會在游標處各放一個 `[Image #N]` 標記，和 Claude Code 一樣；Backspace 一次刪掉整個標記，送出時每個標記會換成圖片的路徑。Claude 還在工作時會先問你，和語音回覆一樣 | 一圈衝擊波；圖片拖到核心上方時，核心會讀取（TRANSCRIBING） |
-| 右鍵 | 選單：重播、複製回覆、靜音這個 session、叫到最前面，以及 **Settings...** 設定視窗：即時預覽（可拖動核心、在上面捲動放大、按鈕切換各狀態、用文字框外觀顯示的回覆）、**Look**（形狀、光暈、螢幕上的大小、內核大小、3D 公轉和傾斜程度）、**Motion**（重力、顯示或隱藏其他 session、對焦框、⌥ + 滾輪做什麼）、**Replies**（文字框的字型、字級、框的大小、底色和文字顏色、出現位置、核心上的名稱）、**Voice**（唸出回覆、自動唸新回覆、用 Claude 摘要、送出前等點擊）和待機時間；**Motions** 分頁選擇每個狀態可以用哪些 routine 和 action（▶ 在預覽裡播放）。選擇立刻生效，存在 `~/.dodeca-core/panel-settings.json`，優先於啟動參數；Reset to defaults 會清掉它們。沒有 session 時右鍵只顯示 Settings | — |
+| 右鍵 | 選單：重播、複製回覆、靜音這個 session、叫到最前面，以及 **Settings...** 設定視窗：即時預覽（可拖動核心、在上面捲動放大、按鈕切換各狀態、用文字框外觀顯示的回覆）、**Look**（形狀、光暈、螢幕上的大小、內核大小、3D 公轉和傾斜程度）、**Motion**（重力、顯示或隱藏其他 session、對焦框、⌥ + 滾輪做什麼）、**Replies**（文字框的字型、字級、框的大小、底色和文字顏色、出現位置、核心上的名稱）、**Voice**（唸出回覆、自動唸新回覆、用 Claude 摘要、送出前等點擊）和待機時間；**Motions** 分頁選擇每個狀態可以用哪些 routine 和 action（▶ 在預覽裡播放）。選擇立刻生效，存在 `~/.vigil/panel-settings.json`，優先於啟動參數；Reset to defaults 會清掉它們。沒有 session 時右鍵只顯示 Settings | — |
 | 拖曳 | 用手轉動多面體；邊移動邊放開會繼續轉，慢慢回到自己的轉速 | — |
 | 滾輪 | 這顆核心的語音音量（在 Mac 上滾輪不會轉動核心） | 外殼短暫變粗或變細 |
 | ⌥ + 滾輪 | 轉動核心：Roll（往下捲時頂部往後翻）、Roll back、Turn（繞直立軸轉）、Turn back 或 Off，依 Settings > Motion > ⌥ + scroll on a core 的設定 | 會繼續轉，再慢慢回到自己的轉速，和拖曳後一樣 |
@@ -178,14 +176,14 @@ sh mac/build.sh
 | 按住 `⌃⌥V`（需 `--voice`） | 對最需要你的 session 按住說話：NEEDS YOU 優先，其次最近完成的，再其次最近活動的 | 同長按核心 |
 | 2 分鐘沒有鍵盤或滑鼠輸入 | — | 除了 NEEDS YOU 以外的核心都進入 STANDBY（暗靛色）；你回來時，有未讀回覆的核心會亮一下提醒你 |
 
-- **單核心模式**（`--single`，或隨時按 `⌃⌥C`；`--mode-hotkey` 可以換按鍵）：一顆大核心代表一個 session，其他 session 變成小核心在旁邊漂浮。每個 session 的核心會帶一點自己的顏色，一看就知道誰是誰；外殼仍保留狀態的顏色。面板會縮成只有這一團：按住 ⌥ 拖曳可以放到螢幕任何地方（或 ⌥ 點一下，它就跟著滑鼠走，再點一下放下；拿著時游標會隱藏，對焦框框住它，核心會朝移動方向傾斜、停下或轉向時稍微落後再穩住（不會彈），後側的碎片微微張開，用力甩會讓它發狂；小核心靠重力留在軌道上（Settings > Motion > Gravity，Floaty 到 Firm），拿著移動時會沿軌道滑到後方，移動太快會把它們甩飛出去：它們會繼續飛、在螢幕邊緣反彈，直到你把大核心移到它們附近；開啟 Settings > Look > 3D orbit（預設開啟，只有 Mac 有）時，軌道會傾斜並自己緩緩搖擺，轉到遠側的小核心會變小、變暗，並從大核心後面經過，滑鼠靠近整群時會放平，變回俯視；另外偶爾在大核心跑 Skein 時，刀刃會撞到小核心，讓它碎成幾塊再組回來，或直接被撞飛、一邊翻滾一邊脫離軌道，直到你把大核心移到它附近），下次會回到同一個位置（依螢幕大小存在 `~/.dodeca-core/panel-position.json`；右鍵 > Reset position 放回右緣）。點一顆小核心，它會換到中間並固定在那裡（提示框會顯示「pinned」）；右鍵 > Follow automatically 讓面板重新自動選。自動時中間那顆跟著新消息走：需要你核准的 session 優先，其次是最新有回覆的；不會只因為 session 在忙就跳來跳去。用快捷鍵按住說話時，會送給中間那顆。右鍵選單也可以切換模式。
+- **單核心模式**（`--single`，或隨時按 `⌃⌥C`；`--mode-hotkey` 可以換按鍵）：一顆大核心代表一個 session，其他 session 變成小核心在旁邊漂浮。每個 session 的核心會帶一點自己的顏色，一看就知道誰是誰；外殼仍保留狀態的顏色。面板會縮成只有這一團：按住 ⌥ 拖曳可以放到螢幕任何地方（或 ⌥ 點一下，它就跟著滑鼠走，再點一下放下；拿著時游標會隱藏，對焦框框住它，核心會朝移動方向傾斜、停下或轉向時稍微落後再穩住（不會彈），後側的碎片微微張開，用力甩會讓它發狂；小核心靠重力留在軌道上（Settings > Motion > Gravity，Floaty 到 Firm），拿著移動時會沿軌道滑到後方，移動太快會把它們甩飛出去：它們會繼續飛、在螢幕邊緣反彈，直到你把大核心移到它們附近；開啟 Settings > Look > 3D orbit（預設開啟，只有 Mac 有）時，軌道會傾斜並自己緩緩搖擺，轉到遠側的小核心會變小、變暗，並從大核心後面經過，滑鼠靠近整群時會放平，變回俯視；另外偶爾在大核心跑 Skein 時，刀刃會撞到小核心，讓它碎成幾塊再組回來，或直接被撞飛、一邊翻滾一邊脫離軌道，直到你把大核心移到它附近），下次會回到同一個位置（依螢幕大小存在 `~/.vigil/panel-position.json`；右鍵 > Reset position 放回右緣）。點一顆小核心，它會換到中間並固定在那裡（提示框會顯示「pinned」）；右鍵 > Follow automatically 讓面板重新自動選。自動時中間那顆跟著新消息走：需要你核准的 session 優先，其次是最新有回覆的；不會只因為 session 在忙就跳來跳去。用快捷鍵按住說話時，會送給中間那顆。右鍵選單也可以切換模式。
 - 在全部核心模式下，按住 `⌥` 拖曳核心可以上下調整順序：核心會跟著滑鼠，其他核心會讓出位置。⌥ 點一下可以不按住就拿起核心，再點一下放下。
 - `--labels hover` 會拿掉每顆核心上方的兩行文字，面板只顯示核心（空出來的位置讓核心變大），由提示框告訴你哪顆是哪個。
 - 提示框和辨識結果的預覽會出現在面板左邊、蓋在終端機上，文字會自動換行而不是被截掉；預覽會完整顯示要送出的內容。標題用那個 session 的顏色（狀態的顏色；單核心模式下是它自己的顏色），左邊有一條同色的線；內文用系統字體，大小跟著 `--font-size`，排版和 Claude Code 的終端機一樣：段落之間有空隙、`-` 項目變成圓點而且換行會對齊縮排、**粗體**、`code` 用等寬字體、程式碼區塊縮排。
 - 單擊會等系統的雙擊時間過了才動作，所以雙擊不會先觸發一次單擊。
 - 快捷鍵用 `RegisterEventHotKey`，不需要「輔助使用」權限。Esc 只在錄音時才攔，其他時候終端機照常收得到。`--hotkey ctrl+opt+v` 可以改按住說話的按鍵（`cmd`、`opt`、`ctrl`、`shift` 加上一個字母、數字、`space`、`return`、`tab` 或 `f1`–`f12`；`none` 關閉）。macOS 已經用掉 ⌃Space、⌃⌥Space、⌘Space 和 ⌥⌘Space，所以預設是 `⌃⌥V`。
 - 是否離開是看系統提供的「距離上次輸入的秒數」（不需要「輸入監控」權限，也不記錄按鍵）。`--away 秒數` 改掉預設的 120 秒；`--away 0` 關閉。
-- 送出回覆和「叫到最前面」需要 `DODECA_RICH`（iTerm2 session id 存在 msg 檔裡），第一次使用時還要允許面板控制 iTerm2（系統設定 > 隱私權與安全性 > 自動化）。
+- 送出回覆和「叫到最前面」需要 `VIGIL_RICH`（iTerm2 session id 存在 msg 檔裡），第一次使用時還要允許面板控制 iTerm2（系統設定 > 隱私權與安全性 > 自動化）。
 
 **語音回報。** 回報開頭會說來源：回覆是「notes 完成了：…」，需要你核准時是「notes 需要你：…」加上權限請求的內容。同一時間只有一個 session 在說話，其他的排隊，權限請求會插到隊伍最前面。
 
@@ -203,12 +201,12 @@ sh mac/build.sh
 - 找不到窗格時，核心會變成紅色（ERROR）並說明原因。
 - 錄音用系統的輸入裝置，但如果那是虛擬裝置（BlackHole、Loopback、Soundflower、Teams 或 Zoom 的音訊裝置），它傳的是別的 App 的聲音而不是你的聲音，這時會改用內建麥克風。`--mic 名稱` 可以用名稱的一部分指定裝置。錄到完全沒有聲音時，核心會說它用的是哪個裝置。
 - `--debug` 會把語音的每個步驟寫到 stderr（裝置、音量、辨識錯誤、送出結果；不會寫你說的內容）。
-- 送出需要 `DODECA_RICH`（session 的 `ITERM_SESSION_ID` 存在 msg 檔裡）。用的是 AppleScript，第一次會問能不能控制 iTerm2；不允許的話會改用 iTerm2 的 Python API（`pane_api.py send`）。
+- 送出需要 `VIGIL_RICH`（session 的 `ITERM_SESSION_ID` 存在 msg 檔裡）。用的是 AppleScript，第一次會問能不能控制 iTerm2；不允許的話會改用 iTerm2 的 Python API（`pane_api.py send`）。
 - `--demo` 不會打字到任何地方，核心只會說它本來會送出什麼。
 
 **語音功能的一次性設定：**
 
-1. `sh mac/build.sh`，然後用 `--voice` 啟動面板（`open_pane.sh` 開的窗格用 `DODECA_PANE_ARGS="--voice"`）。
+1. `sh mac/build.sh`，然後用 `--voice` 啟動面板（`open_pane.sh` 開的窗格用 `VIGIL_PANE_ARGS="--voice"`）。
 2. `python3 install_hooks.py --rich --apply`，保留回覆和 iTerm2 session id（之後新開的 Claude Code session 才會生效）。
 3. 第一次按住核心時，macOS 會問麥克風和語音辨識權限：兩個都允許，然後再按住一次。
 4. 第一次送出回覆或選「Bring to front」時，macOS 會問 Vigil 能不能控制 iTerm2：允許（系統設定 > 隱私權與安全性 > 自動化）。
@@ -225,13 +223,13 @@ sh mac/build.sh
 ```sh
 sudo apt install mingw-w64      # 只要一次，在 WSL 裡
 sh win/build.sh                 # 產生 vigil-panel.exe 和啟動腳本 ./vigil-win
-./vigil-win                     # 在 WSL 裡：用 ~/.dodeca-core/events.jsonl 啟動面板；Ctrl-C 結束
+./vigil-win                     # 在 WSL 裡：用 ~/.vigil/events.jsonl 啟動面板；Ctrl-C 結束
 ./vigil-win --demo              # 假的 session
 ```
 
 預設是單核心模式（Mac 上要加 `--single`）：焦點 session 是一顆大核心，其他 session 以小衛星繞著它，放在一個小小的半透明視窗裡，永遠在最上層，不會搶焦點，點在核心以外的地方會傳到後面的視窗。核心會像 macOS 的單核心模式一樣跟著消息走（先是需要你的 session，否則是最新回覆的那個）；點一下核心，或用右鍵選單的 **Session**，可以把它固定住。關掉 **Show other sessions**（或 `--no-others`）就只剩大核心。`--all` 或 **Ctrl+Alt+C** 切換成所有核心：每顆核心是自己的小視窗，一開始排在右緣一列，每顆都可以各自放到任何地方。
 
-Alt 等於 Mac 上的 ⌥：**Alt 拖曳**可以把整團（單核心）或那一顆核心（所有核心）移到螢幕任何地方；**Alt 點一下**把它拿起來，下一次在任何地方點擊就放下。位置依螢幕大小記在 `~/.dodeca-core/panel-position-win.json`（每顆核心依資料夾名稱），選單裡的 **Reset position(s)** 會把它們忘掉。
+Alt 等於 Mac 上的 ⌥：**Alt 拖曳**可以把整團（單核心）或那一顆核心（所有核心）移到螢幕任何地方；**Alt 點一下**把它拿起來，下一次在任何地方點擊就放下。位置依螢幕大小記在 `~/.vigil/panel-position-win.json`（每顆核心依資料夾名稱），選單裡的 **Reset position(s)** 會把它們忘掉。
 
 指著核心一下會出現對話框：名稱和狀態，接著是像 Claude Code 那樣的最近幾輪對話（要用 `--rich` 的 hook）：每個提示在自己的底色帶裡，然後是步驟（`● Bash(make -j)`，正在執行的那一步是橘色；做完的一輪把步驟收成一行），回覆，需要你的時候最後是權限通知。它會打開在最新的提示，Claude 工作時則跟著最底下；往上捲可以看前面幾輪，正在看的那一輪的提示會釘在頂端成一行（指著它看全文，點它回到那裡）。回覆的排版和 Claude Code 一樣（表格有完整格線，格子裡也能有粗體、斜體和 `code`）。它會放在叢集旁邊第一個不會蓋到任何核心（包括小核心）的位置：左、右、下或上；叢集在螢幕中間時先試下方和上方。指著核心停 2 秒，或拿著它走，會畫出對焦框（六種樣式，跟 Mac 一樣）。一段時間沒有輸入（預設 2 分鐘），每顆核心都顯示 STANDBY，需要你的那顆除外；回來時，有未讀回覆的會閃一下。滑鼠滾輪在核心上可以捲動對話框裡較長的回覆，核心也會跟著轉，之後就照你送出的方向繼續轉，連續捲得越久轉得越快；橫向捲動（觸控板的兩指滑動）會讓它繞另一個軸轉，所以用滑動可以把它往任何方向轉。
 
@@ -250,7 +248,7 @@ Claude 啟動的子代理會以自己的衛星出現，名稱是它的類型（`
 - **Shortcuts**：在任何程式裡都能用的快捷鍵：單核心 / 所有核心（Ctrl+Alt+C）、顯示或隱藏 Vigil（Ctrl+Alt+V）、回覆主核心（Ctrl+Alt+R）、打開設定（未設定）；點一下再按新的組合鍵（Esc 取消，Delete 清除）；被其他程式占用的會標出來。移動（拖曳）或搬動（點一下）核心時要按住的鍵：Alt、Ctrl 或 Shift。回覆列用 Enter 還是 Ctrl+Enter 送出。回覆列也接受命令列的按鍵：沒有選取文字時 Ctrl+C 清空整行（有選取時是複製），Ctrl+W 或 Ctrl+Backspace 刪掉游標前的一個字詞，Ctrl+U 刪掉游標前的全部。
 - **Performance**：流暢度，多久畫一次（Saver、Balanced、Smooth、Max）。
 
-每頁都有自己的 **Reset**；側欄最下面的 **Reset everything** 會回到啟動選項。選了立刻生效，記在 `~/.dodeca-core/panel-settings-win.json`，在重設之前優先於啟動選項；按 Esc 關閉視窗。
+每頁都有自己的 **Reset**；側欄最下面的 **Reset everything** 會回到啟動選項。選了立刻生效，記在 `~/.vigil/panel-settings-win.json`，在重設之前優先於啟動選項；按 Esc 關閉視窗。
 
 右鍵 > **Smoothness** 設定每顆核心多久重畫一次：**Saver**（最省 CPU）、**Balanced**（預設）、**Smooth**（忙碌時每秒 60 張）或 **Max**（螢幕的更新率）。不論選哪個，移動中的核心都跟著螢幕的節奏走：面板依螢幕的更新率計時（有東西在動時每秒 60 次），漂浮的衛星不會再一頓一頓。Settings > Performance 有同樣的預設，下面還能分別設定每種時刻每秒畫幾張（閒置、思考、忙碌、睡著或離開、拿在手上；2 到 120，或 Max，也就是螢幕的更新率）：動了任何一個就變成你自己的 Custom。**Drawing threads** 選擇幾個執行緒一起畫大核心（Auto：大約每個實體核心一個）；**Black hole drawn on** 選擇由 GPU（真正追蹤光線的版本）或 CPU 繪製黑洞（CPU 畫出 GPU 版本的中心：清晰的陰影、光環和被彎曲的星星，氣體則是沿軌道運行的光點：任何大小都清晰，流暢度接近 GPU）；沒有可用的 GPU 時會說明原因，改由 CPU 繪製。啟動時可用 `--smooth NAME` 指定；`--stats` 每 5 秒把 tick、畫面數和它們的花費寫到事件檔旁的 `panel-stats.txt`。黑洞在有 GPU 時由 GPU 繪製（OpenGL，Windows 內建）：CPU 花費約只有原本的六分之一；沒有 GPU（遠端桌面、部分虛擬機）或加上 `--no-gpu` 時改由 CPU 繪製。每個螢幕都用它自己的縮放（125%、100%……）來畫，所以核心在螢幕之間搬動時一樣清晰、一樣大小。
 
@@ -270,10 +268,10 @@ python3 install_hooks.py --pane --apply    # 之後每次開 Claude Code 自動�
 
 加了 `--pane` 安裝之後，`SessionStart` 會多執行 `open_pane.sh`：把 Claude Code 所在的窗格往右切一塊跑 `vigil --pane --exit-when-empty`，縮到 34 個字元寬，再把鍵盤焦點還給 Claude Code。已經有窗格開著就不會再開；最後一個 session 結束 15 秒後窗格自己關掉。
 
-- 窗格寬度：環境變數 `DODECA_PANE_COLS`（預設 34）。
+- 窗格寬度：環境變數 `VIGIL_PANE_COLS`（預設 34）。
 - 縮窄窗格要靠 iTerm2 的 Python API（`pane_api.py`）：AppleScript 能切窗格，但在全螢幕視窗裡不能調寬度。需要兩個一次性步驟：在 iTerm2 的 Settings > General > Magic 勾選 Enable Python API；再把腳本複製到 iTerm2 找腳本的資料夾：`mkdir -p ~/Library/Application\ Support/iTerm2/Scripts && cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py`（之後 `open_pane.sh` 會自動保持這份複本是最新的）。沒設定的話窗格會是一半寬，可以自己拖分隔線，面板會跟著變。
-- 除錯：`DODECA_PANE_DEBUG=1 sh open_pane.sh` 會在前景執行並顯示 iTerm2 的回應。
-- 額外參數：環境變數 `DODECA_PANE_ARGS`，例如 `"--shape geo2 --res 1200"`。
+- 除錯：`VIGIL_PANE_DEBUG=1 sh open_pane.sh` 會在前景執行並顯示 iTerm2 的回應。
+- 額外參數：環境變數 `VIGIL_PANE_ARGS`，例如 `"--shape geo2 --res 1200"`。
 - 第一次執行時 macOS 會問是否允許控制 iTerm2，要按允許。
 - 不用自動開的話，自己切一個窗格跑 `./vigil --pane` 也一樣。
 
@@ -306,7 +304,7 @@ python3 install_hooks.py --pane --apply    # 之後每次開 Claude Code 自動�
 --fps N           每秒最多幾格（預設 20；平靜的 session 會自動降低重畫頻率）
 --glow X          光暈強度（預設 1.0）
 --core X          核心半徑，占外殼內切球半徑的比例（預設 0.35）
---events PATH     事件檔（預設 ~/.dodeca-core/events.jsonl，或環境變數 DODECA_EVENTS）
+--events PATH     事件檔（預設 ~/.vigil/events.jsonl，或環境變數 VIGIL_EVENTS）
 --snapshot FILE   輸出一張 demo 畫面成 PPM 檔後結束（搭配 --at 秒數、--size 寬x高）
 ```
 
@@ -316,7 +314,7 @@ python3 install_hooks.py --pane --apply    # 之後每次開 Claude Code 自動�
 <summary><b>架構</b></summary>
 
 ```
-Claude Code ──hook.py──▶ ~/.dodeca-core/events.jsonl ──tail──▶ 狀態機 ──▶ 軟體渲染 ──▶ 終端機
+Claude Code ──hook.py──▶ ~/.vigil/events.jsonl ──tail──▶ 狀態機 ──▶ 軟體渲染 ──▶ 終端機
 ```
 
 | 檔案 | 內容 |

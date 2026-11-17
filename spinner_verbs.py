@@ -11,7 +11,18 @@ import os
 import re
 import sys
 
-PATH = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events.jsonl"))
+def data_dir():
+    """~/.vigil; the old ~/.dodeca-core is moved there the first time (the name before Vigil)."""
+    new, old = os.path.expanduser("~/.vigil"), os.path.expanduser("~/.dodeca-core")
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:
+            os.rename(old, new)
+        except OSError:  # (another hook moved it at the same moment: fine)
+            return new if os.path.exists(new) else old
+    return new
+
+
+PATH = os.environ.get("VIGIL_EVENTS") or os.environ.get("DODECA_EVENTS") or os.path.join(data_dir(), "events.jsonl")
 OUT = os.path.join(os.path.dirname(PATH), "claude-verbs.txt")
 WORD = re.compile(r"^[A-Z][A-Za-z'\u2019-]+$")
 
