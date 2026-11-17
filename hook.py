@@ -40,6 +40,7 @@ TURNS = 5                  # turns kept: prompt, reply and steps; the last is th
 STEPS = 16                 # steps kept per turn, Claude's words between them too (the count and the tally keep the rest)
 MSG_BUDGET = 24000         # the oldest turns go first when the file grows past this
 STALE = 24 * 3600          # msg files of sessions that never sent SessionEnd
+LIVE_FOR = 600             # a turn with no step for this long (no Stop came: an error) takes no more of your messages
 TRANSCRIPT_TAIL = 262144   # how much of the transcript the fallback reads, from the end
 
 
@@ -199,30 +200,61 @@ def notice_step(p):
     return ["@notice", " ".join((m.group(1) if m else "background task").split())[:80]]
 
 
-def latest_said(path):
-    """Claude's newest words in the turn going on (the text before a tool call, as the terminal shows it), or ""."""
+def tail_entries(path):
+    """The transcript's last entries, newest first (its tail only)."""
     if not path or not os.path.isfile(path):
-        return ""
+        return []
     with open(path, "rb") as f:
         f.seek(max(0, os.path.getsize(path) - TRANSCRIPT_TAIL))
         lines = f.read().decode("utf-8", "replace").splitlines()
+    out = []
     for line in reversed(lines):
         try:
             e = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(e, dict) or e.get("isSidechain") or e.get("isMeta"):
+        if isinstance(e, dict) and not e.get("isSidechain") and not e.get("isMeta") and isinstance(e.get("message"), dict):
+            out.append(e)
+    return out
+
+
+def turn_scan(path, sent=()):
+    """Since your prompt (messages you sent during the turn, `sent`, do not end it): Claude's newest words ("" if none
+    yet) and the output tokens of its messages (a message's usage is repeated on each of its blocks: counted once)."""
+    said, tok = "", {}
+    for e in tail_entries(path):
+        m = e["message"]
+        if e.get("type") == "user":
+            p = prompt_text(m)
+            if p and p[:300] not in sent:
+                break  # back to your prompt
             continue
-        m = e.get("message")
-        if not isinstance(m, dict):
+        if e.get("type") != "assistant":
             continue
-        if e.get("type") == "user" and prompt_text(m):
-            return ""  # back to your prompt: nothing said since
-        if e.get("type") == "assistant" and isinstance(m.get("content"), list):
-            t = "\n".join(x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text").strip()
-            if t:
-                return t
-    return ""
+        u = m.get("usage")
+        if isinstance(u, dict) and isinstance(u.get("output_tokens"), int):
+            k = m.get("id") or id(m)
+            tok[k] = max(tok.get(k, 0), u["output_tokens"])
+        if not said and isinstance(m.get("content"), list):
+            said = "\n".join(x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text").strip()
+    return said, sum(tok.values())
+
+
+def interrupted(path, p):
+    """Whether the turn before prompt p was stopped by you (Esc): the transcript's "[Request interrupted" line comes
+    after its last prompt."""
+    for e in tail_entries(path):
+        if e.get("type") != "user":
+            continue
+        c = e["message"].get("content")
+        if isinstance(c, list):
+            c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+        if isinstance(c, str) and c.strip().startswith("[Request interrupted"):
+            return True
+        q = prompt_text(e["message"])
+        if q and q != p:
+            return False
+    return False
 
 
 def backfill(path):
@@ -292,8 +324,22 @@ def on_turn(sid, ev, d):
             if step and turns:
                 s = turns[-1].get("s") if isinstance(turns[-1].get("s"), list) else []
                 turns[-1]["s"] = (s + [step])[-STEPS:]
-        elif not (turns and turns[-1].get("p") == p and not turns[-1].get("r")):  # (already in the transcript)
-            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}})
+        elif turns and turns[-1].get("p") == p and not turns[-1].get("r"):
+            turns[-1].setdefault("t0", int(time.time()))  # (already in the transcript: read in by the first fill)
+        elif turns and turns[-1].get("t0") and not turns[-1].get("d") and not turns[-1].get("r") \
+                and time.time() - (turns[-1].get("ts") or turns[-1]["t0"]) < LIVE_FOR \
+                and not interrupted(d.get("transcript_path"), p):
+            t = turns[-1]  # sent while the turn runs: a line of that turn, as the terminal shows it
+            s = t.get("s") if isinstance(t.get("s"), list) else []
+            t["s"] = (s + [["@you", p[:300]]])[-STEPS:]
+            t["you"] = (t.get("you") or [])[-7:] + [p[:300]]
+            update_msg(sid, {"turns": fit(turns)})
+            return
+        else:
+            last = turns[-1] if turns else None
+            if last and not last.get("n") and not last.get("r") and p.startswith(last.get("p") or "\0"):
+                turns.pop()  # stopped before any step and sent again, longer: the new one only
+            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}, "t0": int(time.time())})
         fields["run"] = None
     else:
         if not turns:
@@ -303,14 +349,18 @@ def on_turn(sid, ev, d):
         if ev == "PreToolUse":
             step = [tool, step_detail(tool, d.get("tool_input"))]
             s = t.get("s") if isinstance(t.get("s"), list) else []
-            try:  # what Claude said before this call, once
-                said = one_line(latest_said(d.get("transcript_path")), 300)
+            try:  # what Claude said before this call (once), and the turn's tokens so far
+                said, tok = turn_scan(d.get("transcript_path"), list(t.get("you") or []))
+                said = one_line(said, 300)
+                if tok > int(t.get("k") or 0):
+                    t["k"] = tok
             except Exception:
                 said = ""
             if said and not any(x[0] == "@say" and x[1] == said for x in s if isinstance(x, list) and len(x) > 1):
                 s = s + [["@say", said]]
             t["s"] = (s + [step])[-STEPS:]
             t["n"] = int(t.get("n") or 0) + 1
+            t["ts"] = int(time.time())
             c = t.get("c") if isinstance(t.get("c"), dict) else {}
             c[tool] = int(c.get(tool) or 0) + 1
             t["c"] = c
@@ -319,6 +369,7 @@ def on_turn(sid, ev, d):
             fields["run"] = None
         elif ev == "Stop":
             t["r"] = d.get("_reply", "")[:MAX_TEXT]
+            t["d"] = 1
             fields["run"] = None
     fields["turns"] = fit(turns)
     update_msg(sid, fields)

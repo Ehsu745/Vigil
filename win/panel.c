@@ -46,6 +46,7 @@
 #include <ctype.h>
 #include "../src/vigil.h"
 #include "gpu.h"
+#include <time.h>
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
@@ -2043,7 +2044,7 @@ static const char *js_next(const char **c) {
 /* The last few turns as Claude Code's terminal shows them: the prompt, its steps (a tool and what it works on),
  * the reply; the hook keeps up to 5 in "turns" (the last one is going on), and the step running now in "run". */
 enum { MT_MAX = 5, MT_STEPS = 16 }; /* (hook.py's TURNS, STEPS) */
-typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; } MTurn;
+typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; long long t0; long k; } MTurn; /* t0: when it began (Unix seconds), k: Claude's output tokens so far */
 static MTurn g_mt[MT_MAX];
 static int g_mt_n;
 static char *g_run_tool, *g_run_what;
@@ -2071,6 +2072,7 @@ static void mt_load(const char *buf) {
         t->p = json_unq(js_key(all[i], "p"));
         t->r = json_unq(js_key(all[i], "r"));
         t->n = js_int(js_key(all[i], "n"));
+        { const char *v = js_key(all[i], "t0"); t->t0 = v ? _atoi64(v) : 0; v = js_key(all[i], "k"); t->k = v ? atol(v) : 0; }
         const char *s = js_key(all[i], "s"), *st;
         if (s && *s == '[')
             for (const char *c = s; (st = js_next(&c)) && t->ns < MT_STEPS;) {
@@ -2133,6 +2135,15 @@ static void msg_load(const Session *s, double now) {
                 free(g_mt[1].r);
                 g_mt[1].r = i == 1 ? NULL : _strdup(DEMO_REPLY[i]);
                 if (i == 1) { g_run_tool = _strdup("Bash"); g_run_what = _strdup("pytest -q tests/test_lock.py"); }
+            }
+            if (i == 1) { /* the one at work, as the terminal shows a turn going on: its words, a message sent meanwhile, the running line */
+                mt_free();
+                snprintf(demo, sizeof demo, "{\"turns\": [{\"p\": \"Run the tests first\", \"r\": \"All 42 pass; two are slow (over 3 s).\", \"n\": 2, \"c\": {\"Bash\": 2}},"
+                         " {\"p\": \"%s\", \"n\": 4, \"t0\": %lld, \"k\": 2140, \"s\": [[\"@say\", \"Let me find where the lock is taken.\"], [\"Grep\", \"acquire\"], [\"Read\", \"lock.py\"],"
+                         " [\"@you\", \"also check the timeout path\"], [\"@say\", \"Good point; the timeout path skips the release.\"], [\"Edit\", \"lock.py\"], [\"Bash\", \"pytest -q tests/test_lock.py\"]]}]}",
+                         DEMO_PROMPT[i], (long long)time(NULL) - 65);
+                mt_load(demo);
+                g_run_tool = _strdup("Bash"); g_run_what = _strdup("pytest -q tests/test_lock.py");
             }
         }
         return;
@@ -2623,6 +2634,13 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
                 y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_MARK, 0) + lh;
                 blank = 0; marked = 0;
+            } else if (kind == 7) { /* the running line: a turning star, the words in the accent colour */
+                static const wchar_t STAR[] = L"\x00B7\x2722\x2733\x2736\x273B\x273D\x273B\x2736\x2733\x2722";
+                if (!blank) y += gap / 2;
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
+                lay_put(lead, y + asc, F_BODY, MD_RUN, STAR + (time(NULL) % 10), 1, text_w(dc, F_BODY, STAR + (time(NULL) % 10), 1), 0);
+                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_RUN, 0) + lh;
+                blank = 0; marked = 0;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
@@ -3085,7 +3103,9 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 
 /* The conversation for the box, as chat_layout reads it: each turn's prompt (lines marked 1), its steps (2, the one
  * running now 3; a finished turn has them in one line, 4), its reply as Markdown, a rule between turns (5), and
- * the permission notice at the end while it waits (6). NULL when the hook keeps no turns (an older hook). */
+ * the permission notice at the end while it waits (6); in a turn going on, Claude's words (8), the steps under them
+ * folded (9), a message you sent meanwhile (1 again) and the running line last (7). NULL when the hook keeps no turns
+ * (an older hook). */
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
@@ -3129,6 +3149,27 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
     line[0] = (char)toupper((unsigned char)line[0]);
     conv_put(o, 9, line, 1);
 }
+/* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
+ * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step) */
+static void conv_running(char *o, size_t n, const MTurn *t) {
+    static const char *VERB[] = {"Thinking", "Pondering", "Musing", "Brewing", "Crafting", "Mulling", "Tinkering", "Weaving",
+                                 "Sketching", "Forging", "Assembling", "Untangling", "Distilling", "Plotting", "Shaping", "Polishing",
+                                 "Sifting", "Tracing", "Charting", "Composing", "Calibrating", "Puzzling", "Gathering", "Considering",
+                                 "Whittling", "Simmering", "Kneading", "Mapping", "Tuning", "Spinning"};
+    unsigned hv = (unsigned)t->t0 * 2654435761u;
+    for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
+    const char *v = VERB[hv % (sizeof VERB / sizeof *VERB)];
+    long long now = (long long)time(NULL), el = t->t0 && now > t->t0 ? now - t->t0 : -1;
+    char tm[24] = "", tk[24] = "";
+    if (el >= 3600) snprintf(tm, sizeof tm, "%lldh %lldm", el / 3600, el / 60 % 60);
+    else if (el >= 60) snprintf(tm, sizeof tm, "%lldm %llds", el / 60, el % 60);
+    else if (el >= 0) snprintf(tm, sizeof tm, "%llds", el);
+    if (t->k >= 1000) snprintf(tk, sizeof tk, "\xE2\x86\x93 %.1fk tokens", t->k / 1000.0);
+    else if (t->k > 0) snprintf(tk, sizeof tk, "\xE2\x86\x93 %ld tokens", t->k);
+    if (tm[0] && tk[0]) snprintf(o, n, "%s\xE2\x80\xA6 (%s \xC2\xB7 %s)", v, tm, tk);
+    else if (tm[0] || tk[0]) snprintf(o, n, "%s\xE2\x80\xA6 (%s)", v, tm[0] ? tm : tk);
+    else snprintf(o, n, "%s\xE2\x80\xA6", v);
+}
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
 static void conv_steps(char **o, const MTurn *t, int st) {
@@ -3143,10 +3184,11 @@ static void conv_steps(char **o, const MTurn *t, int st) {
         if (k == end) break;
         if (!strcmp(t->tool[k], "@say")) conv_put(o, 8, t->what[k] ? t->what[k] : "", 1);
         else if (!strcmp(t->tool[k], "@notice")) { snprintf(line, sizeof line, "Background task: %s", t->what[k] ? t->what[k] : ""); conv_put(o, 9, line, 1); }
+        else if (!strcmp(t->tool[k], "@you")) conv_put(o, 1, t->what[k] ? t->what[k] : "", 1); /* a message you sent while it ran */
         k0 = k + 1;
     }
     if (run) { snprintf(line, sizeof line, "%s\t%s", t->tool[t->ns - 1], t->what[t->ns - 1] ? t->what[t->ns - 1] : ""); conv_put(o, 3, line, 1); }
-    if (!t->ns && (st == ST_THINK || st == ST_WORK)) conv_put(o, 3, "Thinking", 1);
+    if (st == ST_THINK || st == ST_WORK) { conv_running(line, sizeof line, t); conv_put(o, 7, line, 1); }
 }
 static char *chat_conv(int st) {
     if (!g_mt_n) return NULL;
