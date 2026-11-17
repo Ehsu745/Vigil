@@ -100,8 +100,8 @@ static char g_pop_sid[64];           /* the session whose box popped open, until
 static double g_pop_until, g_pop_seen; /* (g_pop_seen: the newest reply's burst_at already looked at) */
 static int g_turns_all;              /* Settings > Chat > Turns: the box opens on every turn kept, else the latest only */
 static int g_steps_mode;             /* Settings > Chat > Steps: 0 folded to a line, 1 every step, 2 none */
-static int g_push_need;              /* Settings > Chat > Push: notches past an edge that switch (3, 7 or 12; set with the chat box) */
-static const int PUSH_NOTCHES[3] = {3, 7, 12};
+static int g_push_need;              /* Settings > Chat > Push: notches past an edge that switch (PUSH_STOPS; set with the chat box) */
+static const int PUSH_STOPS[13] = {4, 6, 8, 10, 12, 15, 18, 20, 24, 28, 32, 36, 40};
 static int g_fuse_at;                /* Settings > Chat > Fuse: where the fuse sits beside the box, 0 bottom right, 1 top right */
 static int g_chat_bg;                /* Settings > Box colour: the chat box's background, one of CHAT_BGS, or 5: g_chat_custom */
 static unsigned g_chat_custom = 0x2A2F3A; /* the colour picked in the palette window (0xRRGGBB) */
@@ -617,7 +617,7 @@ static void settings_load(void) {
     if (json_num(buf, "chatPop", &v)) g_chat_pop = v != 0;
     if (json_num(buf, "chatTurns", &v)) g_turns_all = v != 0;
     if (json_num(buf, "chatSteps", &v) && v >= 0 && v <= 2) g_steps_mode = (int)v;
-    if (json_num(buf, "chatPush", &v) && v >= 1 && v <= 30) g_push_need = (int)v;
+    if (json_num(buf, "chatPush", &v) && v >= 1 && v <= 60) g_push_need = (int)v;
     if (json_num(buf, "fuseAt", &v) && v >= 0 && v <= 1) g_fuse_at = (int)v;
     if (json_num(buf, "tipMono", &v)) g_chat_mono = v != 0;
     if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_chat_bg = (int)v;
@@ -2252,7 +2252,7 @@ static double g_halt_until;          /* scrolled into the top or the end: on tha
 static int g_halt_dir;               /* (that way: 1 up, -1 down) */
 static int g_halt_flow;              /* a push just let the earlier turns in or out: the rest of that scroll does nothing (till a 0.2 s pause) */
 static double g_last_notch;          /* (the last notch over the box: a pause starts a new scroll) */
-static int g_push_need = HIST_PUSH;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
+static int g_push_need = 20;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
 static int g_gap_lit;                /* the fuse's beads lit: one a notch */
 static double g_bead_t[8];           /* when each bead lit (it pops, then settles) */
 static double g_fuse_done;           /* when a push did what it does (the star turns, or it went out), then the fuse fades */
@@ -5618,7 +5618,7 @@ static int set_current(int row) {
         case R_POP: return g_chat_pop;
         case R_TURNS: return g_turns_all;
         case R_STEPS: return g_steps_mode;
-        case R_PUSH: return g_push_need <= 4 ? 0 : g_push_need >= 10 ? 2 : 1;
+        case R_PUSH: { int k = 0; for (int i = 1; i < 13; i++) if (abs(PUSH_STOPS[i] - g_push_need) < abs(PUSH_STOPS[k] - g_push_need)) k = i; return k; }
         case R_FUSEAT: return g_fuse_at;
         case R_CHATFONT: return !g_chat_mono;
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
@@ -5879,7 +5879,7 @@ static void set_choose(int row, int val) {
     case R_POP: g_chat_pop = val; break;
     case R_TURNS: g_turns_all = val; chat_hide(); break;
     case R_STEPS: g_steps_mode = val; chat_hide(); break;
-    case R_PUSH: if (val >= 0 && val < 3) g_push_need = PUSH_NOTCHES[val]; break;
+    case R_PUSH: if (val >= 0 && val < 13) g_push_need = PUSH_STOPS[val]; break;
     case R_FUSEAT: g_fuse_at = val; chat_hide(); break;
     case R_CHATFONT: g_chat_mono = !val; chat_refont(); break;
     case R_TEXT: g_font = FONTS[val]; chat_refont(); break;
@@ -6222,7 +6222,7 @@ static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAM
                      *CHAT_ROWS_N[14] = {L"8", L"12", L"16", L"20", L"24", L"28", L"32", L"36", L"40", L"44", L"48", L"52", L"56", L"60"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
                      *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[6] = {L"Auto", L"Left", L"Right", L"Below", L"Above", L"Middle"}, *PAUSE_NAMES[4] = {L"Instant", L"0.3 s", L"0.6 s", L"1 s"},
-                     *POP_NAMES[2] = {L"On hover", L"Pops open"}, *TURN_NAMES[2] = {L"Latest", L"All kept"}, *STEP_NAMES[3] = {L"Folded", L"Every step", L"Hidden"}, *PUSH_NAMES[3] = {L"Light", L"Normal", L"Firm"}, *FUSE_NAMES[2] = {L"Bottom right", L"Top right"},
+                     *POP_NAMES[2] = {L"On hover", L"Pops open"}, *TURN_NAMES[2] = {L"Latest", L"All kept"}, *STEP_NAMES[3] = {L"Folded", L"Every step", L"Hidden"}, *PUSH_N[13] = {L"4", L"6", L"8", L"10", L"12", L"15", L"18", L"20", L"24", L"28", L"32", L"36", L"40"}, *FUSE_NAMES[2] = {L"Bottom right", L"Top right"},
                      *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
                      *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *BACKDROP_NAMES[3] = {L"Off", L"On", L"Auto"}, *BDW_NAMES[4] = {L"Thin", L"Medium", L"Thick", L"Heavy"}, *BDA_NAMES[4] = {L"Light", L"Medium", L"Strong", L"Max"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
 static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
@@ -6272,7 +6272,7 @@ static int page_sections(int pg, SSec *s) {
         ROW(3, RK_SEG, R_POP, 2, L"New reply", L"Pops open: beside its core for 10 s", POP_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past the top or the end to switch", TURN_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
-        ROW(5, RK_SEG, R_PUSH, 3, L"Push", L"notches past the top or end: 3, 7 or 12", PUSH_NAMES, NULL, NULL, NULL);
+        ROW(5, RK_SLIDER, R_PUSH, 13, L"Push", L"notches past an edge to fill it", PUSH_N, NULL, NULL, NULL);
         ROW(5, RK_SEG, R_FUSEAT, 2, L"Fuse", L"where its beads fill, beside the box", FUSE_NAMES, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
