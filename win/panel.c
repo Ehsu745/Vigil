@@ -2923,38 +2923,32 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
     }
 }
 
-/* the running line, as the terminal draws it: the star turning through its shapes (Segoe UI Symbol: other faces put in
- * the boxed emoji), the word in the accent with a lighter band sweeping across it, then the time and the tokens */
+/* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back (a plain * where ✳ would be: that
+ * one comes out as an emoji), the word in bold in the accent with a few letters in a lighter shade stepping across it
+ * and on 10 letters past each end, then the time and the tokens */
 static void spin_paint(HDC dc, int x0, int base) {
-    static const wchar_t STAR[] = L"\x00B7\x2722\x2733\x2736\x273B\x273D\x273B\x2736\x2733\x2722";
-    static HFONT sym; static LONG sym_h;
-    LOGFONTW lf;
-    GetObjectW(g_chat_bf, sizeof lf, &lf);
-    if (!sym || sym_h != lf.lfHeight) {
-        if (sym) DeleteObject(sym);
-        sym = CreateFontW(lf.lfHeight * 9 / 10, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
-        sym_h = lf.lfHeight;
-    }
+    static const wchar_t STAR[] = L"\x00B7\x2722*\x2736\x273B\x273D\x273D\x273B\x2736*\x2722\x00B7";
     double now = wall();
     COLORREF acc = tint(MD_RUN);
     int ar = GetRValue(acc), ag = GetGValue(acc), ab = GetBValue(acc);
+    COLORREF shim = RGB(min(255, ar + 20), min(255, ag + 40), min(255, ab + 40)); /* (claude 215,119,87 → claudeShimmer 235,159,127) */
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
-    SelectObject(dc, sym);
+    SelectObject(dc, g_chat_bf);
     SetTextColor(dc, acc);
-    const wchar_t *st = STAR + (int)(now / 0.12) % 10;
+    const wchar_t *st = STAR + (int)(now / 0.12) % 12;
     SIZE sz; GetTextExtentPoint32W(dc, st, 1, &sz);
     TextOutW(dc, x0 + max(0, (g_spin_x - sz.cx) / 2), base, st, 1);
-    SelectObject(dc, g_chat_bf);
-    int x = x0 + max(g_spin_x, (int)sz.cx + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb); /* (a wide star: the word after it) */
-    float pos = (float)fmod(now / 0.09, n + 14) - 5; /* the band's middle, in letters: across the word, then a pause */
+    SelectObject(dc, lay_font(F_BOLD));
+    int x = x0 + max(g_spin_x, (int)sz.cx + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
+    int at = (int)(now / 0.1) % (n + 1 + 20) - 10; /* the lighter letters: three, from here */
     for (int i = 0; i <= n; i++) {
         wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
-        float k = fmaxf(0, 1 - fabsf(i - pos) / 3.0f); k = k * k * (3 - 2 * k) * 0.6f; /* (smooth, toward white) */
-        SetTextColor(dc, RGB(ar + (int)((255 - ar) * k), ag + (int)((255 - ag) * k), ab + (int)((255 - ab) * k)));
+        SetTextColor(dc, i >= at && i < at + 3 ? shim : acc);
         TextOutW(dc, x, base, &ch, 1);
         GetTextExtentPoint32W(dc, &ch, 1, &sz);
         x += sz.cx;
     }
+    SelectObject(dc, g_chat_bf);
     wchar_t tail[64], tm[24] = L"", tk[24] = L"";
     long long el = g_spin_t0 ? (long long)time(NULL) - g_spin_t0 : -1;
     if (el >= 3600) swprintf(tm, 24, L"%lldh %lldm", el / 3600, el / 60 % 60);
@@ -3244,14 +3238,28 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
 /* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
  * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step).
  * Passed on as "word\x1Fstart\x1Ftokens": the box draws it on every frame (spin_paint), so the layout stays as it is */
+static char g_verbs[2][4096];          /* spinnerVerbs from ~/.claude/settings.json, one a line, written by the reader thread into the one not in use */
+static volatile LONG g_verbs_cur, g_verbs_replace;
 static void conv_running(char *o, size_t n, const MTurn *t) {
-    static const char *VERB[] = {"Thinking", "Pondering", "Musing", "Brewing", "Crafting", "Mulling", "Tinkering", "Weaving",
-                                 "Sketching", "Forging", "Assembling", "Untangling", "Distilling", "Plotting", "Shaping", "Polishing",
-                                 "Sifting", "Tracing", "Charting", "Composing", "Calibrating", "Puzzling", "Gathering", "Considering",
-                                 "Whittling", "Simmering", "Kneading", "Mapping", "Tuning", "Spinning"};
+    static const char *VERB[] = {"Thinking", "Working", "Pondering", "Musing", "Brewing", "Cooking", "Crafting", "Building",
+                                 "Tinkering", "Sketching", "Shaping", "Figuring", "Puzzling", "Wondering", "Mulling", "Planning",
+                                 "Exploring", "Digging", "Untangling", "Weaving", "Polishing", "Noodling", "Hatching", "Conjuring"};
     unsigned hv = (unsigned)t->t0 * 2654435761u;
     for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
-    snprintf(o, n, "%s\x1F%lld\x1F%ld", VERB[hv % (sizeof VERB / sizeof *VERB)], t->t0, t->k); /* (not a tab: conv_put keeps nothing under 10) */
+    const char *mine = g_verbs[g_verbs_cur], *v = NULL;
+    int nm = 0, nb = g_verbs_replace && *mine ? 0 : (int)(sizeof VERB / sizeof *VERB);
+    for (const char *c = mine; *c; c++) nm += *c == '\n';
+    char word[48];
+    unsigned k = hv % (unsigned)(nb + nm ? nb + nm : 1);
+    if ((int)k < nb) v = VERB[k];
+    else { /* the k-th of yours */
+        const char *c = mine;
+        for (unsigned i = (unsigned)nb; i < k; i++) c = strchr(c, '\n') + 1;
+        const char *e = strchr(c, '\n');
+        snprintf(word, sizeof word, "%.*s", (int)(e - c), c);
+        v = word;
+    }
+    snprintf(o, n, "%s\x1F%lld\x1F%ld", v ? v : "Thinking", t->t0, t->k); /* (not a tab: conv_put keeps nothing under 10) */
 }
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
@@ -4801,6 +4809,25 @@ static void theme_poll(void) {
             int th = !t ? TH_DARK : strstr(t, "ansi") ? TH_TERM : !strncmp(t, "light", 5) ? TH_LIGHT : strstr(t, "daltonized") ? TH_CBLIND : TH_DARK;
             if (InterlockedExchange(&g_cli_theme, th) != th) g_theme_new = 1;
             free(t); free(buf);
+        }
+        static FILETIME set_seen; /* its settings: spinnerVerbs {"mode": "append" | "replace", "verbs": [...]} for the running line */
+        snprintf(cut, sizeof path - (size_t)(cut - path), "\\.claude\\settings.json");
+        buf = slurp_if_new(path, &set_seen, 4u << 20);
+        if (buf) {
+            const char *sv = js_key(js_ws(buf), "spinnerVerbs"), *arr = sv && *sv == '{' ? js_key(sv, "verbs") : NULL, *e;
+            char *mode = sv && *sv == '{' ? json_unq(js_key(sv, "mode")) : NULL;
+            LONG nxt = !g_verbs_cur;
+            char *o = g_verbs[nxt], *end = o + sizeof g_verbs[0] - 1;
+            if (arr && *arr == '[')
+                for (const char *c = arr; (e = js_next(&c));) {
+                    char *w = json_unq(e);
+                    if (w && *w && strlen(w) < 40 && o + strlen(w) + 1 < end) { o += sprintf(o, "%s\n", w); }
+                    free(w);
+                }
+            *o = 0;
+            InterlockedExchange(&g_verbs_replace, mode && !strcmp(mode, "replace"));
+            InterlockedExchange(&g_verbs_cur, nxt);
+            free(mode); free(buf);
         }
     }
     char la[MAX_PATH]; /* (asked of Windows: a program started from WSL may not have LOCALAPPDATA) */
