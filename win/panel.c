@@ -2934,11 +2934,11 @@ static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col,
     typedef struct { int n; float rot, r0, r1, w0, w1, dot; } Shape;
     static const Shape SH[6] = {
         {0, 0, 0, 0, 0, 0, .22f},           /* · */
-        {4, 0, .10f, .95f, .06f, .30f, 0},  /* ✢ four teardrops */
-        {6, 0, 0, .78f, .17f, .17f, 0},     /* * */
-        {6, 0, 0, 1.0f, .55f, 0, 0},        /* ✶ six points */
-        {8, 0, .22f, .98f, .06f, .26f, 0},  /* ✻ eight teardrops, open in the middle */
-        {8, 0, .12f, 1.0f, .10f, .38f, 0},  /* ✽ eight heavy teardrops */
+        {4, 0, .10f, .95f, .05f, .24f, 0},  /* ✢ four teardrops */
+        {6, 0, 0, .80f, .13f, .13f, 0},     /* * */
+        {6, 0, 0, 1.0f, .46f, 0, 0},        /* ✶ six points */
+        {8, 0, .22f, .98f, .05f, .21f, 0},  /* ✻ eight teardrops, open in the middle */
+        {8, 0, .12f, 1.0f, .08f, .30f, 0},  /* ✽ eight heavy teardrops */
     };
     int S = size < 6 ? 6 : size;
     BITMAPINFO bi = {0};
@@ -2974,11 +2974,11 @@ static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col,
 }
 
 /* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back, the word in bold in the accent with
- * a soft lighter band gliding across it, then the time and the tokens. After 10 s with no step (and no tool running)
+ * three letters in a lighter shade moving across it (right to left, a letter every 200 ms, as the CLI moves them),
+ * the star easing · → ✽ → · every 2 s, then the time and the tokens. After 10 s with no step (and no tool running)
  * it eases toward the theme's error red over the next 10 s, as the CLI does when no tokens come (it counts tokens; the
  * hook only sees steps). Repainted 25 times a second by its own timer */
 static void spin_paint(HDC dc, int x0, int base) {
-    static const int SEQ[12] = {0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0};
     static double stall, at_last;
     double now = wall();
     COLORREF acc = tint(MD_RUN), bgc = chat_bg();
@@ -2996,18 +2996,19 @@ static void spin_paint(HDC dc, int x0, int base) {
     TEXTMETRICW tm;
     SelectObject(dc, g_chat_bf);
     GetTextMetricsW(dc, &tm);
-    int S = (int)(tm.tmAscent * 0.95f);
-    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.42f), S, SEQ[(int)fmod(now / 0.12, 12)],
-              MIXC(base_c, shim, (1 - cos(2 * M_PI * now / 2.0)) / 2), bgc); /* (it breathes between the two shades, every 2 s) */
+    int S = (int)(tm.tmAscent * 0.74f); /* (as tall as a lowercase letter, as the terminal's glyph is) */
+    double wave = (1 - cos(2 * M_PI * fmod(now, 2.0) / 2.0)) / 2; /* 0 → 1 → 0 every 2 s, eased at both ends */
+    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.36f), S, (int)lround(wave * 5), base_c, bgc); /* · → ✽ → · */
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
     SelectObject(dc, lay_font(F_BOLD));
     int x = x0 + max(g_spin_x, S + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
     SIZE sz;
-    double span = n + 1 + 12, at = fmod(now / 0.075, span) - 6; /* the band's middle, in letters, gliding on 6 past each end */
+    long long step = (long long)floor(now / 0.2); /* the lighter letters, as the CLI moves them: one letter every 200 ms, right to left,
+                                                   * from 10 past the end to 10 before the start */
+    int at = (n + 1) + 10 - (int)(step % (n + 1 + 20));
     for (int i = 0; i <= n; i++) {
         wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
-        double d = fabs(i - at) / 2.5, k = d < 1 ? (1 + cos(M_PI * d)) / 2 : 0; /* soft edges: a gradient, not a step */
-        SetTextColor(dc, MIXC(base_c, shim, k));
+        SetTextColor(dc, abs(i - at) <= 1 ? shim : base_c);
         TextOutW(dc, x, base, &ch, 1);
         GetTextExtentPoint32W(dc, &ch, 1, &sz);
         x += sz.cx;
