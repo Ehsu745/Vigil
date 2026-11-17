@@ -46,6 +46,7 @@
 #include <ctype.h>
 #include "../src/vigil.h"
 #include "gpu.h"
+#include <time.h>
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
@@ -2042,8 +2043,8 @@ static const char *js_next(const char **c) {
 
 /* The last few turns as Claude Code's terminal shows them: the prompt, its steps (a tool and what it works on),
  * the reply; the hook keeps up to 5 in "turns" (the last one is going on), and the step running now in "run". */
-enum { MT_MAX = 5, MT_STEPS = 8 };
-typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; } MTurn;
+enum { MT_MAX = 5, MT_STEPS = 16 }; /* (hook.py's TURNS, STEPS) */
+typedef struct { char *p, *r, *tally, *tool[MT_STEPS], *what[MT_STEPS]; int n, ns; long long t0, ts; long k; } MTurn; /* t0: when it began, ts: its last step began or ended (Unix seconds); k: Claude's output tokens so far */
 static MTurn g_mt[MT_MAX];
 static int g_mt_n;
 static char *g_run_tool, *g_run_what;
@@ -2071,6 +2072,7 @@ static void mt_load(const char *buf) {
         t->p = json_unq(js_key(all[i], "p"));
         t->r = json_unq(js_key(all[i], "r"));
         t->n = js_int(js_key(all[i], "n"));
+        { const char *v = js_key(all[i], "t0"); t->t0 = v ? _atoi64(v) : 0; v = js_key(all[i], "ts"); t->ts = v ? _atoi64(v) : 0; v = js_key(all[i], "k"); t->k = v ? atol(v) : 0; }
         const char *s = js_key(all[i], "s"), *st;
         if (s && *s == '[')
             for (const char *c = s; (st = js_next(&c)) && t->ns < MT_STEPS;) {
@@ -2133,6 +2135,15 @@ static void msg_load(const Session *s, double now) {
                 free(g_mt[1].r);
                 g_mt[1].r = i == 1 ? NULL : _strdup(DEMO_REPLY[i]);
                 if (i == 1) { g_run_tool = _strdup("Bash"); g_run_what = _strdup("pytest -q tests/test_lock.py"); }
+            }
+            if (i == 1) { /* the one at work, as the terminal shows a turn going on: its words, a message sent meanwhile, the running line */
+                mt_free();
+                snprintf(demo, sizeof demo, "{\"turns\": [{\"p\": \"Run the tests first\", \"r\": \"All 42 pass; two are slow (over 3 s).\", \"n\": 2, \"c\": {\"Bash\": 2}},"
+                         " {\"p\": \"%s\", \"n\": 4, \"t0\": %lld, \"k\": 2140, \"s\": [[\"@say\", \"Let me find where the lock is taken.\"], [\"Grep\", \"acquire\"], [\"Read\", \"lock.py\"],"
+                         " [\"@you\", \"also check the timeout path\"], [\"@say\", \"Good point; the timeout path skips the release.\"], [\"Edit\", \"lock.py\"], [\"Bash\", \"pytest -q tests/test_lock.py\"]]}]}",
+                         DEMO_PROMPT[i], (long long)time(NULL) - 65);
+                mt_load(demo);
+                g_run_tool = _strdup("Bash"); g_run_what = _strdup("pytest -q tests/test_lock.py");
             }
         }
         return;
@@ -2520,8 +2531,15 @@ void chat_more_fonts(int h, const wchar_t *text, DWORD pitch) {
     g_chat_xf[F_H2] = CreateFontW((int)(h * 1.14f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
 }
 
+/* the running line (chat_conv's marker 7): laid out once, drawn on every frame */
+#define ID_SPIN 77                     /* the chat box's timer while the running line shows */
+static int g_spin_on, g_spin_x, g_spin_y; /* its baseline in the laid-out body, and where its words start */
+static wchar_t g_spin_verb[24];
+static long long g_spin_t0, g_spin_ts; /* the turn's start, its last step (began or ended) */
+static int g_spin_tool;              /* a tool running: never stalled */
+static long g_spin_k;
 static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
-    g_runs_n = 0; g_lay_len = 0; g_lay_w = 0;
+    g_runs_n = 0; g_lay_len = 0; g_lay_w = 0; g_spin_on = 0;
     for (int f = 0; f < F_COUNT; f++) {
         TEXTMETRICW tm;
         SelectObject(dc, lay_font(f));
@@ -2536,7 +2554,7 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
     for (const wchar_t *ln = src; ln && *ln;) {
         const wchar_t *nl = wcschr(ln, L'\n'), *end = nl ? nl : ln + wcslen(ln);
         while (end > ln && (end[-1] == L'\r' || end[-1] == L' ' || end[-1] == L'\t')) end--;
-        if (*ln >= 1 && *ln <= 6) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
+        if (*ln >= 1 && *ln <= 9) { /* the conversation's own lines (chat_conv): prompts, steps, rules between turns, the notice */
             int kind = *ln, pad = lh / 4;
             in_code = 0;
             if (kind == 5) { y += gap; lay_shape(SH_RULE, 0, y, maxw, MD_RULE); y += gap + 1; blank = 1; }
@@ -2612,6 +2630,29 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 x += text_w(dc, F_BODY, L"\x2514 ", 2);
                 while (n > 0 && x + text_w(dc, F_BODY, ln + 1, n) > maxw) n--;
                 lay_put(x, y + asc, F_BODY, MD_MARK, ln + 1, n, text_w(dc, F_BODY, ln + 1, n), 0);
+                y += lh; blank = 0; marked = 0;
+            } else if (kind == 8) { /* what Claude said between its steps: "● Testing the hook…", as the terminal shows it */
+                if (!blank) y += gap / 2;
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
+                lay_put(lead, y + asc, F_BODY, MD_BOLD, L"\x25CF", 1, text_w(dc, F_BODY, L"\x25CF", 1), 0);
+                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_BODY, 0) + lh;
+                blank = 0; marked = 0;
+            } else if (kind == 9) { /* the steps under it, folded ("Ran 2 shell commands"), or a task's notice: dim, in under the words */
+                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
+                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_MARK, 0) + lh;
+                blank = 0; marked = 0;
+            } else if (kind == 7) { /* the running line: its place only (spin_paint draws it), the star where the steps' dots are */
+                if (!blank) y += gap / 2;
+                const wchar_t *c = ln + 1;
+                int n = 0;
+                while (c < end && *c != 0x1F && n < 23) g_spin_verb[n++] = *c++;
+                g_spin_verb[n] = 0;
+                g_spin_t0 = c < end ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : 0;
+                g_spin_k = c < end && *c == 0x1F ? wcstol(c + 1, (wchar_t **)&c, 10) : 0;
+                g_spin_ts = c < end && *c == 0x1F ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : g_spin_t0;
+                g_spin_tool = c < end && *c == 0x1F ? wcstol(c + 1, NULL, 10) : 0;
+                g_spin_y = y + asc; g_spin_x = text_w(dc, F_BODY, L"\x25CF ", 2); g_spin_on = 1;
+                if (g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46) > g_lay_w) g_lay_w = g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46);
                 y += lh; blank = 0; marked = 0;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
@@ -2886,7 +2927,112 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
     }
 }
 
+/* the running line's star, drawn (not a font's glyph: Windows puts in another face's character, an emoji or a box,
+ * depending on the face and the system's language): Claude Code's shapes · ✢ * ✶ ✻ ✽ as spokes from the middle,
+ * each spoke as wide as w0 at r0 growing to w1 at r1; 4x4 samples a pixel, over the box's own background */
+static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col, COLORREF bg) {
+    typedef struct { int n; float rot, r0, r1, w0, w1, dot; } Shape;
+    static const Shape SH[6] = {
+        {0, 0, 0, 0, 0, 0, .22f},           /* · */
+        {4, 0, .10f, .95f, .05f, .24f, 0},  /* ✢ four teardrops */
+        {6, 0, 0, .80f, .13f, .13f, 0},     /* * */
+        {6, 0, 0, 1.0f, .46f, 0, 0},        /* ✶ six points */
+        {8, 0, .22f, .98f, .05f, .21f, 0},  /* ✻ eight teardrops, open in the middle */
+        {8, 0, .12f, 1.0f, .08f, .30f, 0},  /* ✽ eight heavy teardrops */
+    };
+    int S = size < 6 ? 6 : size;
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    uint32_t *px = NULL;
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0);
+    if (!bm) { DeleteDC(mem); return; }
+    HGDIOBJ old = SelectObject(mem, bm);
+    const Shape *h = &SH[shape % 6];
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            int in = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    float u = ((x + (sx + .5f) / 4) / S) * 2 - 1, v = ((y + (sy + .5f) / 4) / S) * 2 - 1, r = hypotf(u, v);
+                    int hit = h->dot > 0 && r < h->dot;
+                    for (int k = 0; k < h->n && !hit; k++) {
+                        float a = h->rot + (float)M_PI * 2 * k / h->n - (float)M_PI / 2, ax = cosf(a), ay = sinf(a);
+                        float along = u * ax + v * ay, across = fabsf(-u * ay + v * ax);
+                        if (along < h->r0 || along > h->r1) continue;
+                        float t = (along - h->r0) / fmaxf(.01f, h->r1 - h->r0), w = h->w0 + (h->w1 - h->w0) * t;
+                        if (h->w1 > h->w0 && t > .7f) w *= sqrtf(fmaxf(0, 1 - (t - .7f) / .3f * (t - .7f) / .3f)); /* (a teardrop's round end) */
+                        hit = across < w / 2;
+                    }
+                    in += hit;
+                }
+            float a = in / 16.0f;
+            px[y * S + x] = RGB(GetBValue(bg) + (int)((GetBValue(col) - GetBValue(bg)) * a), GetGValue(bg) + (int)((GetGValue(col) - GetGValue(bg)) * a), GetRValue(bg) + (int)((GetRValue(col) - GetRValue(bg)) * a));
+        }
+    BitBlt(dc, cx - S / 2, cy - S / 2, S, S, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+}
+
+/* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back, the word in bold in the accent with
+ * three letters in a lighter shade moving across it (right to left, a letter every 200 ms, as the CLI moves them),
+ * the star easing · → ✽ → · every 2 s, then the time and the tokens. After 10 s with no step (and no tool running)
+ * it eases toward the theme's error red over the next 10 s, as the CLI does when no tokens come (it counts tokens; the
+ * hook only sees steps). Repainted 25 times a second by its own timer */
+static void spin_paint(HDC dc, int x0, int base) {
+    static double stall, at_last;
+    double now = wall();
+    COLORREF acc = RGB(215, 119, 87), bgc = chat_bg(); /* Claude Code's own orange ("claude"), whatever the box's theme */
+    int light = GetRValue(bgc) * 299 + GetGValue(bgc) * 587 + GetBValue(bgc) * 114 > 140000;
+    COLORREF err = light ? RGB(171, 43, 63) : RGB(255, 107, 128); /* (Claude Code's error colour, dark and light) */
+    { /* how stalled: eased, as the CLI eases it (a tenth of the way every 50 ms) */
+        double quiet = g_spin_tool ? 0 : (double)time(NULL) - (double)g_spin_ts, want = quiet > 10 ? fmin((quiet - 10) / 10, 1) : 0;
+        double dt = fmin(1, now - at_last);
+        at_last = now;
+        stall += (want - stall) * (1 - pow(0.9, dt / 0.05));
+    }
+    #define MIXC(a, b, k) RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * (k)), GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * (k)), GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * (k)))
+    COLORREF base_c = MIXC(acc, err, stall);
+    COLORREF shim = light ? RGB(245, 149, 117) : RGB(235, 159, 127); /* the moving letters: Claude Code's lighter orange ("claudeShimmer"),
+                                                                    * which stays orange while the rest goes red */
+    COLORREF grey = light ? RGB(102, 102, 102) : RGB(153, 153, 153);   /* the time and tokens, as the CLI greys them */
+    TEXTMETRICW tm;
+    SelectObject(dc, g_chat_bf);
+    GetTextMetricsW(dc, &tm);
+    int S = (int)(tm.tmAscent * 0.74f); /* (as tall as a lowercase letter, as the terminal's glyph is) */
+    double wave = (1 - cos(2 * M_PI * fmod(now, 2.0) / 2.0)) / 2; /* 0 → 1 → 0 every 2 s, eased at both ends */
+    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.36f), S, (int)lround(wave * 5), base_c, bgc); /* · → ✽ → · */
+    SetTextAlign(dc, TA_BASELINE | TA_LEFT);
+    SelectObject(dc, g_chat_bf); /* (not bold: the CLI draws it in the plain face) */
+    int x = x0 + max(g_spin_x, S + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
+    SIZE sz;
+    long long step = (long long)floor(now / 0.2); /* the lighter letters, as the CLI moves them: one letter every 200 ms, right to left,
+                                                   * from 10 past the end to 10 before the start */
+    int at = (n + 1) + 10 - (int)(step % (n + 1 + 20));
+    for (int i = 0; i <= n; i++) {
+        wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
+        SetTextColor(dc, abs(i - at) <= 1 ? shim : base_c);
+        TextOutW(dc, x, base, &ch, 1);
+        GetTextExtentPoint32W(dc, &ch, 1, &sz);
+        x += sz.cx;
+    }
+    SelectObject(dc, g_chat_bf);
+    wchar_t tail[64], tmx[24] = L"", tk[24] = L"";
+    long long el = g_spin_t0 ? (long long)time(NULL) - g_spin_t0 : -1;
+    if (el >= 3600) swprintf(tmx, 24, L"%lldh %lldm", el / 3600, el / 60 % 60);
+    else if (el >= 60) swprintf(tmx, 24, L"%lldm %llds", el / 60, el % 60);
+    else if (el >= 0) swprintf(tmx, 24, L"%llds", el);
+    if (g_spin_k >= 1000) swprintf(tk, 24, L"\x2193 %.1fk tokens", g_spin_k / 1000.0);
+    else if (g_spin_k > 0) swprintf(tk, 24, L"\x2193 %ld tokens", g_spin_k);
+    if (tmx[0] && tk[0]) swprintf(tail, 64, L" (%ls \x00B7 %ls)", tmx, tk);
+    else if (tmx[0] || tk[0]) swprintf(tail, 64, L" (%ls)", tmx[0] ? tmx : tk);
+    else tail[0] = 0;
+    SetTextColor(dc, grey);
+    TextOutW(dc, x, base, tail, (int)wcslen(tail));
+    #undef MIXC
+}
+
 static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == ID_SPIN) { if (g_spin_on && IsWindowVisible(w)) InvalidateRect(w, NULL, FALSE); return 0; }
     if (msg == WM_PAINT || msg == WM_PRINTCLIENT) { /* drawn off-screen first, so scrolling does not flicker (WM_PRINTCLIENT: --record) */
         PAINTSTRUCT ps;
         HDC wdc = msg == WM_PAINT ? BeginPaint(w, &ps) : (HDC)wp;
@@ -2914,6 +3060,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
         chat_runs(dc, 0, g_runs_n, view, body.top);
+        if (g_spin_on) spin_paint(dc, view.left, body.top + g_spin_y);
         g_push_drawn = hist_push_now();
         if (abs(pl) >= g_chat_line * 3 / 4) { /* in the rubber band's gap, as the terminal would say it: what the push does, a dot a notch */
             RECT gap_rc = pl > 0 ? (RECT){view.left, view.top, view.right, view.top + pl} : (RECT){view.left, view.bottom + pl, view.right, view.bottom};
@@ -3075,11 +3222,13 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 
 /* The conversation for the box, as chat_layout reads it: each turn's prompt (lines marked 1), its steps (2, the one
  * running now 3; a finished turn has them in one line, 4), its reply as Markdown, a rule between turns (5), and
- * the permission notice at the end while it waits (6). NULL when the hook keeps no turns (an older hook). */
+ * the permission notice at the end while it waits (6); in a turn going on, Claude's words (8), the steps under them
+ * folded (9), a message you sent meanwhile (1 again) and the running line last (7). NULL when the hook keeps no turns
+ * (an older hook). */
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
-        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 6) *(*o)++ = *c;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 9 || *c == '\t') *(*o)++ = *c; /* (a tab parts a step's tool from its detail) */
         *(*o)++ = '\n';
         if (*c) c++;
     }
@@ -3092,6 +3241,121 @@ static int harness_p(const char *p) {
     while (*p == ' ' || *p == '\n' || *p == '\r') p++;
     for (int i = 0; i < 7; i++) if (!strncmp(p, H[i], strlen(H[i]))) return 1;
     return 0;
+}
+/* a prompt as the terminal's input line shows it: no empty lines before or after, and each paste
+ * (<pasted_content ...>...</pasted_content>, its end cut off when the hook kept only the start) as one line,
+ * "[Pasted text +12 lines] its first line"; the rest as typed. Freed by the caller */
+static char *prompt_shown(const char *p) {
+    size_t n = strlen(p);
+    char *o = malloc(n * 2 + 128), *e = o;
+    for (const char *c = p; *c;) {
+        const char *tag = strstr(c, "<pasted_content");
+        const char *upto = tag ? tag : c + strlen(c);
+        memcpy(e, c, (size_t)(upto - c)); e += upto - c;
+        if (!tag) break;
+        const char *in = strchr(tag, '>');
+        if (!in) { c = tag + 15; continue; }
+        in++;
+        const char *close = strstr(in, "</pasted_content>"), *end = close ? close : in + strlen(in);
+        int lines = 0; const char *first = NULL, *first_end = NULL;
+        for (const char *l = in; l < end;) {
+            const char *nl = memchr(l, '\n', (size_t)(end - l)), *le = nl ? nl : end;
+            const char *a = l; while (a < le && (*a == ' ' || *a == '\t' || *a == '\r')) a++;
+            if (a < le) { lines++; if (!first) { first = a; first_end = le; } }
+            l = nl ? nl + 1 : end;
+        }
+        if (e > o && e[-1] != '\n') *e++ = '\n';
+        e += sprintf(e, "[Pasted text +%d line%s%s]", lines, lines == 1 ? "" : "s", close ? "" : " or more");
+        if (first) { *e++ = ' '; size_t k = (size_t)(first_end - first); if (k > 200) k = 200; memcpy(e, first, k); e += k; }
+        *e++ = '\n';
+        c = close ? close + 17 : end;
+        if (*c == '\n') c++;
+    }
+    *e = 0;
+    char *a = o; /* the empty lines before and after */
+    while (*a == '\n' || *a == ' ' || *a == '\r' || *a == '\t') { char *nl = strchr(a, '\n'); if (!nl) break; int blank = 1; for (char *q = a; q < nl; q++) if (*q != ' ' && *q != '\r' && *q != '\t') blank = 0; if (!blank) break; a = nl + 1; }
+    memmove(o, a, strlen(a) + 1);
+    for (e = o + strlen(o); e > o && (e[-1] == '\n' || e[-1] == ' ' || e[-1] == '\r' || e[-1] == '\t'); ) *--e = 0;
+    return o;
+}
+/* the steps folded as the terminal folds them: "Ran 2 shell commands, read 3 files" */
+static void steps_line(char **o, const MTurn *t, int k0, int k1) {
+    static const char *TOOLS[] = {"Bash", "Read", "Grep", "Glob", "Edit", "MultiEdit", "NotebookEdit", "Write", "WebFetch", "WebSearch", "Task", "Agent", "Skill"};
+    static const int CAT[] = {0, 1, 2, 2, 3, 3, 3, 4, 5, 6, 7, 7, 8};
+    static const char *ONE[] = {"ran %d shell command", "read %d file", "searched for %d pattern", "edited %d file", "wrote %d file", "fetched %d page", "searched the web %d time", "ran %d agent", "used %d skill"};
+    int cnt[9] = {0}, order[24], no = 0, other[8] = {0}, on = 0;
+    const char *oname[8];
+    for (int k = k0; k < k1; k++) {
+        int c = -1;
+        for (int j = 0; j < 13; j++) if (!strcmp(t->tool[k], TOOLS[j])) c = CAT[j];
+        if (c >= 0) { if (!cnt[c]++) order[no++] = c; continue; }
+        int f = -1;
+        for (int j = 0; j < on; j++) if (!strcmp(oname[j], t->tool[k])) f = j;
+        if (f < 0 && on < 8) { oname[on] = t->tool[k]; f = on++; order[no++] = 100 + f; }
+        if (f >= 0) other[f]++;
+    }
+    if (!no) return;
+    char line[300], *e = line;
+    for (int i = 0; i < no && e < line + 240; i++) {
+        if (i) e += sprintf(e, ", ");
+        if (order[i] < 100) { int c = order[i]; e += sprintf(e, ONE[c], cnt[c]); if (cnt[c] != 1) e += sprintf(e, "s"); }
+        else { int f = order[i] - 100; e += other[f] > 1 ? sprintf(e, "used %.40s %d times", oname[f], other[f]) : sprintf(e, "used %.40s", oname[f]); }
+    }
+    line[0] = (char)toupper((unsigned char)line[0]);
+    conv_put(o, 9, line, 1);
+}
+/* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
+ * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step).
+ * Passed on as "word\x1Fstart\x1Ftokens\x1Flast step\x1Fa tool running": the box draws it on every frame (spin_paint), so the layout stays as it is */
+static char g_verbs[2][4096];          /* spinnerVerbs from ~/.claude/settings.json, one a line, written by the reader thread into the one not in use */
+static volatile LONG g_verbs_cur, g_verbs_replace;
+static char g_ccverbs[2][8192];        /* Claude Code's own words (claude-verbs.txt next to the events file, read out of the installed
+                                         * Claude Code by spinner_verbs.py), one a line; ours when there is none */
+static volatile LONG g_ccverbs_cur;
+/* the n-th line of a list of lines, into w */
+static void nth_line(const char *list, unsigned n, char *w, size_t wn) {
+    const char *c = list;
+    for (unsigned i = 0; i < n && c; i++) { c = strchr(c, '\n'); if (c) c++; }
+    const char *e = c ? strchr(c, '\n') : NULL;
+    snprintf(w, wn, "%.*s", c && e ? (int)(e - c) : 0, c ? c : "");
+}
+static void conv_running(char *o, size_t n, const MTurn *t, int tool) {
+    static const char *VERB[] = {"Thinking", "Working", "Pondering", "Musing", "Brewing", "Cooking", "Crafting", "Building"}; /* (until Claude Code's own are read) */
+    unsigned hv = (unsigned)t->t0 * 2654435761u;
+    for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
+    /* Claude Code's words (or ours), then yours (spinnerVerbs "append"); yours alone ("replace") */
+    const char *mine = g_verbs[g_verbs_cur], *cc = g_ccverbs[g_ccverbs_cur];
+    int nm = 0, nc = 0;
+    for (const char *c = mine; *c; c++) nm += *c == '\n';
+    for (const char *c = cc; *c; c++) nc += *c == '\n';
+    int nb = g_verbs_replace && nm ? 0 : nc ? nc : (int)(sizeof VERB / sizeof *VERB);
+    char word[48];
+    unsigned k = hv % (unsigned)(nb + nm ? nb + nm : 1);
+    if ((int)k >= nb) nth_line(mine, k - (unsigned)nb, word, sizeof word);
+    else if (nc) nth_line(cc, k, word, sizeof word);
+    else snprintf(word, sizeof word, "%s", VERB[k]);
+    const char *v = word[0] ? word : "Thinking";
+    snprintf(o, n, "%s\x1F%lld\x1F%ld\x1F%lld\x1F%d", v, t->t0, t->k, t->ts > t->t0 ? t->ts : t->t0, tool); /* (not a tab: conv_put keeps nothing under 10) */
+}
+/* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
+ * step running now last (3) */
+static void conv_steps(char **o, const MTurn *t, int st) {
+    char line[400];
+    int tools = 0, run = t->ns && g_run_tool && t->tool[t->ns - 1][0] != '@', end = run ? t->ns - 1 : t->ns;
+    for (int k = 0; k < t->ns; k++) tools += t->tool[k][0] != '@';
+    if (t->n > tools) { snprintf(line, sizeof line, "%d earlier step%s", t->n - tools, t->n - tools == 1 ? "" : "s"); conv_put(o, 4, line, 1); }
+    int k0 = 0;
+    for (int k = 0; k <= end; k++) {
+        if (k < end && t->tool[k][0] != '@') continue;
+        steps_line(o, t, k0, k);
+        if (k == end) break;
+        if (!strcmp(t->tool[k], "@say")) conv_put(o, 8, t->what[k] ? t->what[k] : "", 1);
+        else if (!strcmp(t->tool[k], "@notice")) { snprintf(line, sizeof line, "Background task: %s", t->what[k] ? t->what[k] : ""); conv_put(o, 9, line, 1); }
+        else if (!strcmp(t->tool[k], "@you")) { char *ps = prompt_shown(t->what[k] ? t->what[k] : ""); conv_put(o, 1, ps, 1); free(ps); } /* a message you sent while it ran */
+        k0 = k + 1;
+    }
+    if (run) { snprintf(line, sizeof line, "%s\t%s", t->tool[t->ns - 1], t->what[t->ns - 1] ? t->what[t->ns - 1] : ""); conv_put(o, 3, line, 1); }
+    if (st == ST_THINK || st == ST_WORK) { conv_running(line, sizeof line, t, run); conv_put(o, 7, line, 1); }
 }
 static char *chat_conv(int st) {
     if (!g_mt_n) return NULL;
@@ -3108,22 +3372,15 @@ static char *chat_conv(int st) {
         int live = i == g_mt_n - 1 && !t->r;
         int wrap = harness_p(t->p);
         if (i > i0 && !wrap) conv_put(&o, 5, " ", 1);
-        if (wrap) { /* its notice, one step line: the summary if it has one */
+        if (wrap) { /* its notice, one dim line: the summary if it has one */
             const char *a = strstr(t->p, "<summary>"), *b = a ? strstr(a, "</summary>") : NULL;
-            char line[120];
-            if (a && b) snprintf(line, sizeof line, "Task\t%.*s", (int)fmin(90, b - a - 9), a + 9);
-            else snprintf(line, sizeof line, "Task\tbackground task");
-            conv_put(&o, 2, line, 1);
-        } else if (t->p) conv_put(&o, 1, t->p, 1);
-        if (live) { /* going on: the last steps one by one, the running one last */
-            char line[300];
-            if (t->n > t->ns) { snprintf(line, sizeof line, "%d earlier step%s", t->n - t->ns, t->n - t->ns == 1 ? "" : "s"); conv_put(&o, 4, line, 1); }
-            for (int k = 0; k < t->ns; k++) {
-                snprintf(line, sizeof line, "%s\t%s", t->tool[k], t->what[k] ? t->what[k] : "");
-                conv_put(&o, k == t->ns - 1 && g_run_tool ? 3 : 2, line, 1);
-            }
-            if (!t->ns && (st == ST_THINK || st == ST_WORK)) conv_put(&o, 3, "Thinking", 1);
-        } else if (t->tally) conv_put(&o, 4, t->tally, 1);
+            char line[140];
+            if (a && b) snprintf(line, sizeof line, "Background task: %.*s", (int)fmin(100, b - a - 9), a + 9);
+            else snprintf(line, sizeof line, "Background task");
+            conv_put(&o, 9, line, 1);
+        } else if (t->p) { char *ps = prompt_shown(t->p); conv_put(&o, 1, ps, 1); free(ps); }
+        if (live) conv_steps(&o, t, st); /* going on: Claude's words, the steps under each folded to a line, the running one */
+        else if (t->tally) conv_put(&o, 4, t->tally, 1);
         if (t->r) conv_put(&o, 0, t->r, 0);
     }
     if (st == ST_WAIT && g_msg_notice) conv_put(&o, 6, g_msg_notice, 1);
@@ -3180,6 +3437,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     g_chat_title = wt; g_chat_body = wb;
     COLORREF acc = tint(MD_RUN); /* the theme's accent: the core shows the state, the box need not */
     if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
+    { static int ticking; if (g_spin_on != ticking) { ticking = g_spin_on; if (ticking) SetTimer(g_chat, ID_SPIN, 40, NULL); else KillTimer(g_chat, ID_SPIN); } } /* the running line moves on its own timer (25 a second), whatever the cores do */
     if (!changed) return;
     chat_fonts();
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
@@ -4627,6 +4885,43 @@ static void theme_poll(void) {
             int th = !t ? TH_DARK : strstr(t, "ansi") ? TH_TERM : !strncmp(t, "light", 5) ? TH_LIGHT : strstr(t, "daltonized") ? TH_CBLIND : TH_DARK;
             if (InterlockedExchange(&g_cli_theme, th) != th) g_theme_new = 1;
             free(t); free(buf);
+        }
+        { /* Claude Code's own words, as spinner_verbs.py read them */
+            static FILETIME cc_seen;
+            char vp[1200];
+            snprintf(vp, sizeof vp, "%s\\claude-verbs.txt", g_dir);
+            char *vb = slurp_if_new(vp, &cc_seen, 64u << 10);
+            if (vb) {
+                LONG nxt = !g_ccverbs_cur;
+                char *o = g_ccverbs[nxt], *end = o + sizeof g_ccverbs[0] - 1;
+                for (char *c = vb, *e; *c; c = e + (*e != 0)) {
+                    e = c + strcspn(c, "\r\n");
+                    size_t len = (size_t)(e - c);
+                    if (len && len < 40 && o + len + 1 < end) { memcpy(o, c, len); o += len; *o++ = '\n'; }
+                }
+                *o = 0;
+                InterlockedExchange(&g_ccverbs_cur, nxt);
+                free(vb);
+            }
+        }
+        static FILETIME set_seen; /* its settings: spinnerVerbs {"mode": "append" | "replace", "verbs": [...]} for the running line */
+        snprintf(cut, sizeof path - (size_t)(cut - path), "\\.claude\\settings.json");
+        buf = slurp_if_new(path, &set_seen, 4u << 20);
+        if (buf) {
+            const char *sv = js_key(js_ws(buf), "spinnerVerbs"), *arr = sv && *sv == '{' ? js_key(sv, "verbs") : NULL, *e;
+            char *mode = sv && *sv == '{' ? json_unq(js_key(sv, "mode")) : NULL;
+            LONG nxt = !g_verbs_cur;
+            char *o = g_verbs[nxt], *end = o + sizeof g_verbs[0] - 1;
+            if (arr && *arr == '[')
+                for (const char *c = arr; (e = js_next(&c));) {
+                    char *w = json_unq(e);
+                    if (w && *w && strlen(w) < 40 && o + strlen(w) + 1 < end) { o += sprintf(o, "%s\n", w); }
+                    free(w);
+                }
+            *o = 0;
+            InterlockedExchange(&g_verbs_replace, mode && !strcmp(mode, "replace"));
+            InterlockedExchange(&g_verbs_cur, nxt);
+            free(mode); free(buf);
         }
     }
     char la[MAX_PATH]; /* (asked of Windows: a program started from WSL may not have LOCALAPPDATA) */

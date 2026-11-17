@@ -37,9 +37,10 @@ KNOWN = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
 MAX_TEXT = 4000
 MAX_PROMPT = 2000
 TURNS = 5                  # turns kept: prompt, reply and steps; the last is the one going on
-STEPS = 8                  # steps kept per turn (the count and the tally keep the rest)
+STEPS = 16                 # steps kept per turn, Claude's words between them too (the count and the tally keep the rest)
 MSG_BUDGET = 24000         # the oldest turns go first when the file grows past this
 STALE = 24 * 3600          # msg files of sessions that never sent SessionEnd
+LIVE_FOR = 600             # a turn with no step for this long (no Stop came: an error) takes no more of your messages
 TRANSCRIPT_TAIL = 262144   # how much of the transcript the fallback reads, from the end
 
 
@@ -107,7 +108,9 @@ def step_detail(tool, ti):
     """What a step works on, short: a command's first line, a file's name (never its folder), a pattern."""
     if not isinstance(ti, dict):
         return ""
-    if tool == "Bash":
+    if tool == "Bash":  # what Claude says the command does, else its first line
+        if isinstance(ti.get("description"), str) and ti["description"].strip():
+            return one_line(ti["description"])
         cmd = ti.get("command")
         return one_line(cmd.strip().split("\n")[0] if isinstance(cmd, str) else "")
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead"):
@@ -194,7 +197,64 @@ def notice_step(p):
     if not p.startswith("<task-notification"):
         return None
     m = re.search(r"<summary>(.*?)</summary>", p, re.S)
-    return ["Task", " ".join((m.group(1) if m else "background task").split())[:80]]
+    return ["@notice", " ".join((m.group(1) if m else "background task").split())[:80]]
+
+
+def tail_entries(path):
+    """The transcript's last entries, newest first (its tail only)."""
+    if not path or not os.path.isfile(path):
+        return []
+    with open(path, "rb") as f:
+        f.seek(max(0, os.path.getsize(path) - TRANSCRIPT_TAIL))
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    out = []
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and not e.get("isSidechain") and not e.get("isMeta") and isinstance(e.get("message"), dict):
+            out.append(e)
+    return out
+
+
+def turn_scan(path, sent=()):
+    """Since your prompt (messages you sent during the turn, `sent`, do not end it): Claude's newest words ("" if none
+    yet) and the output tokens of its messages (a message's usage is repeated on each of its blocks: counted once)."""
+    said, tok = "", {}
+    for e in tail_entries(path):
+        m = e["message"]
+        if e.get("type") == "user":
+            p = prompt_text(m)
+            if p and p[:300] not in sent:
+                break  # back to your prompt
+            continue
+        if e.get("type") != "assistant":
+            continue
+        u = m.get("usage")
+        if isinstance(u, dict) and isinstance(u.get("output_tokens"), int):
+            k = m.get("id") or id(m)
+            tok[k] = max(tok.get(k, 0), u["output_tokens"])
+        if not said and isinstance(m.get("content"), list):
+            said = "\n".join(x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text").strip()
+    return said, sum(tok.values())
+
+
+def interrupted(path, p):
+    """Whether the turn before prompt p was stopped by you (Esc): the transcript's "[Request interrupted" line comes
+    after its last prompt."""
+    for e in tail_entries(path):
+        if e.get("type") != "user":
+            continue
+        c = e["message"].get("content")
+        if isinstance(c, list):
+            c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+        if isinstance(c, str) and c.strip().startswith("[Request interrupted"):
+            return True
+        q = prompt_text(e["message"])
+        if q and q != p:
+            return False
+    return False
 
 
 def backfill(path):
@@ -264,8 +324,22 @@ def on_turn(sid, ev, d):
             if step and turns:
                 s = turns[-1].get("s") if isinstance(turns[-1].get("s"), list) else []
                 turns[-1]["s"] = (s + [step])[-STEPS:]
-        elif not (turns and turns[-1].get("p") == p and not turns[-1].get("r")):  # (already in the transcript)
-            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}})
+        elif turns and turns[-1].get("p") == p and not turns[-1].get("r"):
+            turns[-1].setdefault("t0", int(time.time()))  # (already in the transcript: read in by the first fill)
+        elif turns and turns[-1].get("t0") and not turns[-1].get("d") and not turns[-1].get("r") \
+                and time.time() - (turns[-1].get("ts") or turns[-1]["t0"]) < LIVE_FOR \
+                and not interrupted(d.get("transcript_path"), p):
+            t = turns[-1]  # sent while the turn runs: a line of that turn, as the terminal shows it
+            s = t.get("s") if isinstance(t.get("s"), list) else []
+            t["s"] = (s + [["@you", p[:300]]])[-STEPS:]
+            t["you"] = (t.get("you") or [])[-7:] + [p[:300]]
+            update_msg(sid, {"turns": fit(turns)})
+            return
+        else:
+            last = turns[-1] if turns else None
+            if last and not last.get("n") and not last.get("r") and p.startswith(last.get("p") or "\0"):
+                turns.pop()  # stopped before any step and sent again, longer: the new one only
+            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}, "t0": int(time.time())})
         fields["run"] = None
     else:
         if not turns:
@@ -275,16 +349,28 @@ def on_turn(sid, ev, d):
         if ev == "PreToolUse":
             step = [tool, step_detail(tool, d.get("tool_input"))]
             s = t.get("s") if isinstance(t.get("s"), list) else []
+            try:  # what Claude said before this call (once), and the turn's tokens so far
+                said, tok = turn_scan(d.get("transcript_path"), list(t.get("you") or []))
+                said = one_line(said, 300)
+                if tok > int(t.get("k") or 0):
+                    t["k"] = tok
+            except Exception:
+                said = ""
+            if said and not any(x[0] == "@say" and x[1] == said for x in s if isinstance(x, list) and len(x) > 1):
+                s = s + [["@say", said]]
             t["s"] = (s + [step])[-STEPS:]
             t["n"] = int(t.get("n") or 0) + 1
+            t["ts"] = int(time.time())
             c = t.get("c") if isinstance(t.get("c"), dict) else {}
             c[tool] = int(c.get(tool) or 0) + 1
             t["c"] = c
             fields["run"] = step
         elif ev == "PostToolUse":
+            t["ts"] = int(time.time())  # (the last sign of life: the running line reddens after a long quiet)
             fields["run"] = None
         elif ev == "Stop":
             t["r"] = d.get("_reply", "")[:MAX_TEXT]
+            t["d"] = 1
             fields["run"] = None
     fields["turns"] = fit(turns)
     update_msg(sid, fields)
@@ -318,6 +404,24 @@ def drop_stale():
             pass
 
 
+def verbs_refresh():
+    """Claude Code updated since its spinner words were read (or never read): spinner_verbs.py reads them again, in the
+    background, so this returns at once."""
+    try:
+        import glob
+        import subprocess
+        out = os.path.join(os.path.dirname(PATH), "claude-verbs.txt")
+        cc = glob.glob(os.path.expanduser("~/.local/share/claude/versions/*"))
+        newest = max((os.path.getmtime(p) for p in cc), default=0)
+        if os.path.exists(out) and os.path.getmtime(out) >= newest:
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spinner_verbs.py")
+        subprocess.Popen([sys.executable, script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except Exception:
+        pass
+
+
 def rich(d, ev, sid, rec):
     aid = rec.get("aid")
     if aid:  # a subagent's: only its final reply is kept, in a file of its own (its steps stay out of the session's turns)
@@ -337,6 +441,7 @@ def rich(d, ev, sid, rec):
         return
     if ev == "SessionStart":
         drop_stale()
+        verbs_refresh()
         pane = os.environ.get("TMUX_PANE", "")
         inbox = os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
         fields = {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
