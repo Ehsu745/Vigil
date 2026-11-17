@@ -2209,10 +2209,14 @@ static int g_hist_land;              /* 1: they were just let in, the view stays
 static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
 static double g_push_at;
 enum { HIST_PUSH = 7 };              /* notches past an edge that flip the earlier turns in or out, a dot each */
-static int g_gap_lit;                /* the gap's dots lit: one a notch, kept while it springs back */
+static int g_gap_lit;                /* the fuse's beads lit: one a notch */
+static double g_bead_t[8];           /* when each bead lit (it pops, then settles) */
+static double g_fuse_done;           /* when a push let the earlier turns in: the star turns, then the fuse fades */
+enum { FUSE_DONE_FOR = 1 };          /* (seconds the fuse shows after that) */
 static int g_peek;                   /* a push under way: 1 the earlier turns laid out above the latest and the box growing to show them,
                                         -1 the box shrinking toward the latest turn; a pause springs it back, HIST_PUSH notches keep it */
 static int g_lat_y, g_peek_h0;       /* (1) where the latest turn starts with the earlier turns above it; the view's height before */
+static int g_peek_laid;              /* (1) they are laid out (g_lat_y, g_peek_h0 set): until then the box stays as it is */
 static float g_peek_rfin;            /* (1) how much of the earlier turns a full push shows: what letting them in shows */
 static float g_scroll_d, g_box_y, g_box_h; /* as drawn: the scroll, the box's top and height, each easing toward its target */
 static int g_sd;                     /* g_scroll_d as painted (a link's click uses it too) */
@@ -2231,6 +2235,8 @@ static char g_chat_sid[72];          /* whose text the box shows */
 
 static int chat_pad(void) { return (int)(11 * g_dpi); }
 static int chat_bar(void) { return (int)(3 * g_dpi); }
+/* a colour k of the way from a to b */
+static COLORREF mixc(COLORREF a, COLORREF b, float k) { return RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * k), GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * k), GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * k)); }
 static int chat_gap(void) { return (int)(6 * g_dpi); }
 
 /* the terminal's face: Cascadia Mono (it comes with Windows Terminal), else Consolas */
@@ -2883,7 +2889,7 @@ static void chat_refont(void) {
 static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
 /* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
 static void hist_commit(void) {
-    if (g_peek == 1) { g_chat_hist = 1; g_grow_hold = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
+    if (g_peek == 1) { g_chat_hist = 1; g_grow_hold = 1; g_fuse_done = wall(); g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
     else { g_chat_hist = 0; g_hist_land = 2; g_end_hold = 1; }
     g_peek = 0; g_push = 0; g_chat_auto = 0;
 }
@@ -2894,12 +2900,15 @@ static void hist_commit(void) {
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
-    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && (g_peek == 1 || g_chat_scroll == 0), out = notches < 0 && g_chat_hist && (g_peek == -1 || bottom);
+    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && (g_peek == 1 || g_chat_scroll == 0), out = 0; /* (back to the latest turn only: a middle-click) */
+    (void)bottom;
     if (in || out) {
         double now = wall();
         if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
         g_push_at = now; g_push += notches;
-        g_gap_lit = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
+        int lit = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
+        for (int i = g_gap_lit; i < lit; i++) g_bead_t[i] = now; /* each bead pops as it lights */
+        g_gap_lit = lit;
         if (!g_peek) { g_peek = in ? 1 : -1; g_chat_auto = 0; } /* the box starts growing (or shrinking) with the push */
         if (fabsf(g_push) >= HIST_PUSH) hist_commit();
         InvalidateRect(g_chat, NULL, FALSE);
@@ -2911,6 +2920,14 @@ static void chat_scroll(float notches) {
     if (to < 0) to = 0;
     if (to > g_chat_body_h - g_chat_view_h) to = g_chat_body_h - g_chat_view_h;
     if (to != g_chat_scroll) { g_chat_scroll = to; g_chat_auto = 0; InvalidateRect(g_chat, NULL, FALSE); }
+}
+
+/* a middle-click on the core whose box is open: the latest turn only (the box shrinks to it, its end staying in
+ * view), or the earlier turns in above it */
+static void chat_middle(const Session *s) {
+    if (!g_chat || !IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid) || g_peek) return;
+    if (g_chat_hist) { g_peek = -1; hist_commit(); }
+    else if (g_mt_n > 1) { g_chat_hist = 1; g_hist_land = 1; g_chat_auto = 0; }
 }
 
 /* a prompt's band: the box's colour a little lighter (darker on a light box); the pinned strip a little more */
@@ -2966,6 +2983,8 @@ static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col,
     HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0);
     if (!bm) { DeleteDC(mem); return; }
     HGDIOBJ old = SelectObject(mem, bm);
+    int over = bg == CLR_INVALID; /* (onto what is there, not a square of bg) */
+    if (over) BitBlt(mem, 0, 0, S, S, dc, cx - S / 2, cy - S / 2, SRCCOPY);
     const Shape *h = &SH[shape % 6];
     for (int y = 0; y < S; y++)
         for (int x = 0; x < S; x++) {
@@ -2985,9 +3004,36 @@ static void star_draw(HDC dc, int cx, int cy, int size, int shape, COLORREF col,
                     in += hit;
                 }
             float a = in / 16.0f;
+            if (over) { px[y * S + x] = mixc(px[y * S + x], RGB(GetBValue(col), GetGValue(col), GetRValue(col)), a); continue; } /* (the bitmap keeps blue first) */
             px[y * S + x] = RGB(GetBValue(bg) + (int)((GetBValue(col) - GetBValue(bg)) * a), GetGValue(bg) + (int)((GetGValue(col) - GetGValue(bg)) * a), GetRValue(bg) + (int)((GetRValue(col) - GetRValue(bg)) * a));
         }
     BitBlt(dc, cx - S / 2, cy - S / 2, S, S, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+}
+
+/* a disc drawn onto what is there: radius r, its edge fading over `soft` pixels (1: crisp; r: a glow), at strength a;
+ * hole > 0 leaves its middle out (a ring) */
+static void disc_over(HDC dc, float cx, float cy, float r, float soft, COLORREF col, float a, float hole) {
+    int S = (int)ceilf(r + 2) * 2, x0 = (int)floorf(cx) - S / 2, y0 = (int)floorf(cy) - S / 2;
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    uint32_t *px = NULL;
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0);
+    if (!bm) { DeleteDC(mem); return; }
+    HGDIOBJ old = SelectObject(mem, bm);
+    BitBlt(mem, 0, 0, S, S, dc, x0, y0, SRCCOPY);
+    COLORREF c = RGB(GetBValue(col), GetGValue(col), GetRValue(col)); /* (the bitmap keeps blue first) */
+    if (soft < 1) soft = 1;
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            float d = hypotf(x0 + x + .5f - cx, y0 + y + .5f - cy), k = (r - d) / soft + (soft <= 1 ? .5f : 0);
+            k = k < 0 ? 0 : k > 1 ? 1 : k;
+            if (soft > 1) k *= k; /* (a glow: brightest in the middle, gone at its edge) */
+            if (hole > 0) { float m = d - hole + .5f; k *= m < 0 ? 0 : m > 1 ? 1 : m; }
+            if (k > 0) px[y * S + x] = mixc(px[y * S + x], c, k * a);
+        }
+    BitBlt(dc, x0, y0, S, S, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
 }
 
@@ -3111,30 +3157,52 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             g_pin_rc = strip;
         }
         g_push_drawn = hist_push_now();
-        if (g_peek && g_push_drawn > 0) { /* (over the pinned prompt) a strip on the edge being pushed, as the terminal would say it: what the push does, a dot a notch */
-            int gh = g_chat_line + (int)(8 * g_dpi);
-            RECT gap_rc = g_peek > 0 ? (RECT){view.left, view.top, view.right, view.top + gh} : (RECT){view.left, view.bottom - gh, view.right, view.bottom};
-            { HBRUSH gb = CreateSolidBrush(chat_band(1)); FillRect(dc, &gap_rc, gb); DeleteObject(gb); }
-            wchar_t what[64];
-            int n = g_mt_n - 1;
-            if (g_peek > 0) swprintf(what, 64, L"\x2191 %d earlier turn%ls ", n, n == 1 ? L"" : L"s");
-            else swprintf(what, 64, L"\x2193 latest turn only ");
-            SaveDC(dc);
-            IntersectClipRect(dc, gap_rc.left, gap_rc.top, gap_rc.right, gap_rc.bottom);
-            SetTextAlign(dc, TA_TOP | TA_LEFT);
-            SelectObject(dc, g_chat_bf);
-            int x = view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), y = (gap_rc.top + gap_rc.bottom - g_chat_line) / 2, lit = g_gap_lit;
-            SetTextColor(dc, tint(MD_MARK));
-            TextOutW(dc, x, y, what, (int)wcslen(what));
-            SIZE sz; GetTextExtentPoint32W(dc, what, (int)wcslen(what), &sz);
-            x += sz.cx;
-            for (int i = 0; i < HIST_PUSH; i++) { /* \x25CF lit in the session's colour, \x25CB still to go */
-                SetTextColor(dc, i < lit ? g_chat_accent : tint(MD_MARK));
-                TextOutW(dc, x, y, i < lit ? L"\x25CF" : L"\x25CB", 1);
-                GetTextExtentPoint32W(dc, L"\x25CF ", 2, &sz);
-                x += sz.cx;
+        {   /* the fuse: seven beads up the right margin, the top one Claude Code's star. A push up lights them from the
+             * bottom, each popping as it lights, the thread between lit beads burning in the accent; the seventh lights
+             * the star, which turns once, then the fuse fades. A pause burns it back down, top first. */
+            double tn = wall(), done = tn - g_fuse_done;
+            int keep = g_peek == 1 || (g_fuse_done > 0 && done < FUSE_DONE_FOR);
+            if (keep) {
+                SelectClipRgn(dc, NULL);
+                COLORREF bgc = chat_bg(), acc = g_chat_accent, dim = tint(MD_MARK), rule = tint(MD_RULE);
+                float fade = g_peek == 1 ? 0 : (float)fmin(1, fmax(0, (done - 0.55) / 0.45));
+                int lit = g_peek == 1 ? g_gap_lit : HIST_PUSH;
+                if (g_peek == 1 && g_push_drawn == 0) { /* sprung back: burning down, 60 ms a bead */
+                    double since = tn - (g_push_at + 0.6);
+                    lit = g_gap_lit - (int)(since / 0.06);
+                    if (lit < 0) lit = 0;
+                }
+                int cx = r.right - pad / 2 - (int)g_dpi, inset = (int)(6 * g_dpi);
+                int y0 = view.bottom - inset, y1 = view.top + inset;
+                if (y0 - y1 < 6 * (int)(7 * g_dpi)) y1 = y0 - 6 * (int)(7 * g_dpi); /* (a short box: they stay apart, over the title if need be) */
+                #define FADE(c) mixc(c, bgc, fade)
+                for (int i = 0; i < HIST_PUSH - 1; i++) { /* the thread */
+                    int ya = y0 - (y0 - y1) * i / (HIST_PUSH - 1), yb = y0 - (y0 - y1) * (i + 1) / (HIST_PUSH - 1);
+                    COLORREF c = i + 1 < lit ? mixc(acc, bgc, .35f) : rule;
+                    RECT ln = {cx, yb, cx + (int)fmax(1, g_dpi), ya};
+                    HBRUSH lb = CreateSolidBrush(FADE(c)); FillRect(dc, &ln, lb); DeleteObject(lb);
+                }
+                float al = 1 - fade, fx = cx + g_dpi / 2;
+                for (int i = 0; i < HIST_PUSH; i++) {
+                    int on = i < lit;
+                    float by = y0 - (y0 - y1) * i / (float)(HIST_PUSH - 1), a = (float)(tn - g_bead_t[i]);
+                    float pop = on && a < .3f ? 1 + .8f * (1 - a / .3f) * (1 - a / .3f) : 1, rr = (on ? 2.6f : 2.2f) * (float)g_dpi * pop;
+                    if (i == HIST_PUSH - 1) { /* the star: dim, then lit, turning once through its shapes */
+                        int shape = 4, sz = (int)(11 * g_dpi * pop);
+                        if (g_fuse_done > 0 && done < .5) { static const int TURN[] = {0, 1, 2, 3, 4, 5, 4}; shape = TURN[(int)(done / .5 * 7) % 7]; sz = (int)(13 * g_dpi); }
+                        if (on) disc_over(dc, fx, by, sz * 1.1f, sz * 1.1f, acc, .55f * al, 0); /* its glow */
+                        star_draw(dc, (int)lroundf(fx), (int)lroundf(by), sz, shape, mixc(on ? acc : dim, bgc, fade), CLR_INVALID);
+                    } else if (on) {
+                        disc_over(dc, fx, by, rr * 3, rr * 3, acc, .45f * al, 0); /* a soft glow */
+                        disc_over(dc, fx, by, rr, 1, acc, al, 0);
+                    } else { /* unlit: a ring, the thread not showing through it */
+                        disc_over(dc, fx, by, rr, 1, bgc, 1, 0);
+                        disc_over(dc, fx, by, rr, 1, dim, al, rr - 1.3f * (float)g_dpi);
+                    }
+                }
+                #undef FADE
+                IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
             }
-            RestoreDC(dc, -1);
         }
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
@@ -3388,8 +3456,9 @@ static char *chat_conv(int st) {
         cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
     }
     char *out = malloc(cap), *o = out;
-    int i0 = g_chat_hist ? 0 : g_mt_n - 1; /* the latest turn only, until let in (with your prompt: back past the harness's) */
-    while (!g_chat_hist && i0 > 0 && harness_p(g_mt[i0].p)) i0--;
+    int all = g_chat_hist || g_peek == 1; /* (a push up under way: they are laid out above already, the box growing to show them) */
+    int i0 = all ? 0 : g_mt_n - 1; /* the latest turn only, until let in (with your prompt: back past the harness's) */
+    while (!all && i0 > 0 && harness_p(g_mt[i0].p)) i0--;
     for (int i = i0; i < g_mt_n; i++) {
         MTurn *t = &g_mt[i];
         int live = i == g_mt_n - 1 && !t->r;
@@ -3432,7 +3501,8 @@ static void chat_ease(double now, int snap) {
     float p = hist_push_now(), pe = 1 - (1 - p) * (1 - p);
     float view_to = (float)g_chat_view_h, scroll_to = (float)g_chat_scroll;
     float extra_to = 0;
-    if (g_peek == 1 || g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
+    if (g_peek == 1 && !g_peek_laid) { /* (not laid out yet: nothing moves) */ }
+    else if (g_peek == 1 || g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
         float r = g_peek == 1 ? pe * g_peek_rfin : g_peek_rfin;
         view_to = g_peek == 1 ? fminf(g_peek_h0 + r, (float)g_chat_view_h) : (float)g_chat_view_h;
         extra_to = fmaxf(0, r - (view_to - g_peek_h0));
@@ -3451,7 +3521,9 @@ static void chat_ease(double now, int snap) {
         g_peek_extra += (extra_to - g_peek_extra) * k;
     }
     if (snap || !IsWindowVisible(g_chat)) g_peek_extra = extra_to;
-    g_chat_anim = p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
+    int fuse = g_peek == 1 || (g_fuse_done > 0 && now - g_fuse_done < FUSE_DONE_FOR);
+    if (fuse) InvalidateRect(g_chat, NULL, FALSE);
+    g_chat_anim = fuse || p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
     if ((g_end_hold || g_grow_hold) && fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f && fabsf(extra_to - g_peek_extra) < .5f) {
         g_end_hold = g_grow_hold = 0; /* the box has settled: from here the scroll is its own again (the wheel may have moved it meanwhile) */
         g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to;
@@ -3463,7 +3535,7 @@ static void chat_ease(double now, int snap) {
     int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
     if (g_peek == -1 || g_end_hold) /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
         g_scroll_d = (float)(g_chat_body_h > vh ? g_chat_body_h - vh : 0);
-    else if (g_peek == 1 || g_grow_hold) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
+    else if ((g_peek == 1 && g_peek_laid) || g_grow_hold) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
                                             * the box grows this frame, and past its tallest they come down into it */
         float sd = g_lat_y + g_peek_h0 - vh - g_peek_extra;
         g_scroll_d = sd < 0 ? 0 : sd;
@@ -3505,6 +3577,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_peek = 0; } /* opened, or another session's: its latest turn only */
     else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's strip goes after a pause */
     if (g_peek && hist_push_now() == 0 && !g_chat_anim) g_peek = 0; /* sprung back all the way: the latest turn alone again, the same picture */
+    if (g_peek != 1) g_peek_laid = 0;
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -3568,7 +3641,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
             g_scroll_d += d; g_chat_scroll += d;
             if (g_scroll_d < 0) g_scroll_d = 0;
             if (g_chat_scroll < 0) g_chat_scroll = 0; /* (sprung back: at the latest turn's top, where a push starts again) */
-            if (full && g_peek == 1) { g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
+            if (full && g_peek == 1) { g_peek_laid = 1; g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
         }
         was_full = full;
     }
@@ -7214,7 +7287,7 @@ static void rec_frame(FILE *f) {
 static void rec_run(void) {
     FILE *f = fopen(g_rec_file, "wb");
     if (!f) { fprintf(stderr, "vigil-panel: cannot write %s\n", g_rec_file); return; }
-    int carry = !strcmp(g_rec_scene, "carry"), input = !strcmp(g_rec_scene, "input"), ready = !strcmp(g_rec_scene, "ready");
+    int carry = !strcmp(g_rec_scene, "carry"), input = !strcmp(g_rec_scene, "input"), ready = !strcmp(g_rec_scene, "ready"), hist = !strcmp(g_rec_scene, "history");
     g_single = 1; g_others = 1; g_focus_pinned = 0;
     snprintf(g_frame, sizeof g_frame, "diamond");
     if (carry) g_gravity = GRAVITIES[0]; /* Floaty: a flick breaks them loose */
@@ -7228,7 +7301,7 @@ static void rec_run(void) {
     if (carry) g_rec_rc.top -= (int)(110 * g_dpi); /* room above: the dash turns up near the top */
     int32_t head[3] = {g_rec_rc.right - g_rec_rc.left, g_rec_rc.bottom - g_rec_rc.top, 15};
     fwrite(head, sizeof head, 1, f);
-    const double WARM = 17.5, END = carry ? 11.5 : input ? 13.0 : ready ? 12.0 : 8.6; /* the demo runs a while first, so all three sessions are there */
+    const double WARM = 17.5, END = carry ? 11.5 : input ? 13.0 : ready ? 12.0 : hist ? 9.0 : 8.6; /* the demo runs a while first, so all three sessions are there */
     double t0 = g_rec_now;
     int sat = -1, picked = 0, dropped = 0;
     float sx = 0, sy = 0;
@@ -7238,7 +7311,7 @@ static void rec_run(void) {
         double t = fno / 30.0 - WARM;
         if (t >= 0 && !g_focus_pinned) { /* the same session in the middle all through (input: one with a reply) */
             g_focus_pinned = 1;
-            if (input) { snprintf(g_focus, sizeof g_focus, "demo-0"); g_rec_still = 1; }
+            if (input || hist) { snprintf(g_focus, sizeof g_focus, "demo-0"); g_rec_still = 1; }
         }
         if (ready && t >= 0) { /* READY: a reply nobody has seen; the pointer goes slowly round the core, a little way off */
             Room *room = shown_room();
@@ -7285,6 +7358,15 @@ static void rec_run(void) {
                 g_drop_until = wall() + 1.4;
                 insert_tokens(first);
             }
+        } else if (hist && t >= 0) { /* the earlier turns: a push that springs back, one that lets them in, then a middle-click back */
+            Room *room = shown_room();
+            int fi = index_of(g_focus);
+            Session *s = fi >= 0 ? &room->s[fi] : NULL;
+            rec_glide(t, 0.2, 0.9, L + .2f * W, T + .9f * H, cx - g_cw * .06f, cy - g_cw * .04f);
+            static const double AT[] = {1.6, 1.72, 1.84, 4.0, 4.12, 4.24, 4.36, 4.48, 4.6, 4.72};
+            for (int k = 0; k < 10 && s; k++)
+                if (t >= AT[k] && t < AT[k] + 1 / 30.0) { wheel_spin(s, 1); if (!strcmp(g_chat_sid, s->sid)) chat_scroll(1); }
+            if (s && t >= 7.0 && t < 7.0 + 1 / 30.0) chat_middle(s);
         } else if (!carry) {
             rec_glide(t, 1.0, 1.7, L + .2f * W, T + .9f * H, cx - g_cw * .08f, cy - g_cw * .06f);
             if (t >= 4.6 && sat < 0) { /* on to a small core: wherever it is now */
@@ -7629,6 +7711,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_RBUTTONUP: { int i = core_at(p, NULL, NULL); if (i >= 0) menu(w, i); return 0; }
+    case WM_MBUTTONUP: { int i = core_at(p, NULL, NULL); if (i >= 0 && i < room->n) chat_middle(&room->s[i]); return 0; }
     case WM_MEASUREITEM: if (menu_measure((MEASUREITEMSTRUCT *)lp)) return TRUE; break;
     case WM_DRAWITEM: if (menu_draw((DRAWITEMSTRUCT *)lp)) return TRUE; break;
     case WM_DROPFILES: { /* images dropped on a core (when the drop target below is not in use) */
@@ -7742,7 +7825,7 @@ static void usage(void) {
         "  --settings-zoom X    start the preview zoomed in, 1 to 3 (with --settings-shot)\n"
         "  --settings-light     start the preview on its light background (with --settings-shot)\n"
         "  --on X,Y             --record and the Settings window go on the monitor with that desktop point\n"
-        "  --record SCENE FILE  reply | input | carry: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
+        "  --record SCENE FILE  reply | input | carry | ready | history: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
         "  --settings-tab NAME  open it on that page: look, cluster, replies, motions, shortcuts, performance\n"
         "  --settings-fold      with its sidebar folded to icons\n"
         "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n"
@@ -7810,7 +7893,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--settings-shot") && v) { snprintf(g_set_shot, sizeof g_set_shot, "%s", v); g_open_settings = 1; i++; }
         else { usage(); return a[0] == '-' && (!strcmp(a, "-h") || !strcmp(a, "--help")) ? 0 : 2; }
     }
-    if (g_rec_scene[0]) { if (strcmp(g_rec_scene, "reply") && strcmp(g_rec_scene, "carry") && strcmp(g_rec_scene, "input") && strcmp(g_rec_scene, "ready")) { usage(); return 2; } g_demo_n = 3; g_rec_now = 1.7e9; }
+    if (g_rec_scene[0]) { if (strcmp(g_rec_scene, "reply") && strcmp(g_rec_scene, "carry") && strcmp(g_rec_scene, "input") && strcmp(g_rec_scene, "ready") && strcmp(g_rec_scene, "history")) { usage(); return 2; } g_demo_n = 3; g_rec_now = 1.7e9; }
     if (!shape_make(&g_shape, g_shape_name)) { usage(); return 2; }
     if (!events && !g_demo_n) { usage(); return 2; }
     if (events) { /* its folder holds msg\ and the saved positions */
