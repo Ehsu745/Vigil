@@ -2204,23 +2204,14 @@ static wchar_t *g_chat_title, *g_chat_body;
 static COLORREF g_chat_accent;
 static HFONT g_chat_tf, g_chat_bf, g_chat_mf; /* title, body, monospaced */
 static int g_chat_title_h, g_chat_body_h, g_chat_view_h, g_chat_line, g_chat_scroll;
-static int g_chat_hist;              /* the earlier turns are shown: off each time the box opens, on by scrolling on past its top */
-static int g_hist_land;              /* 1: they were just let in, the view stays on the latest turn's prompt; 2: just left out, the view at the end; 3: left out, from the top */
-static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
-static double g_push_at;
-enum { HIST_PUSH = 7 };              /* notches past an edge that flip the earlier turns in or out, a dot each */
-static int g_gap_lit;                /* the gap's dots lit: one a notch, kept while it springs back */
-static int g_peek;                   /* a push under way: 1 the earlier turns laid out above the latest and the box growing to show them,
-                                        -1 the box shrinking toward the latest turn; a pause springs it back, HIST_PUSH notches keep it */
-static int g_lat_y, g_peek_h0;       /* (1) where the latest turn starts with the earlier turns above it; the view's height before */
-static float g_peek_rfin;            /* (1) how much of the earlier turns a full push shows: what letting them in shows */
+static int g_chat_hist;              /* the earlier turns are shown: off each time the box opens, on by scrolling on up past the latest turn's top */
+static int g_unroll;                 /* they came in that way: the box unrolls to show them as the wheel goes on up, and never rolls back while open */
+static int g_unroll_h0, g_unroll_by; /* the view's height when they came in; how far the box has unrolled since */
+static int g_unroll_wait;            /* the wheel's pixels that let them in, used once they are laid out */
+static int g_chat_view_nat;          /* the view's height before unrolling caps it: the body's, up to the tallest */
 static float g_scroll_d, g_box_y, g_box_h; /* as drawn: the scroll, the box's top and height, each easing toward its target */
 static int g_sd;                     /* g_scroll_d as painted (a link's click uses it too) */
 static int g_chat_anim;              /* any of them still on its way: the panel ticks at the display's rate */
-static int g_end_hold;               /* the latest turn only again: its end held at the bottom while the box finishes shrinking */
-static int g_grow_hold;              /* the earlier turns kept: the scroll still worked out from the box's height while it finishes growing */
-static float g_peek_extra;           /* (1) what a push shows of the earlier turns beyond the box's growth (the box at its tallest), eased */
-static int g_chat_most;              /* the tallest the view may be */
 static RECT g_box_beside, g_box_wa;  /* where the box was laid out last (chat_ease places it at each height from there) */
 static int g_box_cy, g_box_x, g_box_w, g_box_below;
 static int g_chat_auto = 1;          /* the box follows the conversation: the newest turn from its prompt, or its end while it runs */
@@ -2862,7 +2853,7 @@ static void chat_hide(void) {
     if (input_open()) return; /* a reply being typed keeps its box */
     if (g_chat && IsWindowVisible(g_chat)) ShowWindow(g_chat, SW_HIDE);
     g_chat_sid[0] = 0;
-    g_chat_hist = 0; g_peek = 0; /* opened again: the latest turn only */
+    g_chat_hist = 0; g_unroll = 0; /* opened again: the latest turn only */
     void chat_forget_side(void);
     chat_forget_side(); /* shown again: the side is chosen afresh */
 }
@@ -2879,33 +2870,27 @@ static void chat_refont(void) {
     chat_hide();
 }
 
-/* how far the wheel has gone on past an edge, 0 to 1 (nothing after a 0.6 s pause) */
-static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
-/* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
-static void hist_commit(void) {
-    if (g_peek == 1) { g_chat_hist = 1; g_grow_hold = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
-    else { g_chat_hist = 0; g_hist_land = 2; g_end_hold = 1; }
-    g_peek = 0; g_push = 0; g_chat_auto = 0;
+/* the box unrolls by the wheel's pixels as far as it can grow; the view moves up by all of them (it grows with the
+ * latest turn's end staying on its bottom edge, then scrolls into the earlier turns) */
+static void unroll(int px) {
+    int room = g_chat_view_nat - g_unroll_h0 - g_unroll_by, g = px < room ? px : room;
+    if (g > 0) g_unroll_by += g;
+    g_chat_view_h = g_chat_view_nat < g_unroll_h0 + g_unroll_by ? g_chat_view_nat : g_unroll_h0 + g_unroll_by;
+    g_chat_scroll -= px;
+    if (g_chat_scroll < 0) g_chat_scroll = 0;
 }
 
-/* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; going on
- * for HIST_PUSH notches (no pause over 0.6 s) past the top lets the earlier turns in above the latest, and past the bottom
- * shows the latest only again */
+/* the wheel over a core (or over the box while a reply is typed) scrolls, 3 lines a notch (gliding there); on up past
+ * the latest turn's top the earlier turns come in above it and the box unrolls to show them, up to its tallest, then
+ * scrolls on into them; down, it scrolls back and keeps its size (the next time it opens: the latest turn only again) */
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
-    int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
-    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && (g_peek == 1 || g_chat_scroll == 0), out = notches < 0 && g_chat_hist && (g_peek == -1 || bottom);
-    if (in || out) {
-        double now = wall();
-        if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
-        g_push_at = now; g_push += notches;
-        g_gap_lit = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
-        if (!g_peek) { g_peek = in ? 1 : -1; g_chat_auto = 0; } /* the box starts growing (or shrinking) with the push */
-        if (fabsf(g_push) >= HIST_PUSH) hist_commit();
-        InvalidateRect(g_chat, NULL, FALSE);
+    int px = (int)(notches * 3 * g_chat_line);
+    if (notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0) {
+        g_chat_hist = 1; g_unroll = 1; g_unroll_by = 0; g_unroll_wait = px; g_chat_auto = 0; /* (chat_show lays them out, then unrolls) */
         return;
     }
-    if (g_peek) { g_push = 0; g_push_at = 0; return; } /* the other way mid-push: it springs back */
+    if (g_unroll && notches > 0) { unroll(px); g_chat_auto = 0; return; }
     if (g_chat_body_h <= g_chat_view_h) return;
     int to = g_chat_scroll - (int)(notches * 3 * g_chat_line);
     if (to < 0) to = 0;
@@ -3109,32 +3094,6 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             FillRect(dc, &edge, eb);
             DeleteObject(eb);
             g_pin_rc = strip;
-        }
-        g_push_drawn = hist_push_now();
-        if (g_peek && g_push_drawn > 0) { /* (over the pinned prompt) a strip on the edge being pushed, as the terminal would say it: what the push does, a dot a notch */
-            int gh = g_chat_line + (int)(8 * g_dpi);
-            RECT gap_rc = g_peek > 0 ? (RECT){view.left, view.top, view.right, view.top + gh} : (RECT){view.left, view.bottom - gh, view.right, view.bottom};
-            { HBRUSH gb = CreateSolidBrush(chat_band(1)); FillRect(dc, &gap_rc, gb); DeleteObject(gb); }
-            wchar_t what[64];
-            int n = g_mt_n - 1;
-            if (g_peek > 0) swprintf(what, 64, L"\x2191 %d earlier turn%ls ", n, n == 1 ? L"" : L"s");
-            else swprintf(what, 64, L"\x2193 latest turn only ");
-            SaveDC(dc);
-            IntersectClipRect(dc, gap_rc.left, gap_rc.top, gap_rc.right, gap_rc.bottom);
-            SetTextAlign(dc, TA_TOP | TA_LEFT);
-            SelectObject(dc, g_chat_bf);
-            int x = view.left + (g_chat_mono ? text_w(dc, F_BODY, L"  ", 2) : 0), y = (gap_rc.top + gap_rc.bottom - g_chat_line) / 2, lit = g_gap_lit;
-            SetTextColor(dc, tint(MD_MARK));
-            TextOutW(dc, x, y, what, (int)wcslen(what));
-            SIZE sz; GetTextExtentPoint32W(dc, what, (int)wcslen(what), &sz);
-            x += sz.cx;
-            for (int i = 0; i < HIST_PUSH; i++) { /* \x25CF lit in the session's colour, \x25CB still to go */
-                SetTextColor(dc, i < lit ? g_chat_accent : tint(MD_MARK));
-                TextOutW(dc, x, y, i < lit ? L"\x25CF" : L"\x25CB", 1);
-                GetTextExtentPoint32W(dc, L"\x25CF ", 2, &sz);
-                x += sz.cx;
-            }
-            RestoreDC(dc, -1);
         }
         SetTextAlign(dc, TA_TOP | TA_LEFT);
         SelectClipRgn(dc, NULL);
@@ -3429,45 +3388,26 @@ static void chat_ease(double now, int snap) {
     static double last;
     float dt = (float)fmin(0.1, now - last);
     last = now;
-    float p = hist_push_now(), pe = 1 - (1 - p) * (1 - p);
     float view_to = (float)g_chat_view_h, scroll_to = (float)g_chat_scroll;
-    float extra_to = 0;
-    if (g_peek == 1 || g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
-        float r = g_peek == 1 ? pe * g_peek_rfin : g_peek_rfin;
-        view_to = g_peek == 1 ? fminf(g_peek_h0 + r, (float)g_chat_view_h) : (float)g_chat_view_h;
-        extra_to = fmaxf(0, r - (view_to - g_peek_h0));
-        scroll_to = g_lat_y - r;
-    } else if (g_peek == -1) { /* the box shrinks toward the latest turn's height, its end staying in view */
-        int y_lat = g_pr_n ? g_pr[g_pr_n - 1].y0 : 0, h_lat = g_chat_body_h - y_lat;
-        if (h_lat > g_chat_view_h) h_lat = g_chat_view_h;
-        view_to = g_chat_view_h - pe * (g_chat_view_h - h_lat);
-        scroll_to = g_chat_body_h - view_to;
-    }
     float h_to = 2 * chat_pad() + g_chat_title_h + chat_gap() + view_to, y_to = (float)box_top_for((int)lroundf(h_to));
-    if (snap || !IsWindowVisible(g_chat)) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; }
-    else {
-        float k = 1 - expf(-dt * 16); /* (critically damped: no bounce) */
-        g_scroll_d += (scroll_to - g_scroll_d) * k; g_box_h += (h_to - g_box_h) * k; g_box_y += (y_to - g_box_y) * k;
-        g_peek_extra += (extra_to - g_peek_extra) * k;
-    }
-    if (snap || !IsWindowVisible(g_chat)) g_peek_extra = extra_to;
-    g_chat_anim = p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
-    if ((g_end_hold || g_grow_hold) && fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f && fabsf(extra_to - g_peek_extra) < .5f) {
-        g_end_hold = g_grow_hold = 0; /* the box has settled: from here the scroll is its own again (the wheel may have moved it meanwhile) */
-        g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to;
-        g_chat_anim = 1;
-    }
-    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to; }
+    static int vh_was;
+    float k = snap || !IsWindowVisible(g_chat) ? 1 : 1 - expf(-dt * 16); /* (critically damped: no bounce) */
+    int sizing = fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f; /* the box growing or moving this frame */
+    g_box_h += (h_to - g_box_h) * k; g_box_y += (y_to - g_box_y) * k;
+    if (fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f) { g_box_h = h_to; g_box_y = y_to; }
     /* both edges rounded, not the top and the height: the bottom edge then never wobbles a pixel against the top */
     int x = g_box_x, y = (int)lroundf(g_box_y), w = g_box_w, h = (int)lroundf(g_box_y + g_box_h) - y;
     int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
-    if (g_peek == -1 || g_end_hold) /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
-        g_scroll_d = (float)(g_chat_body_h > vh ? g_chat_body_h - vh : 0);
-    else if (g_peek == 1 || g_grow_hold) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
-                                            * the box grows this frame, and past its tallest they come down into it */
-        float sd = g_lat_y + g_peek_h0 - vh - g_peek_extra;
-        g_scroll_d = sd < 0 ? 0 : sd;
-    }
+    if (sizing && k < 1) { /* while the box changes height, what eases is the distance from the text's end to the view's bottom, so
+                            * the text sits still against that edge (unrolling: the latest turn's end stays put, the earlier turns show above) */
+        float off = g_chat_body_h - vh_was - g_scroll_d, off_to = g_chat_body_h - view_to - scroll_to;
+        off += (off_to - off) * k;
+        g_scroll_d = g_chat_body_h - vh - off;
+    } else g_scroll_d += (scroll_to - g_scroll_d) * k;
+    if (fabsf(scroll_to - g_scroll_d) < .5f && !sizing) g_scroll_d = scroll_to;
+    if (g_scroll_d < 0) g_scroll_d = 0;
+    vh_was = vh;
+    g_chat_anim = sizing || fabsf(scroll_to - g_scroll_d) > .5f;
     static RECT was;
     RECT now_rc = {x, y, x + w, y + h};
     if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_chat)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
@@ -3502,9 +3442,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (s->unread) strncat(title, " \xC2\xB7 new reply", sizeof title - strlen(title) - 1);
     if (g_pend && !strcmp(g_pend_sid, s->sid)) strncat(title, " \xC2\xB7 your reply waits for your answer in the terminal", sizeof title - strlen(title) - 1);
     if (g_single && g_focus_pinned && !g_rec_scene[0] && !strcmp(g_focus, s->sid)) strncat(title, " \xC2\xB7 pinned", sizeof title - strlen(title) - 1);
-    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_peek = 0; } /* opened, or another session's: its latest turn only */
-    else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's strip goes after a pause */
-    if (g_peek && hist_push_now() == 0 && !g_chat_anim) g_peek = 0; /* sprung back all the way: the latest turn alone again, the same picture */
+    if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = 0; g_unroll = 0; } /* opened, or another session's: its latest turn only */
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -3559,28 +3497,27 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (most > wh - below - chrome - (int)(16 * g_dpi)) most = wh - below - chrome - (int)(16 * g_dpi);
     if (most < g_chat_line * 3) most = g_chat_line * 3;
     g_chat_view_h = g_chat_body_h < most ? g_chat_body_h : most;
-    g_chat_most = most;
-    { /* the earlier turns came in above or went: the scroll moves with them, so the same lines stay in view */
+    g_chat_view_nat = g_chat_view_h;
+    { /* the earlier turns came in above: the scroll moves with them, so the same lines stay in view, and the box starts unrolling */
         static int was_full = -1;
-        int full = g_chat_hist || g_peek == 1;
+        int full = g_chat_hist;
         if (!snap && was_full >= 0 && full != was_full) {
             int d = g_chat_body_h - old_body;
             g_scroll_d += d; g_chat_scroll += d;
             if (g_scroll_d < 0) g_scroll_d = 0;
-            if (g_chat_scroll < 0) g_chat_scroll = 0; /* (sprung back: at the latest turn's top, where a push starts again) */
-            if (full && g_peek == 1) { g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
+            if (g_chat_scroll < 0) g_chat_scroll = 0;
+            if (full && g_unroll) g_unroll_h0 = old_view;
         }
         was_full = full;
+    }
+    if (g_unroll) { /* unrolled so far, and no further until the wheel goes on up */
+        g_chat_view_h = g_chat_view_nat < g_unroll_h0 + g_unroll_by ? g_chat_view_nat : g_unroll_h0 + g_unroll_by;
+        if (g_unroll_wait) { unroll(g_unroll_wait); g_unroll_wait = 0; }
     }
     if (g_chat_scroll > g_chat_body_h - g_chat_view_h) g_chat_scroll = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0;
     if (g_chat_auto && g_pr_n) { /* following: the newest prompt at the top, or the end while the turn runs */
         int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, live = g_mt_n && !g_mt[g_mt_n - 1].r;
         g_chat_scroll = live || g_pr[g_pr_n - 1].y0 > mx ? mx : g_pr[g_pr_n - 1].y0;
-    }
-    if (g_hist_land && g_pr_n) { /* the earlier turns just came in above: a little of the one before shows over the latest prompt; just left out: the end, where the wheel was */
-        int mx = g_chat_body_h > g_chat_view_h ? g_chat_body_h - g_chat_view_h : 0, y = g_hist_land == 2 ? mx : g_hist_land == 3 ? 0 : g_pr[g_pr_n - 1].y0 - 3 * g_chat_line;
-        g_chat_scroll = y < 0 ? 0 : y > mx ? mx : y;
-        g_hist_land = 0;
     }
     int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
     int w = (t.right > b.right ? t.right : b.right), h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad;
@@ -3588,7 +3525,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (w > maxw) w = maxw;
     w += chat_bar() + 2 * pad + sb;
     int x, y = 0;
-    if (g_peek && !snap) x = g_box_x; /* a push under way: the box stays on its side */
+    if (g_unroll && !snap && g_box_w) x = g_box_x; /* unrolling: the box stays on its side */
     else if (g_chat_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
     else chat_place(beside, cy, w, h + below, wa, &x, &y);
     if (x + w > wa.right) x = wa.right - w;
