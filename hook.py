@@ -240,6 +240,38 @@ def turn_scan(path, sent=()):
     return said, sum(tok.values())
 
 
+def words_for(path, tid):
+    """What Claude said in the message that makes tool call tid (its text before the call, as the terminal shows it):
+    "" when it said nothing, None when the message is not in the transcript yet (Claude Code writes it a moment after
+    the tool starts, so at PreToolUse it is often still missing)."""
+    if not tid:
+        return None
+    es = tail_entries(path)
+    mid = None
+    for e in es:
+        c = e["message"].get("content")
+        if e.get("type") == "assistant" and isinstance(c, list) and any(
+                isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") == tid for x in c):
+            mid = e["message"].get("id") or id(e)
+            break
+    if mid is None:
+        return None
+    said = []
+    for e in reversed(es):  # oldest first: its blocks in order (one transcript line each, the same message id)
+        m = e["message"]
+        if e.get("type") == "assistant" and (m.get("id") or None) == mid and isinstance(m.get("content"), list):
+            said += [x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text"]
+    return "\n".join(x for x in said if x.strip()).strip()
+
+
+def say_before(steps, i, said):
+    """Claude's words put in before step i (once: not when the same words are there already)."""
+    said = one_line(said, 300)
+    if not said or any(isinstance(x, list) and len(x) > 1 and x[0] == "@say" and x[1] == said for x in steps):
+        return steps
+    return steps[:i] + [["@say", said]] + steps[i:]
+
+
 def interrupted(path, p):
     """Whether the turn before prompt p was stopped by you (Esc): the transcript's "[Request interrupted" line comes
     after its last prompt."""
@@ -347,18 +379,20 @@ def on_turn(sid, ev, d):
         t = turns[-1]
         tool = str(d.get("tool_name", ""))[:40]
         if ev == "PreToolUse":
-            step = [tool, step_detail(tool, d.get("tool_input"))]
+            tid = str(d.get("tool_use_id") or "")[:80]
+            step = [tool, step_detail(tool, d.get("tool_input"))] + ([tid] if tid else [])  # (the id: its words may come later)
             s = t.get("s") if isinstance(t.get("s"), list) else []
-            try:  # what Claude said before this call (once), and the turn's tokens so far
-                said, tok = turn_scan(d.get("transcript_path"), list(t.get("you") or []))
-                said = one_line(said, 300)
+            try:  # the turn's tokens so far, and what Claude said in the message making this call (if written yet)
+                _, tok = turn_scan(d.get("transcript_path"), list(t.get("you") or []))
                 if tok > int(t.get("k") or 0):
                     t["k"] = tok
+                said = words_for(d.get("transcript_path"), tid)
             except Exception:
-                said = ""
-            if said and not any(x[0] == "@say" and x[1] == said for x in s if isinstance(x, list) and len(x) > 1):
-                s = s + [["@say", said]]
-            t["s"] = (s + [step])[-STEPS:]
+                said = None
+            s = s + [step]
+            if said:
+                s = say_before(s, len(s) - 1, said)
+            t["s"] = s[-STEPS:]
             t["n"] = int(t.get("n") or 0) + 1
             t["ts"] = int(time.time())
             c = t.get("c") if isinstance(t.get("c"), dict) else {}
@@ -368,6 +402,16 @@ def on_turn(sid, ev, d):
         elif ev == "PostToolUse":
             t["ts"] = int(time.time())  # (the last sign of life: the running line reddens after a long quiet)
             fields["run"] = None
+            tid = str(d.get("tool_use_id") or "")[:80]
+            s = t.get("s") if isinstance(t.get("s"), list) else []
+            at = next((i for i, x in enumerate(s) if isinstance(x, list) and len(x) > 2 and x[2] == tid), -1) if tid else -1
+            if at >= 0 and not (at > 0 and isinstance(s[at - 1], list) and s[at - 1][:1] == ["@say"]):
+                try:  # its words were not written yet when it started: now they are, before it
+                    said = words_for(d.get("transcript_path"), tid)
+                except Exception:
+                    said = None
+                if said:
+                    t["s"] = say_before(s, at, said)[-STEPS:]
         elif ev == "Stop":
             t["r"] = d.get("_reply", "")[:MAX_TEXT]
             t["d"] = 1
