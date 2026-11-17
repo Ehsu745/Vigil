@@ -92,8 +92,7 @@ static double g_away_after = 120;   /* --away: seconds without keyboard or mouse
 static int g_away;
 static int g_chat_middle;            /* Settings > Chat > Place: in the middle of the screen, else next to the core */
 static int g_chat_pref = -1;         /* Settings > Chat > Place: the side it opens on first (0 left, 1 right, 2 below, 3 above), -1 the first free one */
-static int g_hover_pause = 1;        /* Settings > Chat > Hover pause: an index of HOVER_PAUSES */
-static const double HOVER_PAUSES[4] = {0, 0.3, 0.6, 1.0};
+static int g_hover_pause = 3;        /* Settings > Box > Hover pause: tenths of a second, 0 to 20 (a slider) */
 static int g_chat_pop;               /* Settings > Chat > New reply: a finished reply opens its box for POP_FOR s, no hover needed */
 enum { POP_FOR = 10 };
 static char g_pop_sid[64];           /* the session whose box popped open, until g_pop_until */
@@ -108,6 +107,10 @@ static unsigned g_chat_custom = 0x2A2F3A; /* the colour picked in the palette wi
 static int g_text_col;              /* Settings > Colours > Text: 0 auto (light on a dark box, dark on a light one), 1-4 TEXT_COLS, 5 g_text_custom */
 static unsigned g_text_custom = 0xF2F2F5;
 static int g_wheel_spin;            /* Settings > Scroll on a core: how the wheel spins it, one of WHEEL_NAMES (4: not at all) */
+static int g_push_wait = 6;          /* Settings > Box > Fuse waits: tenths of a second with no notch before its beads run back (2 to 20) */
+static int g_chat_sbar = 1;          /* Settings > Chat > Scroll bar: down the box's right edge, where in a long reply it is */
+static int g_caret = 1, g_caret_col; /* Settings > Chat > Cursor: the reply line's caret, one of CARET_NAMES, in the text's colour (0), the accent (1) or g_caret_custom (2) */
+static unsigned g_caret_custom = 0xFF5FAF;
 static int g_chat_mono = 1;          /* Settings > Chat box font: the terminal's monospaced face, like Claude Code (else Segoe UI) */
 static int g_open_settings;         /* --settings: open the Settings window at once */
 static float g_scroll_arg;           /* --settings-scroll PX: set once the page is laid out (it is clamped to the page until then) */
@@ -233,7 +236,7 @@ static wchar_t g_my_name[MY_MAX][24];
 static int g_renaming;                /* the chosen theme's name being typed (Settings > YOUR THEME > Rename); g_ren_was to go back to */
 static wchar_t g_ren_was[24];
 static RECT g_cp_anchor;             /* the swatch whose colour is being changed, in the Settings window's pixels: the picker's window opens under it */
-static int g_pick_shade;              /* the picker open for Settings > Look > Darkness colour instead of a theme's colour */
+static int g_pick_shade;              /* the picker open for Settings > Look > Darkness colour (1) or Chat > Cursor's colour (2) instead of a theme's colour */
 static unsigned g_pk_hist[64];        /* the picker's steps since it opened (Ctrl+Z, Ctrl+Y): [0] the colour it opened on */
 static int g_pk_hn, g_pk_hp;          /* how many, and the one shown */
 static int g_pk_nf = -1; static double g_pk_nt; /* the value last nudged and when: nudges in a row are one step */
@@ -293,6 +296,9 @@ static unsigned inkx(unsigned v);
 /* the reply's own text (and what is typed): the chosen colour, or on Auto the usual light text, dark on a light box */
 static unsigned text_bodyx(void) { return pal()->text; }
 static COLORREF text_body(void) { unsigned v = text_bodyx(); return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
+static const unsigned CARET_COLS[5] = {0, 0, 0xD77757, 0x5FD7FF, 0x87D75F}; /* its picker's presets (0, 1: the theme's text and accent) */
+static unsigned caret_preset(int i) { return i == 0 ? text_bodyx() : i == 1 ? pal()->accent : CARET_COLS[i]; }
+static unsigned caret_x(int c) { return c == 2 ? g_caret_custom : caret_preset(c); } /* 0xRRGGBB */
 static unsigned inkx(unsigned v) { return box_light() ? ((v >> 16 & 255) * 3 / 10) << 16 | ((v >> 8 & 255) * 3 / 10) << 8 | (v & 255) * 3 / 10 : v; }
 /* the wheel over a core: it spins one way or another (Settings > Scroll on a core). A sideways scroll (a tilt wheel, or
  * a two-finger swipe on a touchpad, which sends both at once) spins it about the other axis, so a swipe spins it any
@@ -517,7 +523,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.vigil/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows, chat_fitw, chat_fith; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_pref, hover_pause, chat_pop, turns_all, steps_mode, push_need, fuse_at, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows, chat_fitw, chat_fith; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_pref, chat_sbar, push_wait, caret, caret_col, hover_pause, chat_pop, turns_all, steps_mode, push_need, fuse_at, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom, caret_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -529,7 +535,7 @@ static void remember_launch(void) {
     g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom; g_launch.threads = g_threads;
     g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.chat_cols = g_chat_cols; g_launch.chat_rows = g_chat_rows; g_launch.chat_fitw = g_chat_fitw; g_launch.chat_fith = g_chat_fith; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.backdrop = g_backdrop; g_launch.bd_w = g_bd_w; g_launch.bd_a = g_bd_a; g_launch.bd_core = BACKDROP_CORE; g_launch.shade_col = g_shade_col; g_launch.shade_custom = g_shade_custom; g_launch.away = g_away_after; g_launch.chat_middle = g_chat_middle; g_launch.chat_mono = g_chat_mono;
-    g_launch.chat_pref = g_chat_pref; g_launch.hover_pause = g_hover_pause; g_launch.chat_pop = g_chat_pop; g_launch.turns_all = g_turns_all; g_launch.steps_mode = g_steps_mode; g_launch.push_need = g_push_need; g_launch.fuse_at = g_fuse_at;
+    g_launch.chat_pref = g_chat_pref; g_launch.chat_sbar = g_chat_sbar; g_launch.push_wait = g_push_wait; g_launch.caret = g_caret; g_launch.caret_col = g_caret_col; g_launch.caret_custom = g_caret_custom; g_launch.hover_pause = g_hover_pause; g_launch.chat_pop = g_chat_pop; g_launch.turns_all = g_turns_all; g_launch.steps_mode = g_steps_mode; g_launch.push_need = g_push_need; g_launch.fuse_at = g_fuse_at;
     g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom; g_launch.theme = g_theme;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
@@ -543,7 +549,7 @@ static void restore_launch(void) {
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads;
     g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_fitw = g_launch.chat_fitw; g_chat_fith = g_launch.chat_fith; g_others = g_launch.others;
     g_labels = g_launch.labels; g_backdrop = g_launch.backdrop; g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); g_shade_col = g_launch.shade_col; g_shade_custom = g_launch.shade_custom; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
-    g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at;
+    g_chat_pref = g_launch.chat_pref; g_chat_sbar = g_launch.chat_sbar; g_push_wait = g_launch.push_wait; g_caret = g_launch.caret; g_caret_col = g_launch.caret_col; g_caret_custom = g_launch.caret_custom; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at;
     g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom; g_theme = g_launch.theme;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
     snprintf(g_frame, sizeof g_frame, "%s", g_launch.frame);
@@ -613,13 +619,19 @@ static void settings_load(void) {
     if (json_num(buf, "previewLight", &v)) g_pv_light = v != 0;
     if (json_num(buf, "tipMiddle", &v)) g_chat_middle = v != 0;
     if (json_num(buf, "chatSide", &v) && v >= -1 && v <= 3) g_chat_pref = (int)v;
-    if (json_num(buf, "hoverPause", &v) && v >= 0 && v < 4) g_hover_pause = (int)v;
+    if (json_num(buf, "hoverPause", &v) && v >= 0 && v < 4) { static const int OLD[4] = {0, 3, 6, 10}; g_hover_pause = OLD[(int)v]; } /* (an older file: the four chips) */
+    if (json_num(buf, "hoverPauseS", &v) && v >= 0 && v <= 2) g_hover_pause = (int)lround(v * 10);
     if (json_num(buf, "chatPop", &v)) g_chat_pop = v != 0;
     if (json_num(buf, "chatTurns", &v)) g_turns_all = v != 0;
     if (json_num(buf, "chatSteps", &v) && v >= 0 && v <= 2) g_steps_mode = (int)v;
     if (json_num(buf, "chatPush", &v) && v >= 1 && v <= 60) g_push_need = (int)v;
     if (json_num(buf, "fuseAt", &v) && v >= 0 && v <= 1) g_fuse_at = (int)v;
     if (json_num(buf, "tipMono", &v)) g_chat_mono = v != 0;
+    if (json_num(buf, "chatScrollBar", &v)) g_chat_sbar = v != 0;
+    if (json_num(buf, "pushWait", &v) && v >= .2 && v <= 2) g_push_wait = (int)lround(v * 10);
+    if (json_num(buf, "caret", &v) && v >= 0 && v < 6) g_caret = (int)v;
+    if (json_num(buf, "caretColor", &v) && v >= 0 && v < 3) g_caret_col = (int)v;
+    if (json_num(buf, "caretCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_caret_custom = (unsigned)v;
     if (json_num(buf, "tipColor", &v) && v >= 0 && v < 6) g_chat_bg = (int)v;
     if (json_num(buf, "tipCustom", &v) && v >= 0 && v <= 0xFFFFFF) g_chat_custom = (unsigned)v;
     if (json_num(buf, "textColor", &v) && v >= 0 && v < 6) g_text_col = (int)v;
@@ -700,8 +712,9 @@ static void settings_save(void) {
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
             g_font, g_core, g_scale, g_glow, g_gravity, g_chat_size, g_others, g_labels, g_chat_middle, g_chat_mono, g_chat_bg, g_chat_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
-    fprintf(f, ", \"chatSide\": %d, \"hoverPause\": %d, \"chatPop\": %d, \"chatTurns\": %d, \"chatSteps\": %d, \"chatPush\": %d, \"fuseAt\": %d", g_chat_pref, g_hover_pause, g_chat_pop, g_turns_all, g_steps_mode, g_push_need, g_fuse_at);
+    fprintf(f, ", \"chatSide\": %d, \"hoverPauseS\": %g, \"chatPop\": %d, \"chatTurns\": %d, \"chatSteps\": %d, \"chatPush\": %d, \"fuseAt\": %d", g_chat_pref, g_hover_pause / 10.0, g_chat_pop, g_turns_all, g_steps_mode, g_push_need, g_fuse_at);
     fprintf(f, ", \"chatCols\": %d, \"chatRows\": %d, \"chatFitW\": %d, \"chatFitH\": %d", g_chat_cols, g_chat_rows, g_chat_fitw, g_chat_fith);
+    fprintf(f, ", \"chatScrollBar\": %d, \"pushWait\": %g, \"caret\": %d, \"caretColor\": %d, \"caretCustom\": %u", g_chat_sbar, g_push_wait / 10.0, g_caret, g_caret_col, g_caret_custom);
     fprintf(f, ", \"chatTheme\": %d, \"myThemes\": [", g_theme);
     for (int i = 0; i < g_my_n * 9; i++) fprintf(f, "%s%u", i ? ", " : "", ((const unsigned *)g_mine)[i]);
     fprintf(f, "], \"myThemeNames\": \"");
@@ -2254,6 +2267,7 @@ static int g_halt_flow;              /* a push just let the earlier turns in or 
 static double g_last_notch;          /* (the last notch over the box: a pause starts a new scroll) */
 static int g_push_need = 20;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
 static int g_gap_lit;                /* the fuse's beads lit: one a notch */
+static double push_wait(void) { return g_push_wait / 10.0; }
 static double g_bead_t[8];           /* when each bead lit (it pops, then settles) */
 static double g_fuse_done;           /* when a push did what it does (the star turns, or it went out), then the fuse fades */
 static double g_fuse_from;           /* when this push began (the fuse fades in) */
@@ -2944,7 +2958,7 @@ static void chat_refont(void) {
 }
 
 /* how far the wheel has gone on past an edge, 0 to 1 (nothing after a 0.6 s pause) */
-static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / g_push_need); }
+static float hist_push_now(void) { return wall() - g_push_at > push_wait() ? 0 : fminf(1, fabsf(g_push) / g_push_need); }
 /* the earlier turns in (laid out above the latest, the box then growing to show them, the latest turn staying put),
  * or out (the box shrinking to the latest turn, its end in view) */
 static void hist_commit(int in) {
@@ -2954,7 +2968,7 @@ static void hist_commit(int in) {
 }
 
 /* the wheel over a core (or over the box while a reply is typed) scrolls a long reply, 3 lines a notch; going on
- * for HIST_PUSH notches (no pause over 0.6 s) past the top lets the earlier turns in above the latest, and past the bottom
+ * for HIST_PUSH notches (no pause over Fuse waits) past the top lets the earlier turns in above the latest, and past the bottom
  * shows the latest only again */
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
@@ -2968,10 +2982,11 @@ static void chat_scroll(float notches) {
     }
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
     int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0; /* (nothing moves in the box while the fuse fills) */
-    int out = notches < 0 && g_chat_hist && !g_end_hold && (g_fuse_dir == -1 || bottom); /* on down past the end: the fuse burns out, then only the latest turn */
+    int out = notches < 0 && g_chat_hist && !g_end_hold && bottom; /* on down past the end: the fuse burns out, then only the latest turn (only at the end: a push
+                                                                     * just before, scrolled back up from, while its fuse still showed, ate the next notches down) */
     if (in || out) {
         double now = wall();
-        if (now - g_push_at > 0.6 || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
+        if (now - g_push_at > push_wait() || g_push * notches < 0) g_push = 0; /* a pause, or the other way: start again */
         g_push_at = now; g_push += notches;
         int dir = in ? 1 : -1;
         if (g_fuse_dir != dir || (g_fuse_done > 0 && now - g_fuse_done > .05)) { g_fuse_dir = dir; g_fuse_from = now; g_fuse_done = 0; }
@@ -2989,7 +3004,7 @@ static void chat_scroll(float notches) {
     if (to != g_chat_scroll) {
         int edge = to == 0 || to == g_chat_body_h - g_chat_view_h;
         if (edge) { g_halt_until = wall() + .2; g_halt_dir = notches > 0 ? 1 : -1; } /* (scrolled into the top or the end: a halt before a push) */
-        g_chat_scroll = to; g_chat_auto = 0; InvalidateRect(g_chat, NULL, FALSE);
+        g_chat_scroll = to; g_chat_auto = 0; g_push = 0; InvalidateRect(g_chat, NULL, FALSE); /* (scrolled: a push half made starts again) */
     }
 }
 
@@ -3202,7 +3217,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(dc, g_chat_accent); /* the title in the theme's accent */
         SelectObject(dc, g_chat_tf);
         if (g_chat_title) DrawTextW(dc, g_chat_title, -1, &t, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-        int top = t.bottom + chat_gap(), sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
+        int top = t.bottom + chat_gap(), sb = g_chat_sbar && g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
         int vh = r.bottom - pad - top, sd = (int)lroundf(g_scroll_d); /* the view as the box is now (it grows and shrinks with a push), and the scroll as it glides */
         if (vh < 0) vh = 0;
         g_sd = sd;
@@ -3589,7 +3604,7 @@ static void fuse_tick(double now, int bx, int by, int bw, int bh) {
         alpha = g_fuse_dir > 0 ? (float)(t < .6 ? 1 : 1 - (t - .6) / .4) : (float)(t < .15 ? 1 : 1 - (t - .15) / .3);
     } else if (p > 0) lit = g_fuse_dir > 0 ? n : HIST_PUSH - n;
     else { /* a pause: back the way it came, 60 ms a bead, then gone */
-        double t = now - (g_push_at + .6);
+        double t = now - (g_push_at + push_wait());
         int k = (int)(t / .06);
         lit = g_fuse_dir > 0 ? n - k : HIST_PUSH - n + k;
         double end = n * .06; /* (n beads to run back) */
@@ -3856,7 +3871,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
         g_chat_scroll = y < 0 ? 0 : y > mx ? mx : y;
         g_hist_land = 0;
     }
-    int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
+    int sb = g_chat_sbar && g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0; /* (Settings > Chat > Scroll bar) */
     int w = maxw, h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad; /* (the same width every time: a short reply no longer makes a narrow box) */
     (void)b;
     w += chat_bar() + 2 * pad + sb;
@@ -4364,6 +4379,57 @@ static void edit_typing_face(HWND w, int cjk) {
     cf.bCharSet = cjk ? CHINESEBIG5_CHARSET : DEFAULT_CHARSET;
     SendMessageW(w, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
+/* Settings > Chat > Cursor: the caret in the reply line, a shape over one character cell in a colour of its own, as a
+ * terminal's cursor (Windows Terminal's six). The rich edit makes a plain caret of its own when it gets the focus, a
+ * key moves it, or a run's font changes it; this one is made in its place after each of those (caret_msg). A caret is
+ * XORed onto the field, so its bitmap is the colour wanted XOR the field's: over the field it shows that colour, and a
+ * filled box turns the letter under it to the field's colour (with the text's colour), as in a terminal. */
+static HBITMAP g_caret_bm;
+static int caret_msg(UINT m) {
+    return m == WM_SETFOCUS || m == WM_KEYDOWN || m == WM_CHAR || m == WM_LBUTTONDOWN || m == WM_LBUTTONUP || m == WM_LBUTTONDBLCLK || m == WM_IME_COMPOSITION || m == WM_IME_ENDCOMPOSITION ||
+           m == WM_SETTEXT || m == WM_SETFONT || m == WM_SIZE || m == WM_VSCROLL || m == EM_SETSEL || m == EM_EXSETSEL || m == EM_REPLACESEL || m == EM_SETCHARFORMAT || m == EM_PASTESPECIAL || m == EM_SCROLLCARET;
+}
+static void caret_apply(HWND w) {
+    if (!w || GetFocus() != w || !g_input_font) return;
+    CHARRANGE cr;
+    SendMessageW(w, EM_EXGETSEL, 0, (LPARAM)&cr);
+    if (cr.cpMin != cr.cpMax) return; /* a selection: the control hides the caret */
+    POINT p;
+    if (!GetCaretPos(&p)) return;
+    HDC sdc = GetDC(NULL), dc = CreateCompatibleDC(sdc);
+    HGDIOBJ of = SelectObject(dc, g_input_font);
+    TEXTMETRICW tm;
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    int cw = tm.tmAveCharWidth > 0 ? tm.tmAveCharWidth : 8, h = tm.tmHeight > 0 ? tm.tmHeight : 16, t = max(1, (int)lroundf(1.5f * (float)g_dpi)), one = max(1, (int)lroundf((float)g_dpi));
+    int bw = g_caret == 1 ? max(2, (int)lroundf(2 * (float)g_dpi)) : cw;
+    HBITMAP bm = CreateCompatibleBitmap(sdc, bw, h);
+    ReleaseDC(NULL, sdc);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    RECT all = {0, 0, bw, h};
+    FillRect(dc, &all, GetStockObject(BLACK_BRUSH)); /* (black: XOR leaves the field as it is) */
+    unsigned c = caret_x(g_caret_col), f = (unsigned)chat_field();
+    COLORREF x = RGB((c >> 16 & 255) ^ GetRValue(f), (c >> 8 & 255) ^ GetGValue(f), (c & 255) ^ GetBValue(f));
+    HBRUSH br = CreateSolidBrush(x);
+    RECT a[2]; int n = 1;
+    switch (g_caret) {
+    case 0: SetRect(&a[0], 0, h - max(2, h / 4), bw, h); break;                                     /* Vintage: the lowest quarter */
+    case 1: SetRect(&a[0], 0, 0, bw, h); break;                                                      /* Bar */
+    case 2: SetRect(&a[0], 0, h - t, bw, h); break;                                                  /* Underscore */
+    case 3: SetRect(&a[0], 0, h - one, bw, h); SetRect(&a[1], 0, h - 3 * one - one, bw, h - 3 * one); n = 2; break; /* Double underscore */
+    case 4: SetRect(&a[0], 0, 0, bw, h); break;                                                      /* Filled box */
+    default: FrameRect(dc, &all, br); n = 0; break;                                                  /* Empty box */
+    }
+    for (int i = 0; i < n; i++) FillRect(dc, &a[i], br);
+    DeleteObject(br);
+    SelectObject(dc, ob);
+    DeleteDC(dc);
+    CreateCaret(w, bm, bw, h);
+    SetCaretPos(p.x, p.y);
+    ShowCaret(w);
+    if (g_caret_bm) DeleteObject(g_caret_bm); /* (the caret it replaced is gone with CreateCaret) */
+    g_caret_bm = bm;
+}
 static int paste_image(void);
 static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT) g_stat_paint_edit++;
@@ -4378,14 +4444,16 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_KEYDOWN && wp == VK_RETURN && (g_send_ctrl ? ctrl_down : !shift_down)) { send_reply(); return 0; } /* Enter sends (Shift+Enter: a new line), or Ctrl+Enter (Settings > Shortcuts) */
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { input_close(); return 0; }
     int paste = msg == WM_PASTE || (msg == WM_KEYDOWN && ((wp == 'V' && ctrl_down) || (wp == VK_INSERT && shift_down)));
-    if (paste) { if (!paste_image()) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); } g_restyle = 0; edit_style(); return 0; } /* an image becomes a token; text pastes as text; either styled like the rest at once */
+    if (paste) { if (!paste_image()) { g_restyle = 1; SendMessageW(w, EM_PASTESPECIAL, CF_UNICODETEXT, 0); } g_restyle = 0; edit_style(); caret_apply(w); return 0; } /* an image becomes a token; text pastes as text; either styled like the rest at once */
     if (msg == WM_CHAR && wp == 22) return 0; /* (the character Ctrl+V would type) */
     if (msg == WM_KEYDOWN && ctrl_down && (wp == 'C' || wp == 'W' || wp == 'U' || wp == VK_BACK) && edit_cli_key(w, (int)wp)) return 0; /* like a command line */
     if (msg == WM_CHAR && ctrl_down && (wp == 3 || wp == 23 || wp == 21 || wp == 127)) return 0; /* (the characters those keys would type) */
     if (msg == WM_KEYDOWN && (wp == VK_BACK || wp == VK_DELETE) && g_attach_n && token_key(w, wp == VK_BACK)) return 0; /* a whole image token at once */
     if (msg == WM_CHAR && (wp == 27 || (wp == L'\r' && !g_send_ctrl && !shift_down) || (wp == L'\n' && g_send_ctrl))) return 0;
     if (msg == WM_MOUSEWHEEL) { chat_scroll(GET_WHEEL_DELTA_WPARAM(wp) / 120.0f); return 0; } /* the wheel scrolls the reply */
-    return CallWindowProcW(g_edit_proc, w, msg, wp, lp);
+    LRESULT res = CallWindowProcW(g_edit_proc, w, msg, wp, lp);
+    if (caret_msg(msg)) caret_apply(w); /* the caret as Settings > Chat > Cursor has it */
+    return res;
 }
 
 static void add_drop(HDROP d, int finish);
@@ -4745,7 +4813,6 @@ IDropTarget g_dt_ref = {&g_dt_vtbl};
  * The core drawn on top is asked first. */
 static int core_at(POINT p, float *lx, float *ly) {
     if (g_menu_open) return -1;
-    if (g_set && IsWindowVisible(g_set)) { RECT sr; GetWindowRect(g_set, &sr); if (PtInRect(&sr, p)) return -1; } /* (the Settings window is in front of the cores) */
     for (int k = -1; k < g_core_n; k++) {
         int i = k < 0 ? g_top : k;
         if (i < 0 || i >= g_core_n || (k >= 0 && i == g_top)) continue;
@@ -4901,7 +4968,7 @@ static void track_mouse(double now) {
     if (hit >= 0 && g_pop_until > now && hit == index_of(g_pop_sid)) { g_pop_until = 0; g_hover_since = now - 10; } /* onto the popped one: it stays open as a hover's would, no pause */
     else if (hit >= 0) g_pop_until = 0;
     int open_here = hit >= 0 && IsWindowVisible(g_chat) && !strcmp(g_chat_sid, room->s[hit].sid); /* (a press resets the pause: the box it opened stays) */
-    if (hit < 0 || (now - g_hover_since < HOVER_PAUSES[g_hover_pause & 3] && !open_here)) { chat_hide(); return; } /* a short pause before the chat box (Settings > Chat > Hover pause) */
+    if (hit < 0 || (now - g_hover_since < g_hover_pause / 10.0 && !open_here)) { chat_hide(); return; } /* a short pause before the chat box (Settings > Chat > Hover pause) */
     room->s[hit].unread = 0; /* its box is open, so the reply is seen: READY ends (once its pieces are home) */
     RECT r = g_core_rc[hit], beside = r, o;
     if (g_single && (hit == g_top || IntersectRect(&o, &r, &g_cluster_rc))) { beside = cluster_cores(hit); r = beside; } /* (one flung away: beside itself) */
@@ -5512,7 +5579,7 @@ static double tick_interval(void) {
  * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
 #include "lucide.h"
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
-       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG, R_HOVERP, R_POP, R_TURNS, R_STEPS, R_CHATW, R_CHATH, R_CHATWFIT, R_CHATHFIT, R_PUSH, R_FUSEAT };
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG, R_HOVERP, R_POP, R_TURNS, R_STEPS, R_CHATW, R_CHATH, R_CHATWFIT, R_CHATHFIT, R_PUSH, R_FUSEAT, R_SBAR, R_CARET, R_CARETCOL, R_PUSHWAIT };
 /* Settings > Performance: pictures a second for each kind of moment (0: the monitor's refresh rate), the steps a
  * slider stops at; and how many threads draw */
 #define NRATES 12
@@ -5529,10 +5596,10 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     return best;
 }
 enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE, K_PKF, K_CPMOVE, K_PKB };
-enum { PG_LOOK, PG_CLUSTER, PG_CHAT, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
-static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Chat", L"Motions", L"Shortcuts", L"Performance"};
-static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
-static const char *PG_ICON[PG_N] = {"palette", "orbit", "message", "activity", "keyboard", "gauge"};
+enum { PG_LOOK, PG_CLUSTER, PG_CHAT, PG_BOX, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
+static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Chat", L"Box", L"Motions", L"Shortcuts", L"Performance"};
+static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"how a reply reads", L"where, when and how big it opens", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
+static const char *PG_ICON[PG_N] = {"palette", "orbit", "message", "scan", "activity", "keyboard", "gauge"};
 typedef struct { RECT r; int kind, row, val, n; float t0, t1; } SetHit; /* a slider: n stops from t0 to t1 (pixels) */
 static const int PV_STATES[6] = {ST_IDLE, ST_THINK, ST_WORK, ST_WAIT, ST_CHEER, ST_SLEEP};
 static const wchar_t *PV_NAMES[6] = {L"Idle", L"Thinking", L"Working", L"Needs you", L"Done", L"Asleep"};
@@ -5545,6 +5612,7 @@ static const unsigned S_BG = 0x18181B, S_BAND = 0x0F0F12, S_CARD = 0x212126, S_T
                       S_SIDE = 0x131316, S_RULE = 0x2C2C33;
 static Col hexc(unsigned v) { Col c = {(v >> 16 & 255) / 255.0f, (v >> 8 & 255) / 255.0f, (v & 255) / 255.0f}; return c; }
 static COLORREF hexr(unsigned v) { return RGB(v >> 16 & 255, v >> 8 & 255, v & 255); }
+static unsigned crx(COLORREF c) { return (unsigned)GetRValue(c) << 16 | (unsigned)GetGValue(c) << 8 | GetBValue(c); } /* (back to 0xRRGGBB) */
 
 static Pane g_sl, g_so;             /* the window's still layer (redrawn when something changes) and what is shown */
 int g_sl_dirty = 1; /* (declared before tick, which sets it too) */
@@ -5620,6 +5688,10 @@ static int set_current(int row) {
         case R_STEPS: return g_steps_mode;
         case R_PUSH: { int k = 0; for (int i = 1; i < 13; i++) if (abs(PUSH_STOPS[i] - g_push_need) < abs(PUSH_STOPS[k] - g_push_need)) k = i; return k; }
         case R_FUSEAT: return g_fuse_at;
+        case R_SBAR: return g_chat_sbar;
+        case R_PUSHWAIT: return g_push_wait - 2;
+        case R_CARET: return g_caret;
+        case R_CARETCOL: return g_caret_col;
         case R_CHATFONT: return !g_chat_mono;
         case R_TEXT: if (i < 5 && g_font == FONTS[i]) return i; break;
         case R_LABELS: return g_labels;
@@ -5711,6 +5783,7 @@ static int theme_copy(void) {
 }
 /* the picker's colour into the theme's role, everywhere it shows */
 static void cpick_apply(void) {
+    if (g_pick_shade == 2) { g_caret_custom = hsv_x(g_pk_h, g_pk_s, g_pk_v); g_caret_col = 2; settings_applied(0); return; }
     if (g_pick_shade) { g_shade_custom = hsv_x(g_pk_h, g_pk_s, g_pk_v); g_shade_col = 5; settings_applied(0); return; }
     int k = g_theme - TH_N;
     if (k < 0 || k >= g_my_n || g_pick_role < 0) return;
@@ -5860,11 +5933,16 @@ static void ren_end(int keep) {
 }
 static void set_choose(int row, int val) {
     if (row == R_SHADECOL) { /* your own colour: the picker's window opens on it (clicked again: it closes); a preset closes it */
-        int again = val == 5 && g_pick_shade;
+        int again = val == 5 && g_pick_shade == 1;
         pk_close();
         if (val == 5 && !again) { g_pick_shade = 1; pk_begin(g_shade_custom); }
     }
-    if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && row != R_CHATWFIT && row != R_CHATHFIT && row != R_CHATW && row != R_CHATH) return; /* (a switch: flipped whatever it is) */
+    if (row == R_CARETCOL) { /* the same for the cursor's own colour */
+        int again = val == 2 && g_pick_shade == 2;
+        pk_close();
+        if (val == 2 && !again) { g_pick_shade = 2; pk_begin(g_caret_custom); }
+    }
+    if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && row != R_CHATWFIT && row != R_CHATHFIT && row != R_SBAR && row != R_CHATW && row != R_CHATH) return; /* (a switch: flipped whatever it is) */
     switch (row) {
     case R_SHAPE: snprintf(g_shape_name, sizeof g_shape_name, "%s", SHAPES[val]); shape_make(&g_shape, g_shape_name); break;
     case R_CORE: g_core = CORES[val]; break;
@@ -5875,7 +5953,7 @@ static void set_choose(int row, int val) {
     case R_HOLETILT: HOLE_TILT = TILTS[val]; break;
     case R_OTHERS: g_others = !g_others; break;
     case R_CHATAT: g_chat_middle = val == 5; if (val < 5) g_chat_pref = val - 1; chat_forget_side(); chat_hide(); break;
-    case R_HOVERP: g_hover_pause = val; break;
+    case R_HOVERP: if (val >= 0 && val <= 20) g_hover_pause = val; break;
     case R_POP: g_chat_pop = val; break;
     case R_TURNS: g_turns_all = val; chat_hide(); break;
     case R_STEPS: g_steps_mode = val; chat_hide(); break;
@@ -5893,6 +5971,10 @@ static void set_choose(int row, int val) {
     case R_CHATHFIT: g_chat_fith = !g_chat_fith; chat_hide(); break;
     case R_CHATBG: g_theme = TH_VIGIL; g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
+    case R_SBAR: g_chat_sbar = !g_chat_sbar; chat_hide(); break;
+    case R_PUSHWAIT: if (val >= 0 && val <= 18) g_push_wait = val + 2; break;
+    case R_CARET: g_caret = val; caret_apply(g_edit); break;
+    case R_CARETCOL: g_caret_col = val; caret_apply(g_edit); break;
     case R_ROLE: { /* the theme card: a colour opened in the picker (a built-in theme copied first), Make a copy, Delete, Rename */
         if (val == 11 || (val < 9 && g_theme < TH_N)) { if (g_renaming) ren_end(1); if (!theme_copy()) return; theme_kick(); if (val == 11) { pk_close(); break; } }
         int k = g_theme - TH_N;
@@ -5917,7 +5999,7 @@ static void set_choose(int row, int val) {
     case R_CSUG: /* that colour as a built-in theme has it (Darkness colour: a preset) */
         if (!pk_open()) return;
         g_pk_edit = -1;
-        pk_set(g_pick_shade ? SHADE_COLS[val % 5] : ((const unsigned *)pal_of(val))[g_pick_role]);
+        pk_set(g_pick_shade == 2 ? caret_preset(val % 5) : g_pick_shade ? SHADE_COLS[val % 5] : ((const unsigned *)pal_of(val))[g_pick_role]);
         cpick_apply(); pk_commit(-1);
         break;
     case R_THEME:
@@ -5969,9 +6051,13 @@ static void page_reset(int pg) {
         g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); main_place(); break;
     case PG_CLUSTER: g_others = g_launch.others; g_labels = g_launch.labels; g_gravity = g_launch.gravity; g_away_after = g_launch.away; g_wheel_spin = g_launch.wheel_spin; break;
     case PG_CHAT:
-        g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_fitw = g_launch.chat_fitw; g_chat_fith = g_launch.chat_fith; g_chat_bg = g_launch.chat_bg;
-        g_text_col = g_launch.text_col; g_chat_middle = g_launch.chat_middle; chat_refont(); chat_hide();
-        g_chat_pref = g_launch.chat_pref; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at; break;
+        g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_bg = g_launch.chat_bg; g_text_col = g_launch.text_col;
+        g_caret = g_launch.caret; g_caret_col = g_launch.caret_col; g_caret_custom = g_launch.caret_custom; g_turns_all = g_launch.turns_all; g_steps_mode = g_launch.steps_mode;
+        chat_refont(); chat_hide(); break;
+    case PG_BOX:
+        g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_fitw = g_launch.chat_fitw; g_chat_fith = g_launch.chat_fith; g_chat_middle = g_launch.chat_middle;
+        g_chat_pref = g_launch.chat_pref; g_chat_sbar = g_launch.chat_sbar; g_push_wait = g_launch.push_wait; g_hover_pause = g_launch.hover_pause; g_chat_pop = g_launch.chat_pop; g_push_need = g_launch.push_need; g_fuse_at = g_launch.fuse_at;
+        chat_hide(); break;
     case PG_MOTIONS: motion_map_default(MOTION_MAP); HOLE_ACTS = (1u << HA_N) - 2; READY_ATKS = (1u << RA_N) - 2; break;
     case PG_KEYS:
         snprintf(g_mode_hotkey, sizeof g_mode_hotkey, "%s", g_launch.hk[0]); snprintf(g_hk_hide, sizeof g_hk_hide, "%s", g_launch.hk[1]);
@@ -6212,7 +6298,7 @@ static int hk_caps(const char *spec, wchar_t caps[5][12]) {
 }
 
 /* ---- a page: section cards of rows; two columns when there is room */
-enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS, RK_THEME, RK_ROLES };
+enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS, RK_THEME, RK_ROLES, RK_CARET };
 typedef struct { int kind, row, n; const wchar_t *label, *hint; const wchar_t *const *names; const wchar_t *lo, *hi; const char *icon; } SRow;
 typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
 enum { MAX_SECS = 8 };               /* (cards a page may have: page_sections fills that many at most) */
@@ -6221,8 +6307,10 @@ static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAM
                      *CHAT_COLS_N[13] = {L"40", L"50", L"60", L"70", L"80", L"90", L"100", L"110", L"120", L"130", L"140", L"150", L"160"},
                      *CHAT_ROWS_N[14] = {L"8", L"12", L"16", L"20", L"24", L"28", L"32", L"36", L"40", L"44", L"48", L"52", L"56", L"60"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
-                     *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[6] = {L"Auto", L"Left", L"Right", L"Below", L"Above", L"Middle"}, *PAUSE_NAMES[4] = {L"Instant", L"0.3 s", L"0.6 s", L"1 s"},
+                     *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[6] = {L"Auto", L"Left", L"Right", L"Below", L"Above", L"Middle"}, *PAUSE_NAMES[21] = {L"Instant", L"0.1 s", L"0.2 s", L"0.3 s", L"0.4 s", L"0.5 s", L"0.6 s", L"0.7 s", L"0.8 s", L"0.9 s", L"1 s", L"1.1 s", L"1.2 s", L"1.3 s", L"1.4 s", L"1.5 s", L"1.6 s", L"1.7 s", L"1.8 s", L"1.9 s", L"2 s"},
                      *POP_NAMES[2] = {L"On hover", L"Pops open"}, *TURN_NAMES[2] = {L"Latest", L"All kept"}, *STEP_NAMES[3] = {L"Folded", L"Every step", L"Hidden"}, *PUSH_N[13] = {L"4", L"6", L"8", L"10", L"12", L"15", L"18", L"20", L"24", L"28", L"32", L"36", L"40"}, *FUSE_NAMES[2] = {L"Bottom right", L"Top right"},
+                     *CARET_NAMES[6] = {L"Vintage", L"Bar", L"Underscore", L"Double underscore", L"Filled box", L"Empty box"},
+                     *CARETCOL_NAMES[3] = {L"text colour", L"accent", L"your colour"},
                      *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
                      *MOD_NAMES[3] = {L"Alt", L"Ctrl", L"Shift"}, *BACKDROP_NAMES[3] = {L"Off", L"On", L"Auto"}, *BDW_NAMES[4] = {L"Thin", L"Medium", L"Thick", L"Heavy"}, *BDA_NAMES[4] = {L"Light", L"Medium", L"Strong", L"Max"}, *SEND_NAMES[2] = {L"Enter", L"Ctrl+Enter"};
 static const wchar_t *SM_NOTE[SM_N] = {L"for a laptop on battery: cores still answer the mouse at once", L"the rates the panel uses by default",
@@ -6235,6 +6323,14 @@ static const wchar_t *theme_hint(void) {
     if (t == TH_N + g_my_n) swprintf(h, 96, L"a new theme, from the one in use");
     else if (t == TH_FOLLOW) swprintf(h, 96, L"Follow Claude Code \x00B7 now %ls", THEME_NAMES[g_cli_theme]);
     else swprintf(h, 96, L"%ls", theme_name(t));
+    return h;
+}
+/* Cursor's hint: the shape or colour pointed at, else the ones in use */
+static const wchar_t *caret_hint(void) {
+    static wchar_t h[96];
+    int sh = g_caret, co = g_caret_col;
+    for (int i = 0; i < 6; i++) { if (is_hot(K_PICK, R_CARET, i)) sh = i; if (i < 3 && is_hot(K_PICK, R_CARETCOL, i)) co = i; }
+    swprintf(h, 96, L"%ls \x00B7 %ls", CARET_NAMES[sh], CARETCOL_NAMES[co]);
     return h;
 }
 static int page_sections(int pg, SSec *s) {
@@ -6265,18 +6361,12 @@ static int page_sections(int pg, SSec *s) {
         ROW(2, RK_SLIDER, R_AWAY, 8, L"Rest after", L"no mouse or keys this long: the cores show STANDBY", AWAY_NAMES, NULL, NULL, NULL);
         break;
     case PG_CHAT:
-        s[0].title = L"TEXT"; s[1].title = L"THEME"; s[2].title = L"BOX"; s[3].title = L"OPENS"; s[4].title = L"SHOWS"; s[5].title = L"HISTORY"; n = 6;
+        s[0].title = L"TEXT"; s[1].title = L"THEME"; s[2].title = L"SHOWS"; n = 3;
         ROW(0, RK_FONTS, R_CHATFONT, 2, L"Font", NULL, NULL, NULL, NULL, NULL);
         ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
-        ROW(3, RK_SEG, R_HOVERP, 4, L"Hover pause", L"resting on a core this long opens its box", PAUSE_NAMES, NULL, NULL, NULL);
-        ROW(3, RK_SEG, R_POP, 2, L"New reply", L"Pops open: beside its core for 10 s", POP_NAMES, NULL, NULL, NULL);
-        ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past the top or the end to switch", TURN_NAMES, NULL, NULL, NULL);
-        ROW(4, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
-        ROW(5, RK_SLIDER, R_PUSH, 13, L"Push", L"notches past an edge to fill it", PUSH_N, NULL, NULL, NULL);
-        ROW(5, RK_SEG, R_FUSEAT, 2, L"Fuse", L"where its beads fill, beside the box", FUSE_NAMES, NULL, NULL, NULL);
-        ROW(2, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
-        ROW(2, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
-        ROW(2, RK_SEG, R_CHATAT, 6, L"Place", L"the side it tries first; Auto: the first that covers no core", OPEN_NAMES, NULL, NULL, NULL);
+        ROW(0, RK_CARET, R_CARET, 6, L"Cursor", caret_hint(), CARET_NAMES, NULL, NULL, NULL);
+        ROW(2, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past the top or the end to switch", TURN_NAMES, NULL, NULL, NULL);
+        ROW(2, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
         ROW(1, RK_THEME, R_THEME, TH_N, L"In use", theme_hint(), THEME_NAMES, NULL, NULL, NULL);
         { /* the theme's colours, a line of swatches under the themes: your own to change; a built-in one changed through a copy */
             int mine = g_theme >= TH_N, hot = -1;
@@ -6289,6 +6379,18 @@ static int page_sections(int pg, SSec *s) {
             else swprintf(hint, 96, L"%ls", mine ? L"its colours: click one to change it" : L"its colours: one you change makes your own copy");
             ROW(1, RK_ROLES, R_ROLE, 10, g_renaming ? typing : theme_name(g_theme), hint, ROLE_NAMES, NULL, NULL, NULL);
         }
+        break;
+    case PG_BOX:
+        s[0].title = L"SIZE AND PLACE"; s[1].title = L"OPENS"; s[2].title = L"SCROLL"; n = 3;
+        ROW(0, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
+        ROW(0, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
+        ROW(0, RK_SEG, R_CHATAT, 6, L"Place", L"the side it tries first; Auto: the first that covers no core", OPEN_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_HOVERP, 21, L"Hover pause", L"resting on a core this long opens its box", PAUSE_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_SEG, R_POP, 2, L"New reply", L"Pops open: beside its core for 10 s", POP_NAMES, NULL, NULL, NULL);
+        ROW(2, RK_TOGGLE, R_SBAR, 1, L"Scroll bar", L"down the box's right edge", NULL, NULL, NULL, NULL);
+        ROW(2, RK_SLIDER, R_PUSH, 13, L"Push", L"notches past an edge to fill it", PUSH_N, NULL, NULL, NULL);
+        ROW(2, RK_SLIDER, R_PUSHWAIT, 19, L"Fuse waits", L"before the beads run back", PAUSE_NAMES + 2, NULL, NULL, NULL);
+        ROW(2, RK_SEG, R_FUSEAT, 2, L"Fuse", L"where its beads fill, beside the box", FUSE_NAMES, NULL, NULL, NULL);
         break;
     case PG_KEYS:
         s[0].title = L"ANYWHERE"; s[1].title = L"ON A CORE"; s[2].title = L"IN THE REPLY LINE"; n = 3;
@@ -6338,6 +6440,7 @@ static float ctrl_w(const SRow *r) {
     case RK_FONTS: return 2 * 110 - 6;
     case RK_SWATCH: return 6 * 32 - 6;
     case RK_THEME: return 0; /* (under the name: its hint gets the whole width) */
+    case RK_CARET: return 6 * 34 - 4 + 14 + 3 * 32 - 6;
     case RK_ROLES: return 200; /* (Make a copy, or Rename and Delete, beside the name) */
     case RK_HOTKEY: return 160;
     case RK_CAPS: return tw_of(r->lo, g_sf_label) + 14;
@@ -6413,7 +6516,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
         break;
     }
     case RK_SEG: {
-        float w = seg_w(r), a = wrapped ? lx : rx - w, yy = wrapped ? y + h - 34 : cy - 14;
+        float w = seg_w(r), a = rx - w, yy = wrapped ? y + h - 34 : cy - 14; /* (under the name too, they keep to the right) */
         int cur = set_current(r->row);
         for (int i = 0; i < r->n; i++) {
             float cw = tw_of(r->names[i], g_sf_label) + 24;
@@ -6461,7 +6564,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
                 palette_icon(pn, S(a + 13), S(cy), S(15), text ? tc : light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
             } else if (text) tx(a, cy - 13, a + 26, cy + 13, L"Aa", g_sf_small, tc, DT_CENTER);
             hit(a, cy - 13, a + 26, cy + 13, K_PICK, r->row, i);
-            if (r->row == R_SHADECOL && i == 5 && g_pick_shade) g_cp_anchor = SR(a, cy - 13, a + 26, cy + 13); /* the picker's window opens under it */
+            if (r->row == R_SHADECOL && i == 5 && g_pick_shade == 1) g_cp_anchor = SR(a, cy - 13, a + 26, cy + 13); /* the picker's window opens under it */
         }
         break;
     case RK_THEME: { /* each theme as a small box: its text over its background, its accent and done colours under it; + makes your own */
@@ -6506,6 +6609,38 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
         }
         break;
     }
+    case RK_CARET: { /* the six shapes as a terminal draws them over a character cell, then its colours (the last: your own, in the picker) */
+        float a = rx - ctrl_w(r);
+        int cur = g_caret, ccur = g_caret_col;
+        for (int i = 0; i < 6; i++, a += 34) {
+            int sel = cur == i, hot = is_hot(K_PICK, R_CARET, i);
+            unsigned ink = sel ? S_OR : hot ? S_TEXT : S_MUTED;
+            pick_box(pn, a, cy - 14, a + 30, cy + 14, 7, sel, hot, NULL, NULL);
+            float g0 = a + 10, g1 = a + 20, t0 = cy - 8, t1 = cy + 8;
+            switch (i) {
+            case 0: box(pn, g0, t1 - 4, g1, t1, 0, ink, 0, 0); break;
+            case 1: box(pn, g0 + 4, t0, g0 + 6, t1, 0, ink, 0, 0); break;
+            case 2: box(pn, g0, t1 - 1.5f, g1, t1, 0, ink, 0, 0); break;
+            case 3: box(pn, g0, t1 - 1.2f, g1, t1, 0, ink, 0, 0); box(pn, g0, t1 - 4.4f, g1, t1 - 3.2f, 0, ink, 0, 0); break;
+            case 4: box(pn, g0, t0, g1, t1, 0, ink, 0, 0); break;
+            default: frame(pn, g0 + .6f, t0 + .6f, g1 - .6f, t1 - .6f, 0, ink, 1.2f); break;
+            }
+            hit(a, cy - 14, a + 30, cy + 14, K_PICK, R_CARET, i);
+        }
+        a += 14 - 4;
+        for (int i = 0; i < 3; i++, a += 32) {
+            int sel = ccur == i, hot = is_hot(K_PICK, R_CARETCOL, i);
+            unsigned c = caret_x(i);
+            box(pn, a, cy - 13, a + 26, cy + 13, 7, c, sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1); /* (the text's colour, the accent, your own: the hint names the one pointed at) */
+            if (i == 2) {
+                int light = 0.299f * (c >> 16 & 255) + 0.587f * (c >> 8 & 255) + 0.114f * (c & 255) > 140;
+                palette_icon(pn, S(a + 13), S(cy), S(15), light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
+                if (g_pick_shade == 2) g_cp_anchor = SR(a, cy - 13, a + 26, cy + 13); /* the picker's window opens under it */
+            }
+            hit(a, cy - 13, a + 26, cy + 13, K_PICK, R_CARETCOL, i);
+        }
+        break;
+    }
     case RK_HOTKEY: {
         int i = r->row, rec = g_krec == i;
         if (rec) { /* waiting for the keys */
@@ -6546,8 +6681,7 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     int cols = cw >= 820 ? 2 : 1;
     float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
     int side = 0; /* which column each card goes in (bit k: the right): the split whose taller column is the shortest, in order within each */
-    if (cols == 2 && pg == PG_CHAT) side = 1 << 2 | 1 << 3 | 1 << 5; /* TEXT, THEME and SHOWS (what it reads like) on the left; BOX, OPENS and HISTORY (where, when, and the push) on the right */
-    else if (cols == 2) {
+    if (cols == 2) {
         float best = 1e9f;
         for (int m = 0; m < 1 << n; m += 2) { /* (the first card always on the left) */
             float h2[2] = {0, 0};
@@ -6587,7 +6721,7 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
         }
         colh[c] += h + 12;
     }
-    return fmaxf(colh[0], colh[1]);
+    return fmaxf(0, fmaxf(colh[0], colh[1]) - 12); /* (no gap after the last card: it would let the page scroll that far) */
 }
 
 /* ---- the Motions page: every state at a glance on the left, the chosen one's motions on the right */
@@ -6854,27 +6988,53 @@ static void set_build(void) {
     /* the preview band */
     box(pn, cx0, bandT, cx1, bandB, 14, S_BAND, 0, 0);
     g_pv_rc = SR(cx0 + 4, bandT + 4, cx1 - 4, bandB - 4);
-    if (g_tab == PG_CHAT) { /* a reply in the chat box's font, top right */
+    if (g_tab == PG_CHAT || g_tab == PG_BOX) { /* a reply in the chat box's font, top right */
         TEXTMETRICW tm;
         SelectObject(mdc, g_chat_tf); GetTextMetricsW(mdc, &tm);
         float th = tm.tmHeight / (float)g_sdpi;
         SelectObject(mdc, g_chat_bf); GetTextMetricsW(mdc, &tm);
-        float bh = tm.tmHeight / (float)g_sdpi, sh = 22 + th + 6 + bh * 3, bx1 = cx1 - 14 - 30, bx0 = fmaxf(cx0 + 160, bx1 - 320); /* (room on its right for the fuse) */
+        float bh = tm.tmHeight / (float)g_sdpi, fh = bh + 8, bx1 = cx1 - 14 - 30, bx0 = fmaxf(cx0 + 160, bx1 - 320); /* (room on its right for the fuse) */
         float t0 = bandT + 12;
+        int lines = 3; /* (fewer when a big text size would reach the zoom under it) */
+        while (lines > 1 && t0 + 22 + th + 6 + bh * lines + 6 + fh > bandB - 46) lines--;
+        float sh = 22 + th + 6 + bh * lines + 6 + fh;
         const ChatPal *p = pal();
         box(pn, bx0, t0, bx1, t0 + sh, 8, p->bg, 0, 0);
         box(pn, bx0, t0, bx0 + 3, t0 + sh, 1.5f, p->accent, 0, 0);
         tx(bx0 + 14, t0 + 10, bx1 - 8, t0 + 10 + th, L"vigil \x00B7 Done", g_chat_tf, p->accent, DT_LEFT | DT_END_ELLIPSIS);
         float y = t0 + 10 + th + 6, x = bx0 + 14; /* a line of each kind: text, a step, code and a link */
-        tx(x, y, bx1 - 8, y + bh, L"The satellites trail behind.", g_chat_bf, p->text, DT_LEFT | DT_END_ELLIPSIS);
+        float sbw = g_chat_sbar ? 9 : 0, by0 = y; /* Scroll bar: down the right of the reply, a long one scrolled to its top */
+        tx(x, y, bx1 - 8 - sbw, y + bh, L"The satellites trail behind.", g_chat_bf, p->text, DT_LEFT | DT_END_ELLIPSIS);
         y += bh;
         struct { const wchar_t *t; unsigned c; } parts[2][4] = {{{L"\x25CF ", p->ok}, {L"Edit", p->bold}, {L"(panel.c)", p->dim}, {L"", 0}},
                                                                 {{L"Run ", p->text}, {L"make", p->code}, {L" \x00B7 ", p->dim}, {L"docs", p->link}}};
-        for (int l = 0; l < 2; l++, y += bh) {
+        for (int l = 0; l < lines - 1; l++, y += bh) {
             x = bx0 + 14;
             for (int k = 0; k < 4 && parts[l][k].t[0]; k++) {
-                tx(x, y, bx1 - 8, y + bh, parts[l][k].t, g_chat_bf, parts[l][k].c, DT_LEFT);
+                tx(x, y, bx1 - 8 - sbw, y + bh, parts[l][k].t, g_chat_bf, parts[l][k].c, DT_LEFT | DT_END_ELLIPSIS);
                 x += tw_of(parts[l][k].t, g_chat_bf);
+            }
+        }
+        if (sbw) {
+            box(pn, bx1 - 11, by0, bx1 - 8, y, 1.5f, crx(tint(MD_RULE)), 0, 0);
+            box(pn, bx1 - 11, by0, bx1 - 8, by0 + (y - by0) * .45f, 1.5f, crx(tint(MD_MARK)), 0, 0);
+        }
+        { /* the reply line under it, its cursor as Settings > Chat > Cursor has it */
+            unsigned fx = crx(chat_field()), cc = caret_x(g_caret_col);
+            float fy0 = y + 6;
+            box(pn, bx0 + 12, fy0, bx1 - 8, fy0 + fh, 6, fx, 0x3A3D48, 1);
+            const wchar_t *typed = L"yes, ship it";
+            x = bx0 + 20;
+            tx(x, fy0 + 4, bx1 - 14, fy0 + 4 + bh, typed, g_chat_bf, p->text, DT_LEFT);
+            x += tw_of(typed, g_chat_bf);
+            float cw = tw_of(L"M", g_chat_bf), c0 = fy0 + 4, c1 = c0 + bh, t = 1.5f;
+            switch (g_caret) {
+            case 0: box(pn, x, c1 - fmaxf(2, bh / 4), x + cw, c1, 0, cc, 0, 0); break;
+            case 1: box(pn, x, c0, x + 2, c1, 0, cc, 0, 0); break;
+            case 2: box(pn, x, c1 - t, x + cw, c1, 0, cc, 0, 0); break;
+            case 3: box(pn, x, c1 - 1, x + cw, c1, 0, cc, 0, 0); box(pn, x, c1 - 4, x + cw, c1 - 3, 0, cc, 0, 0); break;
+            case 4: box(pn, x, c0, x + cw, c1, 0, cc, 0, 0); break;
+            default: frame(pn, x + .5f, c0 + .5f, x + cw - .5f, c1 - .5f, 0, cc, 1); break;
             }
         }
         ovr_add(bx0, t0, bx1, t0 + sh, 8);
@@ -7037,7 +7197,7 @@ static void cp_build(void) {
     hit(0, 0, CP_W - 100, 38, K_CPMOVE, 0, 0);
     if (cp_hot(K_CPMOVE, 0, 0) || g_cp_drag == K_CPMOVE) box(pn, 1, 1, CP_W - 1, 38, 11, S_CHIP, S_CHIP, 0);
     wchar_t t[96];
-    if (g_pick_shade) swprintf(t, 96, L"Darkness colour \x00B7 Backdrop"); else swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
+    if (g_pick_shade == 2) swprintf(t, 96, L"Cursor colour \x00B7 Chat"); else if (g_pick_shade) swprintf(t, 96, L"Darkness colour \x00B7 Backdrop"); else swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
     tx(16, 10, CP_W - 104, 34, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
     for (int i = 0; i < 2; i++) { /* Undo, Redo (Ctrl+Z, Ctrl+Y) beside the close button */
         float bx = CP_W - 96 + i * 30;
@@ -7094,7 +7254,7 @@ static void cp_build(void) {
     for (int i = 0, j = 0; i < (g_pick_shade ? 5 : TH_N); i++) {
         if (!g_pick_shade && i == TH_FOLLOW) continue;
         float a = sx0 + j * 30, b = ry + 22;
-        unsigned c = g_pick_shade ? SHADE_COLS[i] : ((const unsigned *)pal_of(i))[g_pick_role & 15];
+        unsigned c = g_pick_shade == 2 ? caret_preset(i) : g_pick_shade ? SHADE_COLS[i] : ((const unsigned *)pal_of(i))[g_pick_role & 15];
         box(pn, a, b, a + 26, b + 22, 6, c, cp_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
         hit(a, b, a + 26, b + 22, K_PICK, R_CSUG, i);
         j++;
@@ -8446,7 +8606,7 @@ static void usage(void) {
         "  --settings-light     start the preview on its light background (with --settings-shot)\n"
         "  --on X,Y             --record and the Settings window go on the monitor with that desktop point\n"
         "  --record SCENE FILE  reply | input | carry | ready | history: a scripted demo scene, frames written raw to FILE (the README's animations)\n"
-        "  --settings-tab NAME  open it on that page: look, cluster, replies, motions, shortcuts, performance\n"
+        "  --settings-tab NAME  open it on that page: look, cluster, chat, box, motions, shortcuts, performance\n"
         "  --settings-fold      with its sidebar folded to icons\n"
         "  --settings-state S   its preview (and Motions) on that state, e.g. sleep\n"
         "  --settings-scroll PX its page scrolled down that far (with --settings-shot)\n"
@@ -8493,13 +8653,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--cpu-light")) g_nogpu_arg = 2; /* (on the CPU, the light one) */
         else if (!strcmp(a, "--settings")) g_open_settings = 1;
         else if (!strcmp(a, "--settings-tab") && v) { /* look, cluster, replies, motions, shortcuts, performance */
-            static const char *TABS[PG_N] = {"look", "cluster", "chat", "motions", "shortcuts", "performance"};
+            static const char *TABS[PG_N] = {"look", "cluster", "chat", "box", "motions", "shortcuts", "performance"};
             for (int k = 0; k < PG_N; k++) if (!strncmp(v, TABS[k], 4)) g_tab = k;
             if (!strncmp(v, "repl", 4)) g_tab = PG_CHAT; /* (its old name) */
             g_open_settings = 1; i++;
         }
         else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
-        else if (!strcmp(a, "--settings-pick") && v) { g_pick_arg = atoi(v); i++; } /* (the picker open on the theme's colour 0-8, when the theme is your own; 9: Darkness colour's: for a screenshot) */
+        else if (!strcmp(a, "--settings-pick") && v) { g_pick_arg = atoi(v); i++; } /* (the picker open on the theme's colour 0-8, when the theme is your own; 9: Darkness colour's; 10: the cursor's: for a screenshot) */
         else if (!strcmp(a, "--settings-scroll") && v) { g_scroll_arg = (float)atof(v); i++; } /* (the page scrolled down that far: to see all of it in a screenshot) */
         else if (!strcmp(a, "--settings-state") && v) { /* the state its preview (and Motions) shows: idle, think, work, wait, cheer, sleep, ... */
             for (int k = 0; k < ST_N; k++) if (!_strnicmp(v, STATE_NAME[k], 4)) g_pv_st = k;
@@ -8587,6 +8747,7 @@ int main(int argc, char **argv) {
     for (;;) {
         tick();
         if (g_pick_arg >= 0 && g_pick_arg < 9 && g_theme >= TH_N) { g_pick_role = g_pick_arg; pk_begin(((const unsigned *)pal())[g_pick_role]); g_pick_arg = -1; g_sl_dirty = 1; }
+        else if (g_pick_arg == 10) { g_pick_shade = 2; g_caret_col = 2; pk_begin(g_caret_custom); g_pick_arg = -1; g_sl_dirty = 1; }
         else if (g_pick_arg == 9) { g_pick_shade = 1; g_shade_col = 5; pk_begin(g_shade_custom); g_pick_arg = -1; g_sl_dirty = 1; }
         if (g_scroll_arg > 0 && wall() > shot_at - 1.5) { g_set_scroll_to = g_scroll_arg; g_scroll_arg = 0; g_sl_dirty = 1; }
         if (g_set_shot[0] && g_shot_act) { /* (a sequence: the action played once the hole has grown) */
