@@ -2531,8 +2531,13 @@ void chat_more_fonts(int h, const wchar_t *text, DWORD pitch) {
     g_chat_xf[F_H2] = CreateFontW((int)(h * 1.14f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, pitch, text);
 }
 
+/* the running line (chat_conv's marker 7): laid out once, drawn on every frame */
+static int g_spin_on, g_spin_x, g_spin_y; /* its baseline in the laid-out body, and where its words start */
+static wchar_t g_spin_verb[24];
+static long long g_spin_t0;
+static long g_spin_k;
 static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
-    g_runs_n = 0; g_lay_len = 0; g_lay_w = 0;
+    g_runs_n = 0; g_lay_len = 0; g_lay_w = 0; g_spin_on = 0;
     for (int f = 0; f < F_COUNT; f++) {
         TEXTMETRICW tm;
         SelectObject(dc, lay_font(f));
@@ -2634,13 +2639,17 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
                 y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_MARK, 0) + lh;
                 blank = 0; marked = 0;
-            } else if (kind == 7) { /* the running line: a turning star, the words in the accent colour */
-                static const wchar_t STAR[] = L"\x00B7\x2722\x2733\x2736\x273B\x273D\x273B\x2736\x2733\x2722";
+            } else if (kind == 7) { /* the running line: its place only (spin_paint draws it), the star where the steps' dots are */
                 if (!blank) y += gap / 2;
-                int dw = text_w(dc, F_BODY, L"\x25CF ", 2), x = lead + dw;
-                lay_put(lead, y + asc, F_BODY, MD_RUN, STAR + (time(NULL) % 10), 1, text_w(dc, F_BODY, STAR + (time(NULL) % 10), 1), 0);
-                y = lay_inline(dc, ln + 1, end, &x, lead + dw, y, lh, asc, maxw, 0, MD_RUN, 0) + lh;
-                blank = 0; marked = 0;
+                const wchar_t *c = ln + 1;
+                int n = 0;
+                while (c < end && *c != L'\t' && n < 23) g_spin_verb[n++] = *c++;
+                g_spin_verb[n] = 0;
+                g_spin_t0 = c < end ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : 0;
+                g_spin_k = c < end && *c == L'\t' ? wcstol(c + 1, NULL, 10) : 0;
+                g_spin_y = y + asc; g_spin_x = text_w(dc, F_BODY, L"\x25CF ", 2); g_spin_on = 1;
+                if (g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46) > g_lay_w) g_lay_w = g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46);
+                y += lh; blank = 0; marked = 0;
             } else if (kind == 6) { /* the permission notice, waiting for you */
                 if (!blank) y += gap / 2;
                 int x = lead;
@@ -2914,6 +2923,52 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
     }
 }
 
+/* the running line, as the terminal draws it: the star turning through its shapes (Segoe UI Symbol: other faces put in
+ * the boxed emoji), the word in the accent with a lighter band sweeping across it, then the time and the tokens */
+static void spin_paint(HDC dc, int x0, int base) {
+    static const wchar_t STAR[] = L"\x00B7\x2722\x2733\x2736\x273B\x273D\x273B\x2736\x2733\x2722";
+    static HFONT sym; static LONG sym_h;
+    LOGFONTW lf;
+    GetObjectW(g_chat_bf, sizeof lf, &lf);
+    if (!sym || sym_h != lf.lfHeight) {
+        if (sym) DeleteObject(sym);
+        sym = CreateFontW(lf.lfHeight, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
+        sym_h = lf.lfHeight;
+    }
+    double now = wall();
+    COLORREF acc = tint(MD_RUN);
+    int ar = GetRValue(acc), ag = GetGValue(acc), ab = GetBValue(acc);
+    SetTextAlign(dc, TA_BASELINE | TA_LEFT);
+    SelectObject(dc, sym);
+    SetTextColor(dc, acc);
+    const wchar_t *st = STAR + (int)(now / 0.12) % 10;
+    SIZE sz; GetTextExtentPoint32W(dc, st, 1, &sz);
+    TextOutW(dc, x0 + (g_spin_x - sz.cx) / 2 - (int)(2 * g_dpi), base, st, 1);
+    SelectObject(dc, g_chat_bf);
+    int x = x0 + g_spin_x, n = (int)wcslen(g_spin_verb);
+    float pos = (float)fmod(now / 0.09, n + 14) - 5; /* the band's middle, in letters: across the word, then a pause */
+    for (int i = 0; i <= n; i++) {
+        wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
+        float k = fmaxf(0, 1 - fabsf(i - pos) / 3.0f); k = k * k * (3 - 2 * k) * 0.6f; /* (smooth, toward white) */
+        SetTextColor(dc, RGB(ar + (int)((255 - ar) * k), ag + (int)((255 - ag) * k), ab + (int)((255 - ab) * k)));
+        TextOutW(dc, x, base, &ch, 1);
+        GetTextExtentPoint32W(dc, &ch, 1, &sz);
+        x += sz.cx;
+    }
+    wchar_t tail[64], tm[24] = L"", tk[24] = L"";
+    long long el = g_spin_t0 ? (long long)time(NULL) - g_spin_t0 : -1;
+    if (el >= 3600) swprintf(tm, 24, L"%lldh %lldm", el / 3600, el / 60 % 60);
+    else if (el >= 60) swprintf(tm, 24, L"%lldm %llds", el / 60, el % 60);
+    else if (el >= 0) swprintf(tm, 24, L"%llds", el);
+    if (g_spin_k >= 1000) swprintf(tk, 24, L"\x2193 %.1fk tokens", g_spin_k / 1000.0);
+    else if (g_spin_k > 0) swprintf(tk, 24, L"\x2193 %ld tokens", g_spin_k);
+    if (tm[0] && tk[0]) swprintf(tail, 64, L" (%ls \x00B7 %ls)", tm, tk);
+    else if (tm[0] || tk[0]) swprintf(tail, 64, L" (%ls)", tm[0] ? tm : tk);
+    else tail[0] = 0;
+    SetTextColor(dc, acc);
+    TextOutW(dc, x, base, tail, (int)wcslen(tail));
+}
+
 static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT || msg == WM_PRINTCLIENT) { /* drawn off-screen first, so scrolling does not flicker (WM_PRINTCLIENT: --record) */
         PAINTSTRUCT ps;
@@ -2942,6 +2997,7 @@ static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         IntersectClipRect(dc, view.left, view.top, view.right, view.bottom);
         SetTextAlign(dc, TA_BASELINE | TA_LEFT); /* every face on the same baseline */
         chat_runs(dc, 0, g_runs_n, view, body.top);
+        if (g_spin_on) spin_paint(dc, view.left, body.top + g_spin_y);
         g_push_drawn = hist_push_now();
         if (abs(pl) >= g_chat_line * 3 / 4) { /* in the rubber band's gap, as the terminal would say it: what the push does, a dot a notch */
             RECT gap_rc = pl > 0 ? (RECT){view.left, view.top, view.right, view.top + pl} : (RECT){view.left, view.bottom + pl, view.right, view.bottom};
@@ -3150,7 +3206,8 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
     conv_put(o, 9, line, 1);
 }
 /* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
- * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step) */
+ * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step).
+ * Passed on as "word\tstart\ttokens": the box draws it on every frame (spin_paint), so the layout stays as it is */
 static void conv_running(char *o, size_t n, const MTurn *t) {
     static const char *VERB[] = {"Thinking", "Pondering", "Musing", "Brewing", "Crafting", "Mulling", "Tinkering", "Weaving",
                                  "Sketching", "Forging", "Assembling", "Untangling", "Distilling", "Plotting", "Shaping", "Polishing",
@@ -3158,17 +3215,7 @@ static void conv_running(char *o, size_t n, const MTurn *t) {
                                  "Whittling", "Simmering", "Kneading", "Mapping", "Tuning", "Spinning"};
     unsigned hv = (unsigned)t->t0 * 2654435761u;
     for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
-    const char *v = VERB[hv % (sizeof VERB / sizeof *VERB)];
-    long long now = (long long)time(NULL), el = t->t0 && now > t->t0 ? now - t->t0 : -1;
-    char tm[24] = "", tk[24] = "";
-    if (el >= 3600) snprintf(tm, sizeof tm, "%lldh %lldm", el / 3600, el / 60 % 60);
-    else if (el >= 60) snprintf(tm, sizeof tm, "%lldm %llds", el / 60, el % 60);
-    else if (el >= 0) snprintf(tm, sizeof tm, "%llds", el);
-    if (t->k >= 1000) snprintf(tk, sizeof tk, "\xE2\x86\x93 %.1fk tokens", t->k / 1000.0);
-    else if (t->k > 0) snprintf(tk, sizeof tk, "\xE2\x86\x93 %ld tokens", t->k);
-    if (tm[0] && tk[0]) snprintf(o, n, "%s\xE2\x80\xA6 (%s \xC2\xB7 %s)", v, tm, tk);
-    else if (tm[0] || tk[0]) snprintf(o, n, "%s\xE2\x80\xA6 (%s)", v, tm[0] ? tm : tk);
-    else snprintf(o, n, "%s\xE2\x80\xA6", v);
+    snprintf(o, n, "%s\t%lld\t%ld", VERB[hv % (sizeof VERB / sizeof *VERB)], t->t0, t->k);
 }
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
@@ -3270,6 +3317,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     g_chat_title = wt; g_chat_body = wb;
     COLORREF acc = tint(MD_RUN); /* the theme's accent: the core shows the state, the box need not */
     if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
+    { static double spun; if (g_spin_on && now - spun >= 0.08) { spun = now; InvalidateRect(g_chat, NULL, FALSE); } } /* the running line moves */
     if (!changed) return;
     chat_fonts();
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
