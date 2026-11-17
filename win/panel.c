@@ -2643,10 +2643,10 @@ static int chat_layout(HDC dc, const wchar_t *src, int maxw) {
                 if (!blank) y += gap / 2;
                 const wchar_t *c = ln + 1;
                 int n = 0;
-                while (c < end && *c != L'\t' && n < 23) g_spin_verb[n++] = *c++;
+                while (c < end && *c != 0x1F && n < 23) g_spin_verb[n++] = *c++;
                 g_spin_verb[n] = 0;
                 g_spin_t0 = c < end ? _wcstoi64(c + 1, (wchar_t **)&c, 10) : 0;
-                g_spin_k = c < end && *c == L'\t' ? wcstol(c + 1, NULL, 10) : 0;
+                g_spin_k = c < end && *c == 0x1F ? wcstol(c + 1, NULL, 10) : 0;
                 g_spin_y = y + asc; g_spin_x = text_w(dc, F_BODY, L"\x25CF ", 2); g_spin_on = 1;
                 if (g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46) > g_lay_w) g_lay_w = g_spin_x + text_w(dc, F_BODY, L"Calibrating\x2026 (59m 59s \x00B7 \x2193 999.9k tokens)", 46);
                 y += lh; blank = 0; marked = 0;
@@ -2932,7 +2932,7 @@ static void spin_paint(HDC dc, int x0, int base) {
     GetObjectW(g_chat_bf, sizeof lf, &lf);
     if (!sym || sym_h != lf.lfHeight) {
         if (sym) DeleteObject(sym);
-        sym = CreateFontW(lf.lfHeight, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
+        sym = CreateFontW(lf.lfHeight * 9 / 10, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
         sym_h = lf.lfHeight;
     }
     double now = wall();
@@ -2943,9 +2943,9 @@ static void spin_paint(HDC dc, int x0, int base) {
     SetTextColor(dc, acc);
     const wchar_t *st = STAR + (int)(now / 0.12) % 10;
     SIZE sz; GetTextExtentPoint32W(dc, st, 1, &sz);
-    TextOutW(dc, x0 + (g_spin_x - sz.cx) / 2 - (int)(2 * g_dpi), base, st, 1);
+    TextOutW(dc, x0 + max(0, (g_spin_x - sz.cx) / 2), base, st, 1);
     SelectObject(dc, g_chat_bf);
-    int x = x0 + g_spin_x, n = (int)wcslen(g_spin_verb);
+    int x = x0 + max(g_spin_x, (int)sz.cx + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb); /* (a wide star: the word after it) */
     float pos = (float)fmod(now / 0.09, n + 14) - 5; /* the band's middle, in letters: across the word, then a pause */
     for (int i = 0; i <= n; i++) {
         wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
@@ -3243,7 +3243,7 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
 }
 /* the line under a turn going on, as the terminal has it: "* Pondering\u2026 (1m 5s \u00B7 \u2193 2.1k tokens)": a word of
  * our own picked for the turn, how long it has run, Claude's output tokens so far (counted by the hook at each step).
- * Passed on as "word\tstart\ttokens": the box draws it on every frame (spin_paint), so the layout stays as it is */
+ * Passed on as "word\x1Fstart\x1Ftokens": the box draws it on every frame (spin_paint), so the layout stays as it is */
 static void conv_running(char *o, size_t n, const MTurn *t) {
     static const char *VERB[] = {"Thinking", "Pondering", "Musing", "Brewing", "Crafting", "Mulling", "Tinkering", "Weaving",
                                  "Sketching", "Forging", "Assembling", "Untangling", "Distilling", "Plotting", "Shaping", "Polishing",
@@ -3251,7 +3251,7 @@ static void conv_running(char *o, size_t n, const MTurn *t) {
                                  "Whittling", "Simmering", "Kneading", "Mapping", "Tuning", "Spinning"};
     unsigned hv = (unsigned)t->t0 * 2654435761u;
     for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
-    snprintf(o, n, "%s\t%lld\t%ld", VERB[hv % (sizeof VERB / sizeof *VERB)], t->t0, t->k);
+    snprintf(o, n, "%s\x1F%lld\x1F%ld", VERB[hv % (sizeof VERB / sizeof *VERB)], t->t0, t->k); /* (not a tab: conv_put keeps nothing under 10) */
 }
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
