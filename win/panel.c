@@ -2997,7 +2997,7 @@ static void spin_paint(HDC dc, int x0, int base) {
     SelectObject(dc, g_chat_bf);
     GetTextMetricsW(dc, &tm);
     int S = (int)(tm.tmAscent * 0.95f);
-    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.42f), S, SEQ[(int)(now / 0.12) % 12],
+    star_draw(dc, x0 + g_spin_x / 2 - (int)g_dpi, base - (int)(tm.tmAscent * 0.42f), S, SEQ[(int)fmod(now / 0.12, 12)],
               MIXC(base_c, shim, (1 - cos(2 * M_PI * now / 2.0)) / 2), bgc); /* (it breathes between the two shades, every 2 s) */
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
     SelectObject(dc, lay_font(F_BOLD));
@@ -3225,7 +3225,7 @@ static void chat_place(RECT beside, int cy, int bw, int bh, RECT wa, int *ox, in
 static void conv_put(char **o, int mark, const char *t, int lines) {
     for (const char *c = t; c && *c;) {
         if (lines && mark) *(*o)++ = (char)mark;
-        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 9) *(*o)++ = *c;
+        for (; *c && *c != '\n'; c++) if ((unsigned char)*c > 9 || *c == '\t') *(*o)++ = *c; /* (a tab parts a step's tool from its detail) */
         *(*o)++ = '\n';
         if (*c) c++;
     }
@@ -3306,26 +3306,33 @@ static void steps_line(char **o, const MTurn *t, int k0, int k1) {
  * Passed on as "word\x1Fstart\x1Ftokens\x1Flast step\x1Fa tool running": the box draws it on every frame (spin_paint), so the layout stays as it is */
 static char g_verbs[2][4096];          /* spinnerVerbs from ~/.claude/settings.json, one a line, written by the reader thread into the one not in use */
 static volatile LONG g_verbs_cur, g_verbs_replace;
+static char g_ccverbs[2][8192];        /* Claude Code's own words (claude-verbs.txt next to the events file, read out of the installed
+                                         * Claude Code by spinner_verbs.py), one a line; ours when there is none */
+static volatile LONG g_ccverbs_cur;
+/* the n-th line of a list of lines, into w */
+static void nth_line(const char *list, unsigned n, char *w, size_t wn) {
+    const char *c = list;
+    for (unsigned i = 0; i < n && c; i++) { c = strchr(c, '\n'); if (c) c++; }
+    const char *e = c ? strchr(c, '\n') : NULL;
+    snprintf(w, wn, "%.*s", c && e ? (int)(e - c) : 0, c ? c : "");
+}
 static void conv_running(char *o, size_t n, const MTurn *t, int tool) {
-    static const char *VERB[] = {"Thinking", "Working", "Pondering", "Musing", "Brewing", "Cooking", "Crafting", "Building",
-                                 "Tinkering", "Sketching", "Shaping", "Figuring", "Puzzling", "Wondering", "Mulling", "Planning",
-                                 "Exploring", "Digging", "Untangling", "Weaving", "Polishing", "Noodling", "Hatching", "Conjuring"};
+    static const char *VERB[] = {"Thinking", "Working", "Pondering", "Musing", "Brewing", "Cooking", "Crafting", "Building"}; /* (until Claude Code's own are read) */
     unsigned hv = (unsigned)t->t0 * 2654435761u;
     for (const char *c = t->p ? t->p : ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
-    const char *mine = g_verbs[g_verbs_cur], *v = NULL;
-    int nm = 0, nb = g_verbs_replace && *mine ? 0 : (int)(sizeof VERB / sizeof *VERB);
+    /* Claude Code's words (or ours), then yours (spinnerVerbs "append"); yours alone ("replace") */
+    const char *mine = g_verbs[g_verbs_cur], *cc = g_ccverbs[g_ccverbs_cur];
+    int nm = 0, nc = 0;
     for (const char *c = mine; *c; c++) nm += *c == '\n';
+    for (const char *c = cc; *c; c++) nc += *c == '\n';
+    int nb = g_verbs_replace && nm ? 0 : nc ? nc : (int)(sizeof VERB / sizeof *VERB);
     char word[48];
     unsigned k = hv % (unsigned)(nb + nm ? nb + nm : 1);
-    if ((int)k < nb) v = VERB[k];
-    else { /* the k-th of yours */
-        const char *c = mine;
-        for (unsigned i = (unsigned)nb; i < k; i++) c = strchr(c, '\n') + 1;
-        const char *e = strchr(c, '\n');
-        snprintf(word, sizeof word, "%.*s", (int)(e - c), c);
-        v = word;
-    }
-    snprintf(o, n, "%s\x1F%lld\x1F%ld\x1F%lld\x1F%d", v ? v : "Thinking", t->t0, t->k, t->ts > t->t0 ? t->ts : t->t0, tool); /* (not a tab: conv_put keeps nothing under 10) */
+    if ((int)k >= nb) nth_line(mine, k - (unsigned)nb, word, sizeof word);
+    else if (nc) nth_line(cc, k, word, sizeof word);
+    else snprintf(word, sizeof word, "%s", VERB[k]);
+    const char *v = word[0] ? word : "Thinking";
+    snprintf(o, n, "%s\x1F%lld\x1F%ld\x1F%lld\x1F%d", v, t->t0, t->k, t->ts > t->t0 ? t->ts : t->t0, tool); /* (not a tab: conv_put keeps nothing under 10) */
 }
 /* a turn going on: each thing Claude said (8), the steps after it folded to one dim line (9), a task's notice (9), the
  * step running now last (3) */
@@ -4875,6 +4882,24 @@ static void theme_poll(void) {
             int th = !t ? TH_DARK : strstr(t, "ansi") ? TH_TERM : !strncmp(t, "light", 5) ? TH_LIGHT : strstr(t, "daltonized") ? TH_CBLIND : TH_DARK;
             if (InterlockedExchange(&g_cli_theme, th) != th) g_theme_new = 1;
             free(t); free(buf);
+        }
+        { /* Claude Code's own words, as spinner_verbs.py read them */
+            static FILETIME cc_seen;
+            char vp[1200];
+            snprintf(vp, sizeof vp, "%s\\claude-verbs.txt", g_dir);
+            char *vb = slurp_if_new(vp, &cc_seen, 64u << 10);
+            if (vb) {
+                LONG nxt = !g_ccverbs_cur;
+                char *o = g_ccverbs[nxt], *end = o + sizeof g_ccverbs[0] - 1;
+                for (char *c = vb, *e; *c; c = e + (*e != 0)) {
+                    e = c + strcspn(c, "\r\n");
+                    size_t len = (size_t)(e - c);
+                    if (len && len < 40 && o + len + 1 < end) { memcpy(o, c, len); o += len; *o++ = '\n'; }
+                }
+                *o = 0;
+                InterlockedExchange(&g_ccverbs_cur, nxt);
+                free(vb);
+            }
         }
         static FILETIME set_seen; /* its settings: spinnerVerbs {"mode": "append" | "replace", "verbs": [...]} for the running line */
         snprintf(cut, sizeof path - (size_t)(cut - path), "\\.claude\\settings.json");

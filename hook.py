@@ -404,6 +404,24 @@ def drop_stale():
             pass
 
 
+def verbs_refresh():
+    """Claude Code updated since its spinner words were read (or never read): spinner_verbs.py reads them again, in the
+    background, so this returns at once."""
+    try:
+        import glob
+        import subprocess
+        out = os.path.join(os.path.dirname(PATH), "claude-verbs.txt")
+        cc = glob.glob(os.path.expanduser("~/.local/share/claude/versions/*"))
+        newest = max((os.path.getmtime(p) for p in cc), default=0)
+        if os.path.exists(out) and os.path.getmtime(out) >= newest:
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spinner_verbs.py")
+        subprocess.Popen([sys.executable, script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except Exception:
+        pass
+
+
 def rich(d, ev, sid, rec):
     aid = rec.get("aid")
     if aid:  # a subagent's: only its final reply is kept, in a file of its own (its steps stay out of the session's turns)
@@ -423,6 +441,7 @@ def rich(d, ev, sid, rec):
         return
     if ev == "SessionStart":
         drop_stale()
+        verbs_refresh()
         pane = os.environ.get("TMUX_PANE", "")
         inbox = os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
         fields = {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
