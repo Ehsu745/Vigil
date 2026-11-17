@@ -4492,7 +4492,8 @@ static void track_mouse(double now) {
         return;
     }
     if (busy) { g_hover_since = now; chat_hide(); return; }           /* no chat box while dragging */
-    if (hit < 0 || now - g_hover_since < 0.3) { chat_hide(); return; } /* a short pause before the chat box */
+    int open_here = hit >= 0 && IsWindowVisible(g_chat) && !strcmp(g_chat_sid, room->s[hit].sid); /* (a press resets the pause: the box it opened stays) */
+    if (hit < 0 || (now - g_hover_since < 0.3 && !open_here)) { chat_hide(); return; } /* a short pause before the chat box */
     room->s[hit].unread = 0; /* its box is open, so the reply is seen: READY ends (once its pieces are home) */
     RECT r = g_core_rc[hit], beside = r, o;
     if (g_single && (hit == g_top || IntersectRect(&o, &r, &g_cluster_rc))) { beside = cluster_cores(hit); r = beside; } /* (one flung away: beside itself) */
