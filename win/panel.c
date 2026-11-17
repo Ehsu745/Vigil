@@ -63,7 +63,9 @@ static Event g_ev[1024];
 static Demo g_demo;
 static int g_demo_n, g_width;
 static float g_glow = 1.0f, g_core = 0.35f, g_font = 14, g_scale = 1; /* g_scale: Settings > Panel size */
-static float g_chat_size = 1;        /* Settings > Box size: how wide and tall the chat box may grow */
+static float g_chat_size = 1;        /* (the old Box size S/M/L/XL: read once from an older settings file into the two below) */
+static int g_chat_cols = 64, g_chat_rows = 18; /* Settings > Replies > Width and Height: the chat box is always this many characters across,
+                                         * and this many lines tall at most before it scrolls (both cut to the screen) */
 static float g_gravity = 2;         /* how hard the main core holds the small ones on their orbit (Settings > Gravity) */
 static char g_shape_name[16] = "geo2";
 static double g_dpi = 1;            /* the scale of the monitor the main core is on (1 = 96 dpi); followed as it moves */
@@ -495,7 +497,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : 
 
 /* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
-static struct { float font, core, scale, glow, gravity, chat_size; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
+static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
 static int settings_path(char *out, size_t n) {
     if (!g_dir[0]) return 0;
@@ -505,7 +507,7 @@ static int settings_path(char *out, size_t n) {
 
 static void remember_launch(void) {
     g_launch.smooth = g_smooth; g_launch.custom = g_smooth_custom; g_launch.threads = g_threads;
-    g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.others = g_others;
+    g_launch.font = g_font; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.glow = g_glow; g_launch.gravity = g_gravity; g_launch.chat_size = g_chat_size; g_launch.chat_cols = g_chat_cols; g_launch.chat_rows = g_chat_rows; g_launch.others = g_others;
     g_launch.labels = g_labels; g_launch.backdrop = g_backdrop; g_launch.bd_w = g_bd_w; g_launch.bd_a = g_bd_a; g_launch.bd_core = BACKDROP_CORE; g_launch.shade_col = g_shade_col; g_launch.shade_custom = g_shade_custom; g_launch.away = g_away_after; g_launch.chat_middle = g_chat_middle; g_launch.chat_mono = g_chat_mono;
     g_launch.chat_bg = g_chat_bg; g_launch.wheel_spin = g_wheel_spin; g_launch.chat_custom = g_chat_custom; g_launch.text_col = g_text_col; g_launch.text_custom = g_text_custom; g_launch.theme = g_theme;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
@@ -518,7 +520,7 @@ static void restore_launch(void) {
     motion_map_default(MOTION_MAP); /* the motion map has no launch option: back to its defaults */
     HOLE_ACTS = (1u << HA_N) - 2; READY_ATKS = (1u << RA_N) - 2;
     g_smooth = g_launch.smooth; g_smooth_custom = g_launch.custom; g_threads = g_launch.threads;
-    g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_others = g_launch.others;
+    g_font = g_launch.font; g_core = g_launch.core; g_scale = g_launch.scale; g_glow = g_launch.glow; g_gravity = g_launch.gravity; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_others = g_launch.others;
     g_labels = g_launch.labels; g_backdrop = g_launch.backdrop; g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); g_shade_col = g_launch.shade_col; g_shade_custom = g_launch.shade_custom; g_away_after = g_launch.away; g_chat_middle = g_launch.chat_middle; g_chat_mono = g_launch.chat_mono;
     g_chat_bg = g_launch.chat_bg; g_wheel_spin = g_launch.wheel_spin; g_chat_custom = g_launch.chat_custom; g_text_col = g_launch.text_col; g_text_custom = g_launch.text_custom; g_theme = g_launch.theme;
     snprintf(g_shape_name, sizeof g_shape_name, "%s", g_launch.shape);
@@ -570,7 +572,11 @@ static void settings_load(void) {
     if (json_num(buf, "glow", &v) && v > 0) g_glow = v;
     if (json_num(buf, "gravity", &v) && v >= 0.5f && v <= 8) g_gravity = v;
     if (json_num(buf, "holeTilt", &v)) for (int i = 0; i < 5; i++) if (fabsf(v - TILTS[i]) < 0.01f) HOLE_TILT = TILTS[i];
-    if (json_num(buf, "tipSize", &v) && v >= 0.5f && v <= 2) g_chat_size = v;
+    if (json_num(buf, "tipSize", &v) && v >= 0.5f && v <= 2) { g_chat_size = v; g_chat_cols = (int)lroundf(64 * v / 10) * 10; g_chat_rows = (int)lroundf(18 * v / 4) * 4; } /* (an older file: its size as width and height) */
+    if (json_num(buf, "chatCols", &v) && v >= 40 && v <= 160) g_chat_cols = (int)v;
+    if (json_num(buf, "chatRows", &v) && v >= 8 && v <= 60) g_chat_rows = (int)v;
+    g_chat_cols = g_chat_cols < 40 ? 40 : g_chat_cols > 160 ? 160 : g_chat_cols;
+    g_chat_rows = g_chat_rows < 8 ? 8 : g_chat_rows > 60 ? 60 : g_chat_rows;
     if (json_num(buf, "others", &v)) g_others = v != 0;
     if (json_num(buf, "labels", &v)) g_labels = v != 0;
     if (json_num(buf, "backdrop", &v) && v >= 0 && v <= 2) g_backdrop = (int)v;
@@ -663,6 +669,7 @@ static void settings_save(void) {
                "\"shape\": \"%s\", \"frame\": \"%s\"}\n",
             g_font, g_core, g_scale, g_glow, g_gravity, g_chat_size, g_others, g_labels, g_chat_middle, g_chat_mono, g_chat_bg, g_chat_custom, g_text_col, g_text_custom, g_wheel_spin, g_away_after, g_shape_name, g_frame);
     fseek(f, -2, SEEK_CUR); /* back over "}\n": the motion map goes in the same object */
+    fprintf(f, ", \"chatCols\": %d, \"chatRows\": %d", g_chat_cols, g_chat_rows);
     fprintf(f, ", \"chatTheme\": %d, \"myThemes\": [", g_theme);
     for (int i = 0; i < g_my_n * 9; i++) fprintf(f, "%s%u", i ? ", " : "", ((const unsigned *)g_mine)[i]);
     fprintf(f, "], \"myThemeNames\": \"");
@@ -3443,22 +3450,24 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
     { int m = (int)(12 * g_dpi); InflateRect(&wa, -m, -m); } /* never against the screen's edge */
     int ww = wa.right - wa.left, wh = wa.bottom - wa.top;
-    int maxw = (int)(fmax(460, g_font * 36) * g_dpi * g_chat_size), pad = chat_pad(); /* Settings > Box size */
-    if (g_chat_middle) maxw = (int)fmin(fmax(maxw, ww * 0.45 * g_chat_size), 1000 * g_dpi * g_chat_size);
-    if (maxw > ww - 2 * pad) maxw = ww - 2 * pad;
+    int pad = chat_pad();
     HDC dc = GetDC(g_chat);
+    TEXTMETRICW tm;
+    SelectObject(dc, g_chat_bf);
+    GetTextMetricsW(dc, &tm);
+    int maxw = tm.tmAveCharWidth * g_chat_cols; /* Settings > Replies > Width: always this wide, whatever the text */
+    if (maxw > ww - 2 * pad - chat_bar() - (int)(8 * g_dpi)) maxw = ww - 2 * pad - chat_bar() - (int)(8 * g_dpi);
     SelectObject(dc, g_chat_tf);
     RECT t = {0, 0, maxw, 0};
     DrawTextW(dc, wt, -1, &t, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
     g_chat_title_h = t.bottom;
     SelectObject(dc, g_chat_bf);
-    TEXTMETRICW tm; GetTextMetricsW(dc, &tm);
     g_chat_line = tm.tmHeight;
     RECT b = {0, 0, maxw, 0};
     g_chat_body_h = chat_layout(dc, wb, maxw);
     b.right = g_lay_w;
     ReleaseDC(g_chat, dc);
-    int most = g_chat_middle ? (int)(wh * fmin(0.85, 0.6 * g_chat_size)) : (int)fmin(g_chat_line * 18 * g_chat_size, wh * 0.85); /* longer: it scrolls */
+    int most = (int)fmin(g_chat_line * g_chat_rows, wh * 0.9); /* Settings > Replies > Height: longer, it scrolls */
     /* a reply being typed sits under the box: both have to fit on the screen together */
     int below = input_open() ? input_h() + (int)(6 * g_dpi) : 0, chrome = pad + g_chat_title_h + chat_gap() + pad;
     if (most > wh - below - chrome - (int)(16 * g_dpi)) most = wh - below - chrome - (int)(16 * g_dpi);
@@ -3475,9 +3484,8 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
         g_hist_land = 0;
     }
     int sb = g_chat_body_h > g_chat_view_h ? (int)(8 * g_dpi) : 0;
-    int w = (t.right > b.right ? t.right : b.right), h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad;
-    if (input_open()) w = maxw; /* a reply being typed gets the whole width (the reply line is as wide as the box): a short answer made it a narrow slot */
-    if (w > maxw) w = maxw;
+    int w = maxw, h = pad + g_chat_title_h + chat_gap() + g_chat_view_h + pad; /* (the same width every time: a short reply no longer makes a narrow box) */
+    (void)b;
     w += chat_bar() + 2 * pad + sb;
     int x, y;
     if (g_chat_middle) { x = wa.left + (ww - w) / 2; y = wa.top + (wh - h - below) / 2; } /* the box and the reply line, centred together */
@@ -5103,7 +5111,7 @@ static double tick_interval(void) {
  * bitmap and shown as a layered window, so the corners are smooth too. Every choice applies at once and is kept. */
 #include "lucide.h"
 enum { R_SHAPE, R_CORE, R_GLOW, R_FRAME, R_SCALE, R_GRAVITY, R_OTHERS, R_CHATAT, R_CHATFONT, R_TEXT, R_LABELS, R_AWAY, R_CHATSIZE, R_CHATBG, R_WHEEL, R_TEXTCOL,
-       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG };
+       R_MODE, R_SMOOTH, R_MOVEMOD, R_SEND, R_BACKDROP, R_SHADECOL, R_RIDLE, R_RTHINK, R_RBUSY, R_RREST, R_RHAND, R_THREADS, R_BDW, R_BDA, R_BDCORE, R_HOLETILT, R_HOLEGPU, R_HOLELENS, R_THEME, R_ROLE, R_CSUG, R_CHATW, R_CHATH };
 /* Settings > Performance: pictures a second for each kind of moment (0: the monitor's refresh rate), the steps a
  * slider stops at; and how many threads draw */
 #define NRATES 12
@@ -5211,6 +5219,8 @@ static int set_current(int row) {
         case R_AWAY: if (i < 8 && g_away_after == AWAYS[i]) return i; break;
         case R_HOLEGPU: return g_gpu ? 0 : g_hole_light ? 2 : 1;
         case R_CHATSIZE: if (i < 4 && g_chat_size == CHATSIZES[i]) return i; break;
+        case R_CHATW: return (g_chat_cols - 40) / 10;
+        case R_CHATH: return (g_chat_rows - 8) / 4;
         case R_CHATBG: return g_theme == TH_VIGIL ? g_chat_bg : -1; /* (a theme's own: none of them) */
         case R_WHEEL: return g_wheel_spin;
         case R_TEXTCOL: return g_theme == TH_VIGIL ? g_text_col : -1;
@@ -5358,6 +5368,8 @@ static void set_choose(int row, int val) {
     case R_AWAY: if (val >= 0 && val < 8) g_away_after = AWAYS[val]; break;
     case R_HOLEGPU: g_gpu = val == 0; g_hole_light = val == 2; break;
     case R_CHATSIZE: g_chat_size = CHATSIZES[val]; chat_hide(); break;
+    case R_CHATW: if (val >= 0 && val < 13) { g_chat_cols = 40 + 10 * val; chat_hide(); } break;
+    case R_CHATH: if (val >= 0 && val < 14) { g_chat_rows = 8 + 4 * val; chat_hide(); } break;
     case R_CHATBG: g_theme = TH_VIGIL; g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
     case R_ROLE: { /* the theme card: a colour opened in the picker (a built-in theme copied first), Make a copy, Delete, Rename */
@@ -5434,7 +5446,7 @@ static void page_reset(int pg) {
         g_bd_w = g_launch.bd_w; g_bd_a = g_launch.bd_a; BACKDROP_CORE = g_launch.bd_core; bd_apply(); main_place(); break;
     case PG_CLUSTER: g_others = g_launch.others; g_labels = g_launch.labels; g_gravity = g_launch.gravity; g_away_after = g_launch.away; g_wheel_spin = g_launch.wheel_spin; break;
     case PG_REPLIES:
-        g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_bg = g_launch.chat_bg;
+        g_chat_mono = g_launch.chat_mono; g_font = g_launch.font; g_chat_size = g_launch.chat_size; g_chat_cols = g_launch.chat_cols; g_chat_rows = g_launch.chat_rows; g_chat_bg = g_launch.chat_bg;
         g_text_col = g_launch.text_col; g_chat_middle = g_launch.chat_middle; chat_refont(); chat_hide(); break;
     case PG_MOTIONS: motion_map_default(MOTION_MAP); HOLE_ACTS = (1u << HA_N) - 2; READY_ATKS = (1u << RA_N) - 2; break;
     case PG_KEYS:
@@ -5680,7 +5692,9 @@ enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, 
 typedef struct { int kind, row, n; const wchar_t *label, *hint; const wchar_t *const *names; const wchar_t *lo, *hi; const char *icon; } SRow;
 typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
 static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAMES[4] = {L"XS", L"S", L"M", L"L"},
-                     *TEXT_SIZES[5] = {L"XS", L"S", L"M", L"L", L"XL"}, *BOX_SIZES[4] = {L"S", L"M", L"L", L"XL"},
+                     *TEXT_SIZES[5] = {L"XS", L"S", L"M", L"L", L"XL"},
+                     *CHAT_COLS_N[13] = {L"40", L"50", L"60", L"70", L"80", L"90", L"100", L"110", L"120", L"130", L"140", L"150", L"160"},
+                     *CHAT_ROWS_N[14] = {L"8", L"12", L"16", L"20", L"24", L"28", L"32", L"36", L"40", L"44", L"48", L"52", L"56", L"60"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
                      *AWAY_NAMES[8] = {L"1 min", L"2 min", L"5 min", L"10 min", L"15 min", L"30 min", L"1 hour", L"Never"}, *OPEN_NAMES[2] = {L"Next to core", L"Middle"},
                      *SM_NAMES[SM_N] = {L"Saver", L"Balanced", L"Smooth", L"Max", L"Custom"},
@@ -5728,7 +5742,8 @@ static int page_sections(int pg, SSec *s) {
         s[0].title = L"TEXT"; s[1].title = L"BOX"; n = 2;
         ROW(0, RK_FONTS, R_CHATFONT, 2, L"Font", NULL, NULL, NULL, NULL, NULL);
         ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
-        ROW(1, RK_SLIDER, R_CHATSIZE, 4, L"Box size", L"how far it grows before it scrolls", BOX_SIZES, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
+        ROW(1, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
         ROW(1, RK_THEME, R_THEME, TH_N, L"Theme", theme_hint(), THEME_NAMES, NULL, NULL, NULL);
         ROW(1, RK_SEG, R_CHATAT, 2, L"Opens", NULL, OPEN_NAMES, NULL, NULL, NULL);
         { /* the theme's colours: your own to change; a built-in one changed through a copy */
