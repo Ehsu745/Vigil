@@ -2532,6 +2532,7 @@ void chat_more_fonts(int h, const wchar_t *text, DWORD pitch) {
 }
 
 /* the running line (chat_conv's marker 7): laid out once, drawn on every frame */
+#define ID_SPIN 77                     /* the chat box's timer while the running line shows */
 static int g_spin_on, g_spin_x, g_spin_y; /* its baseline in the laid-out body, and where its words start */
 static wchar_t g_spin_verb[24];
 static long long g_spin_t0;
@@ -2924,26 +2925,28 @@ static void chat_runs(HDC dc, int i0, int i1, RECT view, int top) {
 }
 
 /* the running line, as Claude Code draws it: the star turning · ✢ * ✶ ✻ ✽ and back (a plain * where ✳ would be: that
- * one comes out as an emoji), the word in bold in the accent with a few letters in a lighter shade stepping across it
- * and on 10 letters past each end, then the time and the tokens */
+ * one comes out as an emoji) and breathing between the accent and a lighter shade, the word in bold in the accent with a
+ * soft lighter band gliding across it, then the time and the tokens; repainted 25 times a second by its own timer */
 static void spin_paint(HDC dc, int x0, int base) {
     static const wchar_t STAR[] = L"\x00B7\x2722*\x2736\x273B\x273D\x273D\x273B\x2736*\x2722\x00B7";
     double now = wall();
     COLORREF acc = tint(MD_RUN);
     int ar = GetRValue(acc), ag = GetGValue(acc), ab = GetBValue(acc);
-    COLORREF shim = RGB(min(255, ar + 20), min(255, ag + 40), min(255, ab + 40)); /* (claude 215,119,87 → claudeShimmer 235,159,127) */
+    int sr = min(255, ar + 40), sg = min(255, ag + 70), sb = min(255, ab + 70); /* the lighter shade (claude 215,119,87 → claudeShimmer 235,159,127, a little further) */
+    #define SPIN_MIX(k) RGB(ar + (int)((sr - ar) * (k)), ag + (int)((sg - ag) * (k)), ab + (int)((sb - ab) * (k)))
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
     SelectObject(dc, g_chat_bf);
-    SetTextColor(dc, acc);
+    SetTextColor(dc, SPIN_MIX((1 - cos(2 * M_PI * now / 2.0)) / 2)); /* the star breathes between them, every 2 s */
     const wchar_t *st = STAR + (int)(now / 0.12) % 12;
     SIZE sz; GetTextExtentPoint32W(dc, st, 1, &sz);
     TextOutW(dc, x0 + max(0, (g_spin_x - sz.cx) / 2), base, st, 1);
     SelectObject(dc, lay_font(F_BOLD));
     int x = x0 + max(g_spin_x, (int)sz.cx + (int)(4 * g_dpi)), n = (int)wcslen(g_spin_verb);
-    int at = (int)(now / 0.1) % (n + 1 + 20) - 10; /* the lighter letters: three, from here */
+    double span = n + 1 + 12, at = fmod(now / 0.075, span) - 6; /* the band's middle, in letters, gliding on 6 past each end */
     for (int i = 0; i <= n; i++) {
         wchar_t ch = i < n ? g_spin_verb[i] : 0x2026;
-        SetTextColor(dc, i >= at && i < at + 3 ? shim : acc);
+        double d = fabs(i - at) / 2.5, k = d < 1 ? (1 + cos(M_PI * d)) / 2 : 0; /* soft edges: a gradient, not a step */
+        SetTextColor(dc, SPIN_MIX(k));
         TextOutW(dc, x, base, &ch, 1);
         GetTextExtentPoint32W(dc, &ch, 1, &sz);
         x += sz.cx;
@@ -2961,9 +2964,11 @@ static void spin_paint(HDC dc, int x0, int base) {
     else tail[0] = 0;
     SetTextColor(dc, acc);
     TextOutW(dc, x, base, tail, (int)wcslen(tail));
+    #undef SPIN_MIX
 }
 
 static LRESULT CALLBACK chat_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == ID_SPIN) { if (g_spin_on && IsWindowVisible(w)) InvalidateRect(w, NULL, FALSE); return 0; }
     if (msg == WM_PAINT || msg == WM_PRINTCLIENT) { /* drawn off-screen first, so scrolling does not flicker (WM_PRINTCLIENT: --record) */
         PAINTSTRUCT ps;
         HDC wdc = msg == WM_PAINT ? BeginPaint(w, &ps) : (HDC)wp;
@@ -3361,7 +3366,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     g_chat_title = wt; g_chat_body = wb;
     COLORREF acc = tint(MD_RUN); /* the theme's accent: the core shows the state, the box need not */
     if (acc != g_chat_accent) { g_chat_accent = acc; InvalidateRect(g_chat, NULL, FALSE); }
-    { static double spun; if (g_spin_on && now - spun >= 0.08) { spun = now; InvalidateRect(g_chat, NULL, FALSE); } } /* the running line moves */
+    { static int ticking; if (g_spin_on != ticking) { ticking = g_spin_on; if (ticking) SetTimer(g_chat, ID_SPIN, 40, NULL); else KillTimer(g_chat, ID_SPIN); } } /* the running line moves on its own timer (25 a second), whatever the cores do */
     if (!changed) return;
     chat_fonts();
     RECT wa = work_at((beside.left + beside.right) / 2.0f, (float)cy); /* the monitor the core is on */
