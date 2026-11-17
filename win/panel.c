@@ -2242,7 +2242,8 @@ static int g_chat_hist;              /* the earlier turns are shown: off each ti
 static int g_hist_land;              /* 1: they were just let in, the view stays on the latest turn's prompt; 2: just left out, the view at the end; 3: left out, from the top */
 static float g_push, g_push_drawn;   /* the wheel going on past an edge, in notches (HIST_PUSH flip it; + up, - down), shown filling its line */
 static double g_push_at;
-enum { HIST_PUSH = 7 };              /* notches past an edge that flip the earlier turns in or out, a dot each */
+enum { HIST_PUSH = 7 };              /* the fuse's beads */
+static int g_push_need = HIST_PUSH;  /* notches past an edge that let the earlier turns in or out (Settings > Chat > Push): the fuse fills in that many */
 static int g_gap_lit;                /* the fuse's beads lit: one a notch */
 static double g_bead_t[8];           /* when each bead lit (it pops, then settles) */
 static double g_fuse_done;           /* when a push did what it does (the star turns, or it went out), then the fuse fades */
@@ -2933,10 +2934,11 @@ static void chat_refont(void) {
 }
 
 /* how far the wheel has gone on past an edge, 0 to 1 (nothing after a 0.6 s pause) */
-static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / HIST_PUSH); }
-/* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
-static void hist_commit(void) {
-    if (g_peek == 1) { g_chat_hist = 1; g_grow_hold = 1; g_fuse_done = wall(); g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
+static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1, fabsf(g_push) / g_push_need); }
+/* the earlier turns in (laid out above the latest, the box then growing to show them, the latest turn staying put),
+ * or out (the box shrinking to the latest turn, its end in view) */
+static void hist_commit(int in) {
+    if (in) { g_chat_hist = 1; g_grow_hold = 1; g_peek_laid = 0; }
     else { g_chat_hist = 0; g_hist_land = 2; g_end_hold = 1; }
     g_peek = 0; g_push = 0; g_chat_auto = 0;
 }
@@ -2947,7 +2949,7 @@ static void hist_commit(void) {
 static void chat_scroll(float notches) {
     if (!g_chat || !IsWindowVisible(g_chat)) return;
     int bottom = g_chat_scroll >= g_chat_body_h - g_chat_view_h;
-    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && (g_peek == 1 || g_chat_scroll == 0);
+    int in = notches > 0 && !g_chat_hist && g_mt_n > 1 && g_chat_scroll == 0; /* (nothing moves in the box while the fuse fills) */
     int out = notches < 0 && g_chat_hist && !g_end_hold && (g_fuse_dir == -1 || bottom); /* on down past the end: the fuse burns out, then only the latest turn */
     if (in || out) {
         double now = wall();
@@ -2955,10 +2957,9 @@ static void chat_scroll(float notches) {
         g_push_at = now; g_push += notches;
         int dir = in ? 1 : -1;
         if (g_fuse_dir != dir || (g_fuse_done > 0 && now - g_fuse_done > .05)) { g_fuse_dir = dir; g_fuse_from = now; g_fuse_done = 0; }
-        g_fuse_n = (int)fminf(HIST_PUSH, ceilf(fabsf(g_push) - .01f));
+        g_fuse_n = (int)fminf(HIST_PUSH, ceilf(HIST_PUSH * fabsf(g_push) / g_push_need - .01f)); /* (seven beads, however many notches fill them) */
         g_gap_lit = g_fuse_n;
-        if (in && !g_peek) { g_peek = 1; g_chat_auto = 0; } /* the box starts growing with the push */
-        if (fabsf(g_push) >= HIST_PUSH) { hist_commit(); g_fuse_done = now; }
+        if (fabsf(g_push) >= g_push_need) { hist_commit(in); g_fuse_done = now; }
         InvalidateRect(g_chat, NULL, FALSE);
         return;
     }
@@ -2974,8 +2975,8 @@ static void chat_scroll(float notches) {
  * view), or the earlier turns in above it */
 static void chat_middle(const Session *s) {
     if (!g_chat || !IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid) || g_peek) return;
-    if (g_chat_hist) { g_peek = -1; hist_commit(); }
-    else if (g_mt_n > 1) { g_chat_hist = 1; g_hist_land = 1; g_chat_auto = 0; }
+    if (g_chat_hist) hist_commit(0);
+    else if (g_mt_n > 1) hist_commit(1);
 }
 
 /* a prompt's band: the box's colour a little lighter (darker on a light box); the pinned strip a little more */
@@ -3475,7 +3476,7 @@ static char *chat_conv(int st) {
         cap += (t->p ? strlen(t->p) * 2 : 0) + (t->r ? strlen(t->r) + 4 : 0) + (t->tally ? strlen(t->tally) : 0) + 400 * MT_STEPS;
     }
     char *out = malloc(cap), *o = out;
-    int all = g_chat_hist || g_peek == 1; /* (a push up under way: they are laid out above already, the box growing to show them) */
+    int all = g_chat_hist;
     int i0 = all ? 0 : g_mt_n - 1; /* the latest turn only, until let in (with your prompt: back past the harness's) */
     while (!all && i0 > 0 && harness_p(g_mt[i0].p)) i0--;
     for (int i = i0; i < g_mt_n; i++) {
@@ -3647,10 +3648,10 @@ static void chat_ease(double now, int snap) {
     float p = hist_push_now(), pe = 1 - (1 - p) * (1 - p);
     float view_to = (float)g_chat_view_h, scroll_to = (float)g_chat_scroll;
     float extra_to = 0;
-    if (g_peek == 1 && !g_peek_laid) { /* (not laid out yet: nothing moves) */ }
-    else if (g_peek == 1 || g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
-        float r = g_peek == 1 ? pe * g_peek_rfin : g_peek_rfin;
-        view_to = g_peek == 1 ? fminf(g_peek_h0 + r, (float)g_chat_view_h) : (float)g_chat_view_h;
+    if (g_grow_hold && !g_peek_laid) { /* (not laid out yet: nothing moves) */ }
+    else if (g_grow_hold) { /* the box grows by what it shows of the earlier turns, up to its tallest; past that they come down into it */
+        float r = g_peek_rfin;
+        view_to = (float)g_chat_view_h;
         extra_to = fmaxf(0, r - (view_to - g_peek_h0));
         scroll_to = g_lat_y - r;
     } else if (g_peek == -1) { /* the box shrinks toward the latest turn's height, its end staying in view */
@@ -3669,7 +3670,7 @@ static void chat_ease(double now, int snap) {
     if (snap || !IsWindowVisible(g_chat)) g_peek_extra = extra_to;
     int fuse = g_fuse_dir != 0;
     g_chat_anim = fuse || p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
-    if ((g_end_hold || g_grow_hold) && fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f && fabsf(extra_to - g_peek_extra) < .5f) {
+    if ((g_end_hold || (g_grow_hold && g_peek_laid)) && fabsf(h_to - g_box_h) < .5f && fabsf(y_to - g_box_y) < .5f && fabsf(extra_to - g_peek_extra) < .5f) {
         g_end_hold = g_grow_hold = 0; /* the box has settled: from here the scroll is its own again (the wheel may have moved it meanwhile) */
         g_box_h = h_to; g_box_y = y_to; g_peek_extra = extra_to;
         g_chat_anim = 1;
@@ -3680,7 +3681,7 @@ static void chat_ease(double now, int snap) {
     int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
     if (g_peek == -1 || g_end_hold) /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
         g_scroll_d = (float)(g_chat_body_h > vh ? g_chat_body_h - vh : 0);
-    else if ((g_peek == 1 && g_peek_laid) || g_grow_hold) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
+    else if (g_grow_hold && g_peek_laid) { /* growing: the latest turn stays where it sits on the view's bottom edge, the earlier ones show above as
                                             * the box grows this frame, and past its tallest they come down into it */
         float sd = g_lat_y + g_peek_h0 - vh - g_peek_extra;
         g_scroll_d = sd < 0 ? 0 : sd;
@@ -3723,7 +3724,7 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     if (!IsWindowVisible(g_chat) || strcmp(g_chat_sid, s->sid)) { g_chat_hist = g_turns_all; g_peek = 0; } /* opened, or another session's: its latest turn only (Settings > Chat > Turns) */
     else if (hist_push_now() != g_push_drawn) InvalidateRect(g_chat, NULL, FALSE); /* the push's strip goes after a pause */
     if (g_peek && hist_push_now() == 0 && !g_chat_anim) g_peek = 0; /* sprung back all the way: the latest turn alone again, the same picture */
-    if (g_peek != 1) g_peek_laid = 0;
+    if (!g_grow_hold) g_peek_laid = 0;
     const char *body = (st == ST_WAIT && g_msg_notice) ? g_msg_notice : g_msg_reply ? g_msg_reply : strcmp(s->sid, "ghost") ? "(no reply yet)" : "Start a session in WSL; it shows up here.";
     char *conv = strcmp(s->sid, "ghost") ? chat_conv(st) : NULL;
     if (conv) body = conv;
@@ -3788,13 +3789,17 @@ static void chat_show(const Session *s, RECT beside, int cy, double now) {
     g_chat_most = most;
     { /* the earlier turns came in above or went: the scroll moves with them, so the same lines stay in view */
         static int was_full = -1;
-        int full = g_chat_hist || g_peek == 1;
+        int full = g_chat_hist;
         if (!snap && was_full >= 0 && full != was_full) {
             int d = g_chat_body_h - old_body;
             g_scroll_d += d; g_chat_scroll += d;
             if (g_scroll_d < 0) g_scroll_d = 0;
             if (g_chat_scroll < 0) g_chat_scroll = 0; /* (sprung back: at the latest turn's top, where a push starts again) */
-            if (full && g_peek == 1) { g_peek_laid = 1; g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view))); }
+            if (full && g_grow_hold) { /* let in: from here the box grows to show them, the latest turn staying put */
+                g_peek_laid = 1; g_lat_y = d; g_peek_h0 = old_view; g_peek_rfin = fminf((float)d, fmaxf(3.0f * g_chat_line, (float)(most - old_view)));
+                g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin);
+                if (g_chat_scroll < 0) g_chat_scroll = 0;
+            }
         }
         was_full = full;
     }
