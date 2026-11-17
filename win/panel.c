@@ -13,7 +13,7 @@
  * Alt stands in for the macOS ⌥ everywhere: Alt-drag moves, Alt-click picks up and the next click puts down.
  *
  * Also: hover replies (the chat box with the last reply or permission notice, from the hook's msg files,
- * DODECA_RICH=1), labels, lock-on with the focus frame, the rush defence, press, drag to spin, double-click
+ * VIGIL_RICH=1), labels, lock-on with the focus frame, the rush defence, press, drag to spin, double-click
  * ring and bring to front, away (STANDBY), right-click menu with Copy reply and Settings. Not yet: voice.
  *
  * All core rectangles are kept in screen pixels; each window knows where it is.
@@ -395,7 +395,7 @@ static int index_of(const char *sid) {
 static int down_index(void) { return index_of(g_down_sid); }
 
 /* ---- saved positions, per screen size --------------------------------------------------------------- */
-/* ~/.dodeca-core/panel-position-win.json in WSL: {"1920x1080": [x, y], "1920x1080/<folder>": [x, y], ...}:
+/* ~/.vigil/panel-position-win.json in WSL: {"1920x1080": [x, y], "1920x1080/<folder>": [x, y], ...}:
  * the cluster (single core), and each core put somewhere by hand (all cores), by its folder name since
  * session ids change every run. Its own file: the macOS panel keeps panel-position.json, y from the bottom. */
 typedef struct { char key[96]; int x, y; } Pos;
@@ -512,7 +512,7 @@ static int on_work(float x, float y) {
 
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
 
-/* ---- the Settings menu: what it changes is kept in ~/.dodeca-core/panel-settings-win.json and wins over
+/* ---- the Settings menu: what it changes is kept in ~/.vigil/panel-settings-win.json and wins over
  * the launch options; "Use launch options again" forgets it ------------------------------------------- */
 static struct { float font, core, scale, glow, gravity, chat_size; int chat_cols, chat_rows, chat_fitw, chat_fith; int smooth, threads; Smooth custom; int others, labels, backdrop, shade_col, bd_w, bd_a, bd_core; unsigned shade_custom; int chat_middle, chat_pref, hover_pause, chat_pop, turns_all, steps_mode, chat_mono, chat_bg, wheel_spin, text_col, theme; unsigned chat_custom, text_custom; double away; char shape[16], frame[16], hk[4][32]; int move_mod, send_ctrl; } g_launch;
 
@@ -1966,7 +1966,7 @@ static void hearts_draw(double now) {
 }
 
 /* ---- the chat box: name and state, then the last reply (or the permission notice) --------------------- */
-/* The hook keeps them in ~/.dodeca-core/msg/<sid>.json (only with DODECA_RICH=1); read again when the file
+/* The hook keeps them in ~/.vigil/msg/<sid>.json (only with VIGIL_RICH=1); read again when the file
  * changes. --demo makes them up, like the macOS panel. */
 static const char *DEMO_REPLY[] = {
     "Refactored the channel model so fading is applied per tap.\n\n- `channel.py`: one Rayleigh draw per tap, not per frame\n- `sim.py`: the seed covers the noise too, so runs repeat\n- `test_ber.py`: all 42 tests pass\n\nThe BER curve now matches the reference within 0.2 dB:\n\n```\nEb/N0   ref      ours\n 4 dB   1.2e-2   1.2e-2\n 8 dB   3.1e-4   3.3e-4\n12 dB   1.8e-6   1.9e-6\n```\n\n**How I checked**\n\n1. Ran the 42 tests three times with fixed seeds\n2. Swept Eb/N0 from 0 to 14 dB in 1 dB steps\n3. Compared each point with `reference.csv`\n\n**Files changed**\n\n- `channel.py` +48 -31\n- `sim.py` +12 -4\n- `test_ber.py` +20\n\nNext I can add **Doppler** if you want.",
@@ -8069,7 +8069,7 @@ static LONGLONG next_wait(void) {
 static void usage(void) {
     MessageBoxA(NULL,
         "vigil-panel.exe: Vigil's floating panel for Windows\n\n"
-        "  --events PATH        the events file (from WSL: \\\\wsl$\\<distro>\\home\\<you>\\.dodeca-core\\events.jsonl;\n"
+        "  --events PATH        the events file (from WSL: \\\\wsl$\\<distro>\\home\\<you>\\.vigil\\events.jsonl;\n"
         "                       the win/vigil-win launcher passes it for you)\n"
         "  --demo [N]           made-up sessions instead of the events file (1-6, default 3)\n"
         "  --all                every core its own window, each placed by hand (default: single core)\n"

@@ -14,26 +14,29 @@
 #   mkdir -p ~/Library/Application\ Support/iTerm2/Scripts
 #   cp pane_api.py ~/Library/Application\ Support/iTerm2/Scripts/vigil_pane.py
 #
-#   DODECA_PANE_COLS    width of the pane in characters (default 34)
-#   DODECA_PANE_ARGS    extra options for the program, e.g. "--shape bucky"
-#   DODECA_PANE_MODE    "terminal" to draw in the pane even when the floating panel has been built
-#   DODECA_PANE_DEBUG   set to 1 to run in the foreground and show what iTerm2 answers
+#   VIGIL_PANE_COLS    width of the pane in characters (default 34)
+#   VIGIL_PANE_ARGS    extra options for the program, e.g. "--shape bucky"
+#   VIGIL_PANE_MODE    "terminal" to draw in the pane even when the floating panel has been built
+#   VIGIL_PANE_DEBUG   set to 1 to run in the foreground and show what iTerm2 answers
 
 [ "$TERM_PROGRAM" = "iTerm.app" ] || exit 0
 [ -n "$ITERM_SESSION_ID" ] || exit 0
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-if [ -x "$DIR/vigil-panel" ] && [ "$DODECA_PANE_MODE" != "terminal" ]; then
-    CMD="'$DIR/vigil-panel' --fit-pane --exit-when-empty $DODECA_PANE_ARGS"
-elif [ -x "$DIR/dodeca-core" ]; then
-    CMD="'$DIR/dodeca-core' --pane --exit-when-empty $DODECA_PANE_ARGS"
+# the data folder: ~/.vigil (the old ~/.dodeca-core is moved there the first time); DODECA_*: the old names, still read
+[ ! -e "$HOME/.vigil" ] && [ -d "$HOME/.dodeca-core" ] && mv "$HOME/.dodeca-core" "$HOME/.vigil"
+for v in COLS ARGS MODE DEBUG; do eval "[ -z \"\$VIGIL_PANE_$v\" ] && VIGIL_PANE_$v=\$DODECA_PANE_$v"; done
+if [ -x "$DIR/vigil-panel" ] && [ "$VIGIL_PANE_MODE" != "terminal" ]; then
+    CMD="'$DIR/vigil-panel' --fit-pane --exit-when-empty $VIGIL_PANE_ARGS"
+elif [ -x "$DIR/vigil" ]; then
+    CMD="'$DIR/vigil' --pane --exit-when-empty $VIGIL_PANE_ARGS"
 else
     exit 0
 fi
 
-PIDFILE="$HOME/.dodeca-core/pane.pid"
+PIDFILE="$HOME/.vigil/pane.pid"
 SID=${ITERM_SESSION_ID#*:} # "w0t0p0:UUID" -> the session's id
-COLS=${DODECA_PANE_COLS:-34}
+COLS=${VIGIL_PANE_COLS:-34}
 IT2RUN=/Applications/iTerm.app/Contents/Resources/it2run
 API_SCRIPT="$HOME/Library/Application Support/iTerm2/Scripts/vigil_pane.py"
 
@@ -76,11 +79,11 @@ EOF
 }
 
 if pane_is_open; then
-    [ -n "$DODECA_PANE_DEBUG" ] && echo "open_pane: a pane is already open (pid $(cat "$PIDFILE")); close it first" >&2
+    [ -n "$VIGIL_PANE_DEBUG" ] && echo "open_pane: a pane is already open (pid $(cat "$PIDFILE")); close it first" >&2
     exit 0
 fi
 
-if [ -n "$DODECA_PANE_DEBUG" ]; then
+if [ -n "$VIGIL_PANE_DEBUG" ]; then
     open_pane
 else
     open_pane >/dev/null 2>&1 & # in the background: Claude Code should not wait for iTerm2 to answer

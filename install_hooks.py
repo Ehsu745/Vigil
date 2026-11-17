@@ -6,8 +6,8 @@
   python3 install_hooks.py --remove   # take the hook out again (other hooks are kept)
 
 Add --pane to the first two to also open the side pane in iTerm2 whenever a session starts.
-Add --rich to run the hook with DODECA_RICH=1: it then also keeps Claude's last reply, the last notification
-text and the iTerm2 session id in ~/.dodeca-core/msg/ for the floating panel (see the README, Privacy).
+Add --rich to run the hook with VIGIL_RICH=1: it then also keeps Claude's last reply, the last notification
+text and the iTerm2 session id in ~/.vigil/msg/ for the floating panel (see the README, Privacy).
 """
 import difflib
 import json
@@ -20,7 +20,7 @@ import time
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 HOOK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook.py")
 COMMAND = "python3 " + shlex.quote(HOOK_FILE)
-RICH_COMMAND = "DODECA_RICH=1 " + COMMAND
+RICH_COMMAND = "VIGIL_RICH=1 " + COMMAND
 PANE_COMMAND = "sh " + shlex.quote(os.path.join(os.path.dirname(HOOK_FILE), "open_pane.sh"))
 EVENTS = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
           "PostToolUse", "Notification", "Stop", "SubagentStart", "SubagentStop"]
@@ -29,7 +29,7 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse"}
 
 def is_ours(entry):
     cmds = [h.get("command", "") for h in entry.get("hooks", [])]
-    # ours: one of our commands, or any hook.py / open_pane.sh under vigil (or dodeca-core, the old name)
+    # ours: one of our commands (VIGIL_RICH, or DODECA_RICH from before), or any hook.py / open_pane.sh under vigil (or dodeca-core, the old name)
     return any(c in (COMMAND, RICH_COMMAND, PANE_COMMAND) or (("vigil" in c or "dodeca-core" in c) and ("hook.py" in c or "open_pane.sh" in c)) for c in cmds)
 
 

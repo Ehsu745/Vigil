@@ -276,7 +276,7 @@ static void usage(void) {
          "  --fps N           most frames per second (default 20; calm sessions are redrawn less often)\n"
          "  --glow X          halo strength (default 1.0)\n"
          "  --core X          core radius as a fraction of the shell's inradius (default 0.35)\n"
-         "  --events PATH     events file (default ~/.dodeca-core/events.jsonl, or $DODECA_EVENTS)\n"
+         "  --events PATH     events file (default ~/.vigil/events.jsonl, or $VIGIL_EVENTS)\n"
          "  --snapshot FILE   render one demo frame to a PPM file and exit (with --at SECONDS, --size WxH)\n"
          "\n"
          "  q quits.");
@@ -286,7 +286,7 @@ int main(int argc, char **argv) {
     int out = OUT_AUTO, layout = LAYOUT_GRID, res = 0, fps = 20, demo_n = 0, snap_w = 900, snap_h = 500, exit_empty = 0;
     float glow = 1.0f, core_frac = 0.35f;
     double snap_at = 8.0;
-    const char *shape_name = "geo2", *snapshot = NULL, *events = getenv("DODECA_EVENTS"), *home = getenv("HOME") ? getenv("HOME") : ".";
+    const char *shape_name = "geo2", *snapshot = NULL, *events = getenv("VIGIL_EVENTS") ? getenv("VIGIL_EVENTS") : getenv("DODECA_EVENTS"), *home = getenv("HOME") ? getenv("HOME") : ".";
     char events_default[1024];
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -311,8 +311,13 @@ int main(int argc, char **argv) {
     if (res < 64) res = 64;
     if (fps < 1) fps = 1;
     if (fps > 60) fps = 60;
+    { /* the data folder: ~/.vigil; the old ~/.dodeca-core (the name before Vigil) is moved there the first time */
+        char nw[900], od[900]; struct stat st;
+        snprintf(nw, sizeof nw, "%.800s/.vigil", home); snprintf(od, sizeof od, "%.800s/.dodeca-core", home);
+        if (stat(nw, &st) != 0 && stat(od, &st) == 0) rename(od, nw);
+    }
     if (!events) {
-        snprintf(events_default, sizeof events_default, "%s/.dodeca-core/events.jsonl", home);
+        snprintf(events_default, sizeof events_default, "%s/.vigil/events.jsonl", home);
         events = events_default;
     }
 
@@ -356,7 +361,7 @@ int main(int argc, char **argv) {
 
     if (layout == LAYOUT_LIST && !demo_n) { /* lets the launcher see that a pane is already open */
         char dir[900];
-        snprintf(dir, sizeof dir, "%.800s/.dodeca-core", home);
+        snprintf(dir, sizeof dir, "%.800s/.vigil", home);
         mkdir(dir, 0700);
         snprintf(g_pidfile, sizeof g_pidfile, "%s/pane.pid", dir);
         FILE *f = fopen(g_pidfile, "w");
