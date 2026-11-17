@@ -5185,7 +5185,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE, K_PAL };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE };
 enum { PG_LOOK, PG_CLUSTER, PG_CHAT, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Chat", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -5753,7 +5753,7 @@ static int hk_caps(const char *spec, wchar_t caps[5][12]) {
 /* ---- a page: section cards of rows; two columns when there is room */
 enum { RK_SLIDER, RK_SEG, RK_TOGGLE, RK_SHAPES, RK_FONTS, RK_SWATCH, RK_HOTKEY, RK_CAPS, RK_THEME, RK_ROLES };
 typedef struct { int kind, row, n; const wchar_t *label, *hint; const wchar_t *const *names; const wchar_t *lo, *hi; const char *icon; } SRow;
-typedef struct { const wchar_t *title; int n, pop; SRow r[6]; } SSec; /* pop: not a card on the page but a popover under the Theme row (pal_open) */
+typedef struct { const wchar_t *title; int n; SRow r[6]; } SSec;
 static const wchar_t *GLOW_NAMES[3] = {L"Soft", L"Normal", L"Bright"}, *CORE_NAMES[4] = {L"XS", L"S", L"M", L"L"},
                      *TEXT_SIZES[5] = {L"XS", L"S", L"M", L"L", L"XL"}, *BOX_SIZES[4] = {L"S", L"M", L"L", L"XL"},
                      *MODE_NAMES[2] = {L"Single core", L"All cores"}, *LABEL_NAMES[2] = {L"On hover", L"Always"},
@@ -5801,24 +5801,26 @@ static int page_sections(int pg, SSec *s) {
         ROW(2, RK_SLIDER, R_AWAY, 8, L"Rest after", L"no mouse or keys this long: the cores show STANDBY", AWAY_NAMES, NULL, NULL, NULL);
         break;
     case PG_CHAT:
-        s[0].title = L"TEXT"; s[1].title = L"BOX"; s[3].title = L"OPENS"; s[4].title = L"SHOWS"; n = 5;
+        s[0].title = L"TEXT"; s[1].title = L"THEME"; s[2].title = L"BOX"; s[3].title = L"OPENS"; s[4].title = L"SHOWS"; n = 5;
         ROW(0, RK_FONTS, R_CHATFONT, 2, L"Font", NULL, NULL, NULL, NULL, NULL);
         ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
         ROW(3, RK_SEG, R_HOVERP, 4, L"Hover pause", L"resting on a core this long opens its box", PAUSE_NAMES, NULL, NULL, NULL);
         ROW(3, RK_SEG, R_POP, 2, L"New reply", L"Pops open: beside its core for 10 s", POP_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past an edge to switch", TURN_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
-        ROW(1, RK_SLIDER, R_CHATSIZE, 4, L"Box size", L"how far it grows before it scrolls", BOX_SIZES, NULL, NULL, NULL);
-        ROW(1, RK_THEME, R_THEME, TH_N, L"Theme", theme_hint(), THEME_NAMES, NULL, NULL, NULL);
-        ROW(1, RK_SEG, R_CHATAT, 6, L"Place", L"the side it tries first; Auto: the first that covers no core", OPEN_NAMES, NULL, NULL, NULL);
-        { /* the theme's colours: your own to change; a built-in one changed through a copy */
-            int mine = g_theme >= TH_N;
-            static wchar_t typing[32];
-            s[2].title = mine ? L"YOUR THEME" : L"THEME COLOURS"; s[2].pop = 1;
+        ROW(2, RK_SLIDER, R_CHATSIZE, 4, L"Box size", L"how far it grows before it scrolls", BOX_SIZES, NULL, NULL, NULL);
+        ROW(2, RK_SEG, R_CHATAT, 6, L"Place", L"the side it tries first; Auto: the first that covers no core", OPEN_NAMES, NULL, NULL, NULL);
+        ROW(1, RK_THEME, R_THEME, TH_N, L"In use", theme_hint(), THEME_NAMES, NULL, NULL, NULL);
+        { /* the theme's colours, a line of swatches under the themes: your own to change; a built-in one changed through a copy */
+            int mine = g_theme >= TH_N, hot = -1;
+            static wchar_t typing[32], hint[96];
+            for (int i = 0; i < 9; i++) if (is_hot(K_PICK, R_ROLE, i)) hot = i;
             swprintf(typing, 32, L"%ls|", theme_name(g_theme));
-            ROW(2, RK_ROLES, R_ROLE, 10, g_renaming ? typing : theme_name(g_theme),
-                g_renaming ? L"type its name \x00B7 Enter keeps \x00B7 Esc goes back" : mine ? L"click a colour to change it" : L"built in: a colour you change makes your own copy",
-                ROLE_NAMES, NULL, NULL, NULL);
+            if (g_renaming) swprintf(hint, 96, L"type its name \x00B7 Enter keeps \x00B7 Esc goes back");
+            else if (hot >= 0) swprintf(hint, 96, L"%ls \x00B7 %ls", ROLE_NAMES[hot], mine ? L"click to change it" : L"click: a copy of yours to change");
+            else if (mine && g_pick_role >= 0) swprintf(hint, 96, L"%ls \x00B7 click it again to close", ROLE_NAMES[g_pick_role]);
+            else swprintf(hint, 96, L"%ls", mine ? L"its colours: click one to change it" : L"its colours: one you change makes your own copy");
+            ROW(1, RK_ROLES, R_ROLE, 10, g_renaming ? typing : theme_name(g_theme), hint, ROLE_NAMES, NULL, NULL, NULL);
         }
         break;
     case PG_KEYS:
@@ -5869,7 +5871,7 @@ static float ctrl_w(const SRow *r) {
     case RK_FONTS: return 2 * 110 - 6;
     case RK_SWATCH: return 6 * 32 - 6;
     case RK_THEME: return 0; /* (under the name: its hint gets the whole width) */
-    case RK_ROLES: return 0; /* (under the name: the name and hint get the whole width) */
+    case RK_ROLES: return 200; /* (Make a copy, or Rename and Delete, beside the name) */
     case RK_HOTKEY: return 160;
     case RK_CAPS: return tw_of(r->lo, g_sf_label) + 14;
     }
@@ -5883,7 +5885,7 @@ static float row_h(const SRow *r, float colw) {
     }
     if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 46;
     if (r->kind == RK_THEME) h += 38 + (TH_N + g_my_n + (g_my_n < MY_MAX) - 1) / 9 * 32; /* under the name, nine tiles a line */
-    if (r->kind == RK_ROLES) h += 40 + 3 * 30 + (g_pick_role >= 0 && g_theme >= TH_N ? 150 : 0); /* under the name: three lines of colours, Delete and Rename, the picker */
+    if (r->kind == RK_ROLES) h += 34 + (g_pick_role >= 0 && g_theme >= TH_N ? 130 : 0); /* under the name: a line of swatches, then the picker */
     return h;
 }
 /* keys that cannot be changed (RK_CAPS) are not rows but a list of two columns at the card's foot */
@@ -6007,30 +6009,30 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
         }
         break;
     }
-    case RK_ROLES: { /* the theme's nine colours, three a line; Delete and Rename (your own) or Make a copy; the picker under them */
+    case RK_ROLES: { /* the theme's nine colours as swatches on the themes' grid; Rename and Delete (your own) or Make a copy beside the name; the picker under them */
         const unsigned *f = (const unsigned *)pal();
         int mine = g_theme >= TH_N;
-        float x0 = rx - (3 * 112 - 6);
-        cy += 40; /* under the name and its hint, which get the whole width */
-        for (int i = 0; i < 9; i++) {
-            float a = x0 + i % 3 * 112, y = cy + i / 3 * 30;
-            int hot = is_hot(K_PICK, r->row, i), sel = mine && g_pick_role == i;
-            box(pn, a, y - 11, a + 22, y + 11, 6, f[i], sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 1.5f : 1);
-            tx(a + 30, y - 10, a + 106, y + 10, ROLE_NAMES[i], g_sf_small, hot || sel ? S_TEXT : S_MUTED, DT_LEFT);
-            hit(a, y - 12, a + 106, y + 12, K_PICK, r->row, i);
-        }
-        float y = cy + 3 * 30;
-        for (int k = mine ? 0 : 2; k < (mine ? 2 : 3); k++) { /* Delete theme, Rename; or Make a copy */
+        for (int k = mine ? 0 : 2, j = 0; k < (mine ? 2 : 3); k++, j++) { /* right to left on the name's line: Delete, Rename; or Make a copy */
             int v = k == 2 ? 11 : 9 + k, hot = is_hot(K_PICK, r->row, v), on = k == 1 && g_renaming;
-            const wchar_t *t = k == 2 ? (g_my_n < MY_MAX ? L"Make a copy" : L"Full: delete one of yours") : k ? (on ? L"Done" : L"Rename") : L"Delete theme";
-            float a = x0 + (k == 2 ? 0 : k * 112);
-            tx(a, y - 10, a + 200, y + 10, t, g_sf_small, hot || on ? S_TEXT : S_MUTED, DT_LEFT);
-            hit(a, y - 12, a + (k == 2 ? 200 : 106), y + 12, K_PICK, r->row, v);
+            const wchar_t *t = k == 2 ? (g_my_n < MY_MAX ? L"Make a copy" : L"Full: delete one") : k ? (on ? L"Done" : L"Rename") : L"Delete";
+            float w = tw_of(t, g_sf_label) + 20, b = rx - (k == 0 ? 0 : k == 1 ? tw_of(L"Delete", g_sf_label) + 26 : 0), a = b - w;
+            box(pn, a, cy - 13, b, cy + 13, 7, S_CHIP, hot || on ? S_EDGE_HOT : S_EDGE, 1);
+            tx(a, cy - 13, b, cy + 13, t, g_sf_label, hot || on ? S_TEXT : S_MUTED, DT_CENTER);
+            hit(a, cy - 13, b, cy + 13, K_PICK, r->row, v);
+            (void)j;
         }
+        cy += 38; /* the swatches under the name, in the themes' columns */
+        for (int i = 0; i < 9; i++) {
+            float a = rx - (9 - i) * 32 + 6, y = cy;
+            int hot = is_hot(K_PICK, r->row, i), sel = mine && g_pick_role == i;
+            box(pn, a, y - 13, a + 26, y + 13, 7, f[i], sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 2 : 1);
+            hit(a, y - 13, a + 26, y + 13, K_PICK, r->row, i);
+        }
+        float x0 = rx - (9 * 32 - 6) - 48, y = cy + 4;
         if (!mine || g_pick_role < 0) break;
         /* the picker: saturation across and brightness down at the hue, the hue under it; the colour and its hex at the
          * side, and the same colour as each built-in theme has it, a click away */
-        float py = y + 22, sx0 = x0, sx1 = x0 + 200, sy0 = py, sy1 = py + 104, hy0 = sy1 + 10, hy1 = hy0 + 14;
+        float py = y + 16, sx0 = x0, sx1 = x0 + 200, sy0 = py, sy1 = py + 88, hy0 = sy1 + 10, hy1 = hy0 + 14;
         RECT sq = SR(sx0, sy0, sx1, sy1), hs = SR(sx0, hy0, sx1, hy1);
         for (int k = 0; k < 2; k++) {
             RECT q = k ? hs : sq;
@@ -6098,13 +6100,6 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
     }
 }
 
-/* the theme's colours show while the Theme tiles or the colours are pointed at, a colour is being changed or the name typed */
-static int pal_open(void) {
-    if (g_pick_role >= 0 || g_renaming || g_cdrag) return 1;
-    if (g_hot < 0) return 0;
-    const SetHit *h = &g_hits[g_hot];
-    return h->kind == K_PAL || h->kind == K_CSV || h->kind == K_CHUE || (h->kind == K_PICK && (h->row == R_THEME || h->row == R_ROLE || h->row == R_CSUG));
-}
 /* the page's sections, laid out from (x0, y0) to x1; returns the height used */
 static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     SSec s[5];
@@ -6113,19 +6108,17 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
     int cols = cw >= 820 ? 2 : 1;
     float colw = (cw - 12 * (cols - 1)) / cols, colh[2] = {0, 0};
     int side = 0; /* which column each card goes in (bit k: the right): the split whose taller column is the shortest, in order within each */
-    if (cols == 2 && pg == PG_CHAT) side = 1 << 3 | 1 << 4; /* TEXT and BOX (how it looks) on the left; OPENS and SHOWS (how it acts) on the right */
+    if (cols == 2 && pg == PG_CHAT) side = 1 << 2 | 1 << 3 | 1 << 4; /* TEXT and THEME (how it reads) on the left; BOX, OPENS and SHOWS (where and when) on the right */
     else if (cols == 2) {
         float best = 1e9f;
         for (int m = 0; m < 1 << n; m += 2) { /* (the first card always on the left) */
             float h2[2] = {0, 0};
-            for (int k = 0; k < n; k++) if (!s[k].pop) h2[m >> k & 1] += sec_h(&s[k], colw) + 12;
+            for (int k = 0; k < n; k++) h2[m >> k & 1] += sec_h(&s[k], colw) + 12;
             float t = fmaxf(h2[0], h2[1]);
             if (t < best - 0.5f) { best = t; side = m; }
         }
     }
-    float tx1 = 0, ty0 = -1; /* the Theme row: the colours' popover opens beside its tiles */
     for (int k = 0; k < n; k++) {
-        if (s[k].pop) continue;
         int c = side >> k & 1;
         float x = x0 + c * (colw + 12), y = y0 + colh[c], h = sec_h(&s[k], colw);
         box(pn, x, y, x + colw, y + h, 12, S_CARD, 0, 0);
@@ -6137,7 +6130,6 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
             float rh = row_h(&s[k].r[i], colw);
             if (drawn++) box(pn, x + 16, ry, x + colw - 16, ry + 1, 0, S_RULE, 0, 0);
             draw_row(pn, &s[k].r[i], x, ry, x + colw, rh);
-            if (s[k].r[i].kind == RK_THEME) { tx1 = x + colw; ty0 = ry; }
             ry += rh;
         }
         if (nc) { /* the fixed keys: name and key, two to a line */
@@ -6157,23 +6149,6 @@ static float rows_page(Pane *pn, int pg, float x0, float y0, float x1) {
         }
         colh[c] += h + 12;
     }
-    for (int k = 0; k < n; k++) /* the theme's colours: over the page, beside the tiles, while they or it are pointed at */
-        if (s[k].pop && ty0 >= 0 && pal_open()) {
-            float x = tx1 - 6, x1 = fminf(x0 + cw, x + 420), h = sec_h(&s[k], x1 - x), y = ty0;
-            float bot = g_clipping ? g_clip.bottom / S(1) - 8 : y + h; /* lifted to stay in sight */
-            if (y + h > bot) y = fmaxf(y0, bot - h);
-            box(pn, x, y, x1, y + h, 12, S_CARD, S_EDGE_HOT, 1);
-            { /* the page's text under it is not drawn (text goes on after every shape) */
-                RECT pr = SR(x, y, x1, y + h);
-                int j = 0;
-                for (int i = 0; i < g_tx_n; i++) { POINT c = {(g_tx[i].r.left + g_tx[i].r.right) / 2, (g_tx[i].r.top + g_tx[i].r.bottom) / 2}; if (!PtInRect(&pr, c)) g_tx[j++] = g_tx[i]; }
-                g_tx_n = j;
-            }
-            hit(x - 14, y, x1, y + h, K_PAL, 0, 0); /* (from a little left of it: the gap from the tiles keeps it open) */
-            tx(x + 16, y + 10, x1 - 16, y + 28, s[k].title, g_sf_cap, S_MUTED, DT_LEFT);
-            float ry = y + 32;
-            for (int i = 0; i < s[k].n; i++) { float rh = row_h(&s[k].r[i], x1 - x); draw_row(pn, &s[k].r[i], x, ry, x1, rh); ry += rh; }
-        }
     return fmaxf(colh[0], colh[1]);
 }
 
@@ -6904,8 +6879,6 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int h = set_hit_at(p);
         if (g_krec >= 0 && (h < 0 || g_hits[h].kind != K_KREC)) krec_stop(); /* a click elsewhere: recording stops */
         if (g_renaming && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE)) ren_end(1); /* and a name being typed is kept */
-        if (g_pick_role >= 0 && (h < 0 || !(g_hits[h].kind == K_PAL || g_hits[h].kind == K_CSV || g_hits[h].kind == K_CHUE || (g_hits[h].kind == K_PICK && (g_hits[h].row == R_ROLE || g_hits[h].row == R_CSUG)))))
-            { g_pick_role = -1; g_sl_dirty = 1; } /* a click away from the colours: the picker and its popover close */
         if (h >= 0) {
             SetHit *sh = &g_hits[h];
             switch (sh->kind) {
