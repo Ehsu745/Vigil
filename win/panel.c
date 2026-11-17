@@ -35,7 +35,6 @@
 #include <shlobj.h>
 #include <ole2.h>
 #include <richedit.h>
-#include <commdlg.h>
 #include <dwmapi.h>
 #include <tlhelp32.h>
 #include <winternl.h>
@@ -231,6 +230,10 @@ static wchar_t g_my_name[MY_MAX][24];
 static int g_renaming;                /* the chosen theme's name being typed (Settings > YOUR THEME > Rename); g_ren_was to go back to */
 static wchar_t g_ren_was[24];
 static RECT g_cp_anchor;             /* the swatch whose colour is being changed, in the Settings window's pixels: the picker's window opens under it */
+static int g_pick_shade;              /* the picker open for Settings > Look > Darkness colour instead of a theme's colour */
+static unsigned g_pk_hist[64];        /* the picker's steps since it opened (Ctrl+Z, Ctrl+Y): [0] the colour it opened on */
+static int g_pk_hn, g_pk_hp;          /* how many, and the one shown */
+static int g_pk_nf = -1; static double g_pk_nt; /* the value last nudged and when: nudges in a row are one step */
 static int g_pk_edit = -1, g_pk_fresh; /* the picker's value being typed into (PF_*), and whether the next key replaces it all */
 static wchar_t g_pk_buf[12];
 enum { PF_HEX, PF_R, PF_G, PF_B, PF_H, PF_S, PF_V, PF_N };
@@ -5226,7 +5229,7 @@ static int rate_stop(float v) { /* the slider's step nearest a rate */
     for (int i = 1; i < NRATES - 1; i++) if (fabsf(RATES[i] - v) < fabsf(RATES[best] - v)) best = i;
     return best;
 }
-enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE, K_PKF, K_CPMOVE };
+enum { K_PICK, K_SLIDE, K_TOGGLE, K_STATE, K_RESET, K_CLOSE, K_PAGE, K_MSTATE, K_MTOG, K_SIDE, K_ZOOM, K_MTRY, K_MRESET, K_KREC, K_KCLR, K_SIZE, K_PVBG, K_HPLAY, K_HTOG, K_MMORE, K_MGRP, K_CSV, K_CHUE, K_PKF, K_CPMOVE, K_PKB };
 enum { PG_LOOK, PG_CLUSTER, PG_CHAT, PG_MOTIONS, PG_KEYS, PG_PERF, PG_N };
 static const wchar_t *PG_NAME[PG_N] = {L"Look", L"Cluster", L"Chat", L"Motions", L"Shortcuts", L"Performance"};
 static const wchar_t *PG_HINT[PG_N] = {L"how a core looks", L"the cores and their orbit", L"the box with the last reply", L"what each state may play", L"click a key to change it", L"smoother costs more CPU"};
@@ -5388,37 +5391,6 @@ static void palette_icon(Pane *pn, float cx, float cy, float size, unsigned col)
     for (int i = 0; i < 4; i++) aa_disc(pn, x0 + DOT[i][0] * k, y0 + DOT[i][1] * k, 1.5f * k, c, 1);
 }
 
-/* the colour window opens in the middle of the Settings window, in front of it */
-static UINT_PTR CALLBACK cc_hook(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
-    (void)wp; (void)lp;
-    if (msg == WM_INITDIALOG && g_set) {
-        RECT sr, dr;
-        GetWindowRect(g_set, &sr); GetWindowRect(d, &dr);
-        int w = dr.right - dr.left, h = dr.bottom - dr.top;
-        SetWindowPos(d, HWND_TOPMOST, (sr.left + sr.right - w) / 2, (sr.top + sr.bottom - h) / 2, 0, 0, SWP_NOSIZE);
-    }
-    return 0; /* the dialog's own handling goes on */
-}
-
-/* the palette swatch: Windows' colour window, opened on the colour in use; the cores keep moving meanwhile (a plain
- * timer ticks while the window runs its own message loop) */
-static int pick_colour(unsigned *target) {
-    static COLORREF keep[16]; /* its own row of custom colours, for this run */
-    CHOOSECOLORW cc;
-    memset(&cc, 0, sizeof cc);
-    cc.lStructSize = sizeof cc;
-    cc.hwndOwner = g_set;
-    cc.rgbResult = RGB(*target >> 16 & 255, *target >> 8 & 255, *target & 255);
-    cc.lpCustColors = keep;
-    cc.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR | CC_ENABLEHOOK;
-    cc.lpfnHook = cc_hook;
-    SetTimer(g_cluster.w, ID_TIMER, 33, NULL);
-    BOOL ok = ChooseColorW(&cc);
-    KillTimer(g_cluster.w, ID_TIMER);
-    if (!ok) return 0;
-    *target = (unsigned)GetRValue(cc.rgbResult) << 16 | (unsigned)GetGValue(cc.rgbResult) << 8 | GetBValue(cc.rgbResult);
-    return 1;
-}
 /* your own copy of the theme in use ("<its name> copy", or "My theme N"), chosen; 0 when there is no room */
 static int theme_copy(void) {
     if (g_my_n >= MY_MAX) return 0;
@@ -5438,6 +5410,7 @@ static int theme_copy(void) {
 }
 /* the picker's colour into the theme's role, everywhere it shows */
 static void cpick_apply(void) {
+    if (g_pick_shade) { g_shade_custom = hsv_x(g_pk_h, g_pk_s, g_pk_v); g_shade_col = 5; settings_applied(0); return; }
     int k = g_theme - TH_N;
     if (k < 0 || k >= g_my_n || g_pick_role < 0) return;
     ((unsigned *)&g_mine[k])[g_pick_role] = hsv_x(g_pk_h, g_pk_s, g_pk_v);
@@ -5477,7 +5450,28 @@ static long pk_hex(const wchar_t *t) { /* "#1a2b3c", "1A2B3C" or "#abc": the col
     if (n == 3) { wchar_t e[7] = {d[0], d[0], d[1], d[1], d[2], d[2], 0}; return wcstol(e, NULL, 16); }
     return n == 6 ? wcstol(d, NULL, 16) : -1;
 }
-static void pk_done(void) { cpick_apply(); settings_save(); }
+static int pk_open(void) { return g_pick_shade || (g_pick_role >= 0 && g_theme >= TH_N); }
+static void pk_begin(unsigned c) { pk_set(c); g_pk_hist[0] = c; g_pk_hn = 1; g_pk_hp = 0; g_pk_edit = -1; g_pk_nf = -1; } /* opened on colour c: its steps start there */
+/* the colour shown is a step (Ctrl+Z goes back to the one before); nudges of one value in a row are one step */
+static void pk_commit(int nudged) {
+    unsigned c = pk_cur();
+    if (nudged >= 0 && nudged == g_pk_nf && wall() - g_pk_nt < 1.0 && g_pk_hp > 0) g_pk_hist[g_pk_hp] = c;
+    else if (c != g_pk_hist[g_pk_hp]) {
+        if (g_pk_hp == 63) { memmove(g_pk_hist, g_pk_hist + 1, 63 * sizeof *g_pk_hist); g_pk_hp--; }
+        g_pk_hist[++g_pk_hp] = c;
+    }
+    g_pk_hn = g_pk_hp + 1;
+    g_pk_nf = nudged; g_pk_nt = wall();
+    settings_save();
+    g_sl_dirty = 1;
+}
+static void pk_step(int d) { /* Undo (-1), Redo (+1) */
+    int np = g_pk_hp + d;
+    if (np < 0 || np >= g_pk_hn) return;
+    g_pk_hp = np; g_pk_nf = -1; g_pk_edit = -1;
+    pk_set(g_pk_hist[np]); cpick_apply(); settings_save(); g_sl_dirty = 1;
+}
+static void pk_done(void) { cpick_apply(); pk_commit(-1); }
 static void pk_edit_end(int keep) { /* the value being typed: kept (applied), or back as it was */
     int f = g_pk_edit;
     g_pk_edit = -1; g_sl_dirty = 1;
@@ -5494,14 +5488,19 @@ static void pk_nudge(int f, int d) { /* the arrow keys or the wheel on a value: 
     if (f == PF_HEX) f = PF_V;
     wchar_t t[12]; pk_text(f, t);
     pk_put(f, wcstol(t, NULL, 10) + d);
-    pk_done();
+    cpick_apply(); pk_commit(f);
     if (g_pk_edit >= 0) { pk_text(g_pk_edit, g_pk_buf); g_pk_fresh = 1; }
 }
-static void pk_close(void) { g_pick_role = -1; g_pk_edit = -1; g_sl_dirty = 1; }
+static void pk_close(void) { g_pick_role = -1; g_pick_shade = 0; g_pk_edit = -1; g_sl_dirty = 1; }
 /* a key for the picker; 1 when it was the picker's */
 static int pk_key(WPARAM vk) {
-    if (g_pick_role < 0 || g_theme < TH_N) return 0;
+    if (!pk_open()) return 0;
     int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (ctrl && (vk == 'Z' || vk == 'Y')) { /* Undo, Redo (Ctrl+Shift+Z too); a value being typed is dropped first */
+        if (g_pk_edit >= 0) { pk_edit_end(vk == 'Y'); if (vk == 'Z') return 1; }
+        pk_step(vk == 'Y' || shift ? 1 : -1);
+        return 1;
+    }
     if (ctrl && vk == 'V') { /* a hex colour from the clipboard */
         long c = -1;
         if (OpenClipboard(NULL)) {
@@ -5559,9 +5558,12 @@ static void ren_end(int keep) {
     if (keep) settings_save();
 }
 static void set_choose(int row, int val) {
-    int palette = (row == R_CHATBG || row == R_TEXTCOL || row == R_SHADECOL) && val == 5;
-    if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && row != R_CHATWFIT && row != R_CHATHFIT && row != R_CHATW && row != R_CHATH && !palette) return; /* (a switch: flipped whatever it is) */
-    if (palette && !pick_colour(row == R_CHATBG ? &g_chat_custom : row == R_SHADECOL ? &g_shade_custom : &g_text_custom)) return; /* cancelled: as it was */
+    if (row == R_SHADECOL) { /* your own colour: the picker's window opens on it (clicked again: it closes); a preset closes it */
+        int again = val == 5 && g_pick_shade;
+        pk_close();
+        if (val == 5 && !again) { g_pick_shade = 1; pk_begin(g_shade_custom); }
+    }
+    if (val == set_current(row) && row != R_OTHERS && row != R_BDCORE && row != R_HOLELENS && row != R_CHATWFIT && row != R_CHATHFIT && row != R_CHATW && row != R_CHATH) return; /* (a switch: flipped whatever it is) */
     switch (row) {
     case R_SHAPE: snprintf(g_shape_name, sizeof g_shape_name, "%s", SHAPES[val]); shape_make(&g_shape, g_shape_name); break;
     case R_CORE: g_core = CORES[val]; break;
@@ -5589,7 +5591,7 @@ static void set_choose(int row, int val) {
     case R_CHATBG: g_theme = TH_VIGIL; g_chat_bg = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_WHEEL: g_wheel_spin = val; break;
     case R_ROLE: { /* the theme card: a colour opened in the picker (a built-in theme copied first), Make a copy, Delete, Rename */
-        if (val == 11 || (val < 9 && g_theme < TH_N)) { if (g_renaming) ren_end(1); if (!theme_copy()) return; theme_kick(); if (val == 11) { g_pick_role = -1; break; } }
+        if (val == 11 || (val < 9 && g_theme < TH_N)) { if (g_renaming) ren_end(1); if (!theme_copy()) return; theme_kick(); if (val == 11) { pk_close(); break; } }
         int k = g_theme - TH_N;
         if (k < 0 || k >= g_my_n) return;
         if (val == 10) { /* Rename: typed into the label (set_proc), Done or Enter keeps it */
@@ -5598,24 +5600,26 @@ static void set_choose(int row, int val) {
         }
         if (g_renaming) ren_end(1);
         if (val < 9) { /* the picker opens on that colour (or closes) */
-            g_pick_role = g_pick_role == val ? -1 : val;
-            if (g_pick_role >= 0) x_hsv(((unsigned *)&g_mine[k])[val], &g_pk_h, &g_pk_s, &g_pk_v);
+            int again = g_pick_role == val;
+            pk_close();
+            if (!again) { g_pick_role = val; pk_begin(((unsigned *)&g_mine[k])[val]); }
             break;
         }
         for (int i = k; i < g_my_n - 1; i++) { g_mine[i] = g_mine[i + 1]; memcpy(g_my_name[i], g_my_name[i + 1], sizeof g_my_name[i]); } /* Delete */
-        g_my_n--; g_theme = TH_FOLLOW; g_pick_role = -1;
+        g_my_n--; g_theme = TH_FOLLOW; pk_close();
         if (g_chat) InvalidateRect(g_chat, NULL, FALSE);
         if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); }
         break;
     }
-    case R_CSUG: /* that colour as a built-in theme has it */
-        if (g_pick_role < 0) return;
-        x_hsv(((const unsigned *)pal_of(val))[g_pick_role], &g_pk_h, &g_pk_s, &g_pk_v);
-        cpick_apply();
+    case R_CSUG: /* that colour as a built-in theme has it (Darkness colour: a preset) */
+        if (!pk_open()) return;
+        g_pk_edit = -1;
+        pk_set(g_pick_shade ? SHADE_COLS[val % 5] : ((const unsigned *)pal_of(val))[g_pick_role]);
+        cpick_apply(); pk_commit(-1);
         break;
     case R_THEME:
         if (g_renaming) ren_end(1);
-        g_pick_role = -1;
+        pk_close();
         if (val == TH_N + g_my_n) { if (!theme_copy()) return; val = g_theme; } /* +: a copy of the theme in use to change */
         g_theme = val; theme_kick(); if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { SendMessageW(g_edit, EM_SETBKGNDCOLOR, 0, chat_field()); edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
     case R_TEXTCOL: g_theme = TH_VIGIL; g_text_col = val; if (g_chat) InvalidateRect(g_chat, NULL, FALSE); if (g_input) { edit_style(); InvalidateRect(g_input, NULL, FALSE); } break;
@@ -6151,6 +6155,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
                 palette_icon(pn, S(a + 13), S(cy), S(15), text ? tc : light ? 0x2A2A30 : (hot || sel ? 0xFFFFFF : 0xD4D4DA));
             } else if (text) tx(a, cy - 13, a + 26, cy + 13, L"Aa", g_sf_small, tc, DT_CENTER);
             hit(a, cy - 13, a + 26, cy + 13, K_PICK, r->row, i);
+            if (r->row == R_SHADECOL && i == 5 && g_pick_shade) g_cp_anchor = SR(a, cy - 13, a + 26, cy + 13); /* the picker's window opens under it */
         }
         break;
     case RK_THEME: { /* each theme as a small box: its text over its background, its accent and done colours under it; + makes your own */
@@ -6701,12 +6706,18 @@ static void cp_build(void) {
     g_tx_n = 0; /* (the page's text is drawn already: its queue is free) */
     box(pn, 0, 0, CP_W, CP_H, 12, S_CARD, S_EDGE_HOT, 1);
     /* the title: drag it to move the window */
-    hit(0, 0, CP_W - 40, 38, K_CPMOVE, 0, 0);
+    hit(0, 0, CP_W - 100, 38, K_CPMOVE, 0, 0);
     if (cp_hot(K_CPMOVE, 0, 0) || g_cp_drag == K_CPMOVE) box(pn, 1, 1, CP_W - 1, 38, 11, S_CHIP, S_CHIP, 0);
-    for (int i = 0; i < 3; i++) box(pn, CP_W / 2 - 10 + i * 8, 6, CP_W / 2 - 7 + i * 8, 9, 1.5f, S_MUTED, S_MUTED, 0); /* (a grip) */
     wchar_t t[96];
-    swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
-    tx(16, 10, CP_W - 44, 34, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+    if (g_pick_shade) swprintf(t, 96, L"Darkness colour \x00B7 Backdrop"); else swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
+    tx(16, 10, CP_W - 104, 34, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+    for (int i = 0; i < 2; i++) { /* Undo, Redo (Ctrl+Z, Ctrl+Y) beside the close button */
+        float bx = CP_W - 96 + i * 30;
+        int can = i == 0 ? g_pk_hp > 0 : g_pk_hp + 1 < g_pk_hn, hot = can && cp_hot(K_PKB, 0, i);
+        if (hot) box(pn, bx, 8, bx + 26, 34, 7, S_CHIP, S_CHIP, 0);
+        lu_icon(pn, i ? "rotateCw" : "rotateCcw", bx + 13, 21, 14, !can ? 0x55555E : hot ? S_TEXT : S_MUTED);
+        hit(bx, 8, bx + 26, 34, K_PKB, 0, i);
+    }
     int xh = cp_hot(K_CLOSE, 0, 0);
     if (xh) box(pn, CP_W - 36, 8, CP_W - 10, 34, 7, S_CHIP, S_CHIP, 0);
     lu_icon(pn, "x", CP_W - 23, 21, 14, xh ? S_TEXT : S_MUTED);
@@ -6751,13 +6762,13 @@ static void cp_build(void) {
     }
     /* the same colour as each built-in theme has it, a click away */
     float ry = hy1 + 14;
-    tx(sx0, ry, ax1, ry + 16, L"as the themes have it \x00B7 Tab, Enter, \x2191\x2193, Ctrl+C / V", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
-    for (int i = 0, j = 0; i < TH_N; i++) {
-        if (i == TH_FOLLOW) continue;
-        float a = sx0 + j * 34, b = ry + 22;
-        unsigned c = ((const unsigned *)pal_of(i))[g_pick_role & 15];
-        box(pn, a, b, a + 28, b + 22, 6, c, cp_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
-        hit(a, b, a + 28, b + 22, K_PICK, R_CSUG, i);
+    tx(sx0, ry, ax1, ry + 16, g_pick_shade ? L"the presets" : L"as the themes have it", g_sf_small, S_MUTED, DT_LEFT | DT_END_ELLIPSIS);
+    for (int i = 0, j = 0; i < (g_pick_shade ? 5 : TH_N); i++) {
+        if (!g_pick_shade && i == TH_FOLLOW) continue;
+        float a = sx0 + j * 30, b = ry + 22;
+        unsigned c = g_pick_shade ? SHADE_COLS[i] : ((const unsigned *)pal_of(i))[g_pick_role & 15];
+        box(pn, a, b, a + 26, b + 22, 6, c, cp_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
+        hit(a, b, a + 26, b + 22, K_PICK, R_CSUG, i);
         j++;
     }
     /* its hits and text are its own */
@@ -6823,12 +6834,13 @@ static LRESULT CALLBACK cp_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         else if (hh.kind == K_CPMOVE) { g_cp_drag = K_CPMOVE; g_cp_grab = p; SetCapture(w); }
         else if (hh.kind == K_PKF) { pk_edit_start(hh.val); SetFocus(w); }
         else if (hh.kind == K_PICK) { g_pk_edit = -1; set_choose(hh.row, hh.val); settings_save(); }
+        else if (hh.kind == K_PKB) pk_step(hh.val ? 1 : -1); /* (nothing to undo or redo: nothing happens) */
         else if (hh.kind == K_CLOSE) { pk_close(); cp_hide(); return 0; }
         cp_tick();
         return 0;
     }
-    case WM_LBUTTONUP: if (g_cp_drag) { int was = g_cp_drag; g_cp_drag = 0; ReleaseCapture(); if (was != K_CPMOVE) { settings_save(); g_sl_dirty = 1; } } return 0;
-    case WM_CAPTURECHANGED: if (g_cp_drag) { if (g_cp_drag != K_CPMOVE) { settings_save(); g_sl_dirty = 1; } g_cp_drag = 0; } return 0;
+    case WM_LBUTTONUP: if (g_cp_drag) { int was = g_cp_drag; g_cp_drag = 0; ReleaseCapture(); if (was != K_CPMOVE) pk_commit(-1); cp_tick(); } return 0;
+    case WM_CAPTURECHANGED: if (g_cp_drag) { int was = g_cp_drag; g_cp_drag = 0; if (was != K_CPMOVE) pk_commit(-1); } return 0;
     case WM_MOUSEWHEEL: { /* on a value: nudged */
         POINT c = p; ScreenToClient(w, &c);
         int h = cp_hit_at(c);
@@ -6836,15 +6848,15 @@ static LRESULT CALLBACK cp_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
-        if (msg == WM_KEYDOWN && pk_key(wp)) { if (g_pick_role < 0) { cp_hide(); if (g_set) SetForegroundWindow(g_set); } else cp_tick(); return 0; }
+        if (msg == WM_KEYDOWN && pk_key(wp)) { if (!pk_open()) { cp_hide(); if (g_set) SetForegroundWindow(g_set); } else cp_tick(); return 0; }
         break;
-    case WM_CHAR: if (pk_char(wp)) cp_tick(); return 0;
+    case WM_CHAR: if (pk_char(wp)) cp_tick(); return 0; /* (Ctrl keys come as control characters: no beep) */
     }
     return DefWindowProc(w, msg, wp, lp);
 }
 /* shown, placed under its swatch (above it when there is no room) and drawn again when what it shows has changed */
 static void cp_tick(void) {
-    if (!g_set || !IsWindowVisible(g_set) || g_pick_role < 0 || g_theme < TH_N || (IsRectEmpty(&g_cp_anchor) && !g_cp_moved)) { cp_hide(); return; }
+    if (!g_set || !IsWindowVisible(g_set) || !pk_open() || (IsRectEmpty(&g_cp_anchor) && !g_cp_moved)) { cp_hide(); return; }
     if (!g_cpw) {
         WNDCLASSW c = {0};
         c.lpfnWndProc = cp_proc; c.hInstance = GetModuleHandle(NULL); c.lpszClassName = L"VigilPicker"; c.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -6856,7 +6868,7 @@ static void cp_tick(void) {
     float kv[6] = {g_pk_h, g_pk_s, g_pk_v, (float)g_pick_role, (float)g_cp_hot, (float)g_sdpi};
     for (int i = 0; i < 6; i++) { unsigned u; memcpy(&u, &kv[i], 4); key = (key ^ u) * 16777619u; }
     key = (key ^ (unsigned)g_theme) * 16777619u;
-    key = (key ^ (unsigned)(g_pk_edit + 2) ^ (unsigned)g_pk_fresh << 8 ^ (unsigned)g_cp_drag << 12) * 16777619u;
+    key = (key ^ (unsigned)(g_pk_edit + 2) ^ (unsigned)g_pk_fresh << 8 ^ (unsigned)g_cp_drag << 12 ^ (unsigned)g_pick_shade << 20 ^ (unsigned)g_pk_hp << 21 ^ (unsigned)g_pk_hn << 27) * 16777619u;
     for (const wchar_t *q = g_pk_buf; *q; q++) key = (key ^ (unsigned)*q) * 16777619u;
     int redraw = key != g_cp_key;
     if (redraw) { cp_build(); g_cp_key = key; }
@@ -7210,7 +7222,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int h = set_hit_at(p);
         if (g_krec >= 0 && (h < 0 || g_hits[h].kind != K_KREC)) krec_stop(); /* a click elsewhere: recording stops */
         if (g_renaming && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE)) ren_end(1); /* and a name being typed is kept */
-        if (g_pick_role >= 0 && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE || g_hits[h].val >= 9)) { g_pick_role = -1; g_sl_dirty = 1; cp_hide(); } /* a click away from the swatches: the picker closes */
+        if (pk_open() && (h < 0 || g_hits[h].kind != K_PICK || !((g_hits[h].row == R_ROLE && g_hits[h].val < 9) || g_hits[h].row == R_SHADECOL))) { pk_close(); cp_hide(); } /* a click away from the swatches: the picker closes */
         if (h >= 0) {
             SetHit *sh = &g_hits[h];
             switch (sh->kind) {
@@ -7219,7 +7231,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             case K_CSV: case K_CHUE: g_cdrag = sh->kind; SetCapture(w); cpick_at(p); break;
             case K_SLIDE: g_slide = h; g_slide_row = g_hits[h].row; SetCapture(w); set_slide_to(h, p.x); g_sl_dirty = 1; break;
             case K_STATE: g_pv_st = PV_STATES[sh->val]; g_sl_dirty = 1; break;
-            case K_PAGE: if (g_pick_role >= 0) { pk_close(); cp_hide(); } g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
+            case K_PAGE: if (pk_open()) { pk_close(); cp_hide(); } g_tab = sh->val; g_set_scroll = g_set_scroll_to = 0; g_sl_dirty = 1; break;
             case K_SIDE: g_set_side = !g_set_side; settings_save(); g_sl_dirty = 1; break;
             case K_PVBG: g_pv_light = !g_pv_light; g_sl_dirty = 1; settings_applied(1); break;
             case K_ZOOM: g_pv_zoom = sh->val == 1 ? 1 : clampf(g_pv_zoom + (sh->val ? 0.25f : -0.25f), 1, 3); g_pv_mx = g_pv_my = 0; g_sl_dirty = 1; break;
@@ -7308,7 +7320,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == VK_BACK && n) { g_my_name[k][n - 1] = 0; g_sl_dirty = 1; }
             return 0;
         }
-        if (msg == WM_KEYDOWN && pk_key(wp)) { if (g_pick_role < 0) cp_hide(); return 0; } /* the colour picker's keys (Esc closes it first) */
+        if (msg == WM_KEYDOWN && pk_key(wp)) { if (!pk_open()) cp_hide(); return 0; } /* the colour picker's keys (Esc closes it first) */
         if (wp == VK_ESCAPE) { set_close(); return 0; }
         break;
     case WM_CHAR:
@@ -8133,7 +8145,7 @@ int main(int argc, char **argv) {
             g_open_settings = 1; i++;
         }
         else if (!strcmp(a, "--settings-fold")) g_set_side = 0;
-        else if (!strcmp(a, "--settings-pick") && v) { g_pick_arg = atoi(v); i++; } /* (the theme card's picker open on that colour, 0-8, when the theme is your own: for a screenshot) */
+        else if (!strcmp(a, "--settings-pick") && v) { g_pick_arg = atoi(v); i++; } /* (the picker open on the theme's colour 0-8, when the theme is your own; 9: Darkness colour's: for a screenshot) */
         else if (!strcmp(a, "--settings-scroll") && v) { g_scroll_arg = (float)atof(v); i++; } /* (the page scrolled down that far: to see all of it in a screenshot) */
         else if (!strcmp(a, "--settings-state") && v) { /* the state its preview (and Motions) shows: idle, think, work, wait, cheer, sleep, ... */
             for (int k = 0; k < ST_N; k++) if (!_strnicmp(v, STATE_NAME[k], 4)) g_pv_st = k;
@@ -8220,7 +8232,8 @@ int main(int argc, char **argv) {
     double shot_at = wall() + 2;
     for (;;) {
         tick();
-        if (g_pick_arg >= 0 && g_pick_arg < 9 && g_theme >= TH_N) { g_pick_role = g_pick_arg; x_hsv(((const unsigned *)pal())[g_pick_role], &g_pk_h, &g_pk_s, &g_pk_v); g_pick_arg = -1; g_sl_dirty = 1; }
+        if (g_pick_arg >= 0 && g_pick_arg < 9 && g_theme >= TH_N) { g_pick_role = g_pick_arg; pk_begin(((const unsigned *)pal())[g_pick_role]); g_pick_arg = -1; g_sl_dirty = 1; }
+        else if (g_pick_arg == 9) { g_pick_shade = 1; g_shade_col = 5; pk_begin(g_shade_custom); g_pick_arg = -1; g_sl_dirty = 1; }
         if (g_scroll_arg > 0 && wall() > shot_at - 1.5) { g_set_scroll_to = g_scroll_arg; g_scroll_arg = 0; g_sl_dirty = 1; }
         if (g_set_shot[0] && g_shot_act) { /* (a sequence: the action played once the hole has grown) */
             static double play_at; static int k;
