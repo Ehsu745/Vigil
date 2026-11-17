@@ -227,6 +227,7 @@ static ChatPal g_mine[MY_MAX];          /* your own themes (Settings > Replies >
 static wchar_t g_my_name[MY_MAX][24];
 static int g_renaming;                /* the chosen theme's name being typed (Settings > YOUR THEME > Rename); g_ren_was to go back to */
 static wchar_t g_ren_was[24];
+static RECT g_cp_anchor;             /* the swatch whose colour is being changed, in the Settings window's pixels: the picker's window opens under it */
 static int g_pick_role = -1, g_cdrag; /* the colour being changed in the theme card (its picker open), and the picker's part held (K_CSV, K_CHUE) */
 static int g_pick_arg = -1;
 static float g_pk_h, g_pk_s, g_pk_v;   /* its hue (0-1), saturation and brightness */
@@ -5839,7 +5840,7 @@ static int page_sections(int pg, SSec *s) {
             swprintf(typing, 32, L"%ls|", theme_name(g_theme));
             if (g_renaming) swprintf(hint, 96, L"type its name \x00B7 Enter keeps \x00B7 Esc goes back");
             else if (hot >= 0) swprintf(hint, 96, L"%ls \x00B7 %ls", ROLE_NAMES[hot], mine ? L"click to change it" : L"click: a copy of yours to change");
-            else if (mine && g_pick_role >= 0) swprintf(hint, 96, L"%ls \x00B7 click it again to close", ROLE_NAMES[g_pick_role]);
+            else if (mine && g_pick_role >= 0) swprintf(hint, 96, L"%ls \x00B7 Esc or a click elsewhere closes its picker", ROLE_NAMES[g_pick_role]);
             else swprintf(hint, 96, L"%ls", mine ? L"its colours: click one to change it" : L"its colours: one you change makes your own copy");
             ROW(1, RK_ROLES, R_ROLE, 10, g_renaming ? typing : theme_name(g_theme), hint, ROLE_NAMES, NULL, NULL, NULL);
         }
@@ -5906,7 +5907,7 @@ static float row_h(const SRow *r, float colw) {
     }
     if (r->kind == RK_HOTKEY && g_hk_fail[r->row]) h = 46;
     if (r->kind == RK_THEME) h += 38 + (TH_N + g_my_n + (g_my_n < MY_MAX) - 1) / 9 * 32; /* under the name, nine tiles a line */
-    if (r->kind == RK_ROLES) h += 34 + (g_pick_role >= 0 && g_theme >= TH_N ? 130 : 0); /* under the name: a line of swatches, then the picker */
+    if (r->kind == RK_ROLES) h += 34; /* under the name: a line of swatches (the picker is a window of its own) */
     return h;
 }
 /* keys that cannot be changed (RK_CAPS) are not rows but a list of two columns at the card's foot */
@@ -6048,44 +6049,7 @@ static void draw_row(Pane *pn, const SRow *r, float x0, float y, float x1, float
             int hot = is_hot(K_PICK, r->row, i), sel = mine && g_pick_role == i;
             box(pn, a, y - 13, a + 26, y + 13, 7, f[i], sel ? S_OR : hot ? S_EDGE_HOT : S_EDGE, sel ? 2 : 1);
             hit(a, y - 13, a + 26, y + 13, K_PICK, r->row, i);
-        }
-        float x0 = rx - (9 * 32 - 6) - 48, y = cy + 4;
-        if (!mine || g_pick_role < 0) break;
-        /* the picker: saturation across and brightness down at the hue, the hue under it; the colour and its hex at the
-         * side, and the same colour as each built-in theme has it, a click away */
-        float py = y + 16, sx0 = x0, sx1 = x0 + 200, sy0 = py, sy1 = py + 88, hy0 = sy1 + 10, hy1 = hy0 + 14;
-        RECT sq = SR(sx0, sy0, sx1, sy1), hs = SR(sx0, hy0, sx1, hy1);
-        for (int k = 0; k < 2; k++) {
-            RECT q = k ? hs : sq;
-            if (g_clipping) { RECT c; if (!IntersectRect(&c, &q, &g_clip)) continue; q = c; }
-            RECT full = k ? hs : sq;
-            for (int Y = max(0, (int)q.top); Y < min(pn->H, (int)q.bottom); Y++)
-                for (int X = max(0, (int)q.left); X < min(pn->W, (int)q.right); X++) {
-                    float u = (X - full.left) / (float)max(1, full.right - full.left - 1), w = (Y - full.top) / (float)max(1, full.bottom - full.top - 1);
-                    pn->px[Y * pn->W + X] = 0xFF000000u | hsv_x(k ? u : g_pk_h, k ? 1 : u, k ? 1 : 1 - w);
-                }
-        }
-        frame(pn, sx0, sy0, sx1, sy1, 0, S_EDGE, 1);
-        frame(pn, sx0, hy0, sx1, hy1, 0, S_EDGE, 1);
-        float mx = sx0 + g_pk_s * (sx1 - sx0), my = sy0 + (1 - g_pk_v) * (sy1 - sy0), hx = sx0 + g_pk_h * (sx1 - sx0);
-        unsigned cur = hsv_x(g_pk_h, g_pk_s, g_pk_v);
-        box(pn, mx - 6, my - 6, mx + 6, my + 6, 6, cur, 0xFFFFFF, 2);
-        box(pn, hx - 3, hy0 - 3, hx + 3, hy1 + 3, 2, hsv_x(g_pk_h, 1, 1), 0xFFFFFF, 1.5f);
-        hit_px(sq, K_CSV, R_ROLE, 0, 0, 0, 0);
-        hit_px(hs, K_CHUE, R_ROLE, 0, 0, 0, 0);
-        float ax = sx1 + 14;
-        box(pn, ax, sy0, ax + 116, sy0 + 34, 7, cur, S_EDGE, 1);
-        wchar_t hex[16];
-        swprintf(hex, 16, L"#%06X  %ls", cur, ROLE_NAMES[g_pick_role]);
-        tx(ax, sy0 + 38, ax + 200, sy0 + 56, hex, g_sf_small, S_TEXT, DT_LEFT);
-        tx(ax, sy0 + 60, ax + 200, sy0 + 76, L"as the themes have it", g_sf_small, S_MUTED, DT_LEFT);
-        for (int i = 0, j = 0; i < TH_N; i++) {
-            if (i == TH_FOLLOW) continue;
-            float a = ax + j % 4 * 30, b = sy0 + 80 + j / 4 * 24;
-            unsigned c = ((const unsigned *)pal_of(i))[g_pick_role];
-            box(pn, a, b, a + 24, b + 18, 5, c, is_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
-            hit(a, b, a + 24, b + 18, K_PICK, R_CSUG, i);
-            j++;
+            if (sel) g_cp_anchor = SR(a, y - 13, a + 26, y + 13); /* the picker's window opens under it */
         }
         break;
     }
@@ -6417,6 +6381,7 @@ static void set_build(void) {
     pane_size(pn, W, H);
     memset(pn->px, 0, (size_t)W * H * 4);
     g_hits_n = 0; g_tx_n = 0; g_ovr_n = 0;
+    SetRectEmpty(&g_cp_anchor);
     pane_size(&g_om, pn->W, pn->H);
     memset(g_om.px, 0, (size_t)pn->W * pn->H * 4);
     HDC mdc = pn->mem;
@@ -6570,6 +6535,158 @@ static void set_build(void) {
 }
 
 /* each tick while it is open: the preview moves, the window is shown again */
+/* ---- the colour picker: a small window of its own under the swatch clicked (Settings > Chat > Theme), owned by the
+ * Settings window so it stays above it and goes with it; open while a colour of your own theme is being changed
+ * (g_pick_role). Drawn with the Settings window's helpers, its hits and text kept apart from the page's. */
+static HWND g_cpw;
+static Pane g_cp;
+static SetHit g_cph[32];
+static int g_cph_n, g_cp_hot = -1, g_cp_drag, g_cp_x, g_cp_y; /* its hits (its own pixels), the one pointed at, the part held (K_CSV, K_CHUE), where it is */
+static unsigned g_cp_key;              /* what it was last drawn for: drawn again when that changes */
+#define CP_W 372.0f
+#define CP_H 200.0f
+static int cp_hot(int kind, int row, int val) { return g_cp_hot >= 0 && g_cph[g_cp_hot].kind == kind && g_cph[g_cp_hot].row == row && g_cph[g_cp_hot].val == val; }
+static void cp_build(void) {
+    Pane *pn = &g_cp;
+    if (!pn->mem) pn->mem = CreateCompatibleDC(NULL);
+    int W = (int)lroundf(S(CP_W)), H = (int)lroundf(S(CP_H));
+    pane_size(pn, W, H);
+    memset(pn->px, 0, (size_t)W * H * 4);
+    int sh = g_hits_n, st = g_tx_n, sc = g_clipping;
+    g_clipping = 0;
+    g_tx_n = 0; /* (the page's text is drawn already: its queue is free) */
+    box(pn, 0, 0, CP_W, CP_H, 12, S_CARD, S_EDGE_HOT, 1);
+    wchar_t t[96];
+    swprintf(t, 96, L"%ls \x00B7 %ls", ROLE_NAMES[g_pick_role & 15], theme_name(g_theme));
+    tx(16, 10, CP_W - 44, 32, t, g_sf_label, S_TEXT, DT_LEFT | DT_END_ELLIPSIS);
+    int xh = cp_hot(K_CLOSE, 0, 0);
+    if (xh) box(pn, CP_W - 36, 7, CP_W - 10, 33, 7, S_CHIP, S_CHIP, 0);
+    lu_icon(pn, "x", CP_W - 23, 20, 14, xh ? S_TEXT : S_MUTED);
+    hit(CP_W - 36, 7, CP_W - 10, 33, K_CLOSE, 0, 0);
+    /* saturation across and brightness down at the hue, the hue under it */
+    float sx0 = 16, sx1 = 216, sy0 = 42, sy1 = 152, hy0 = sy1 + 12, hy1 = hy0 + 16;
+    RECT sq = SR(sx0, sy0, sx1, sy1), hs = SR(sx0, hy0, sx1, hy1);
+    for (int k = 0; k < 2; k++) {
+        RECT q = k ? hs : sq;
+        for (int Y = max(0, (int)q.top); Y < min(pn->H, (int)q.bottom); Y++)
+            for (int X = max(0, (int)q.left); X < min(pn->W, (int)q.right); X++) {
+                float u = (X - q.left) / (float)max(1, q.right - q.left - 1), w = (Y - q.top) / (float)max(1, q.bottom - q.top - 1);
+                pn->px[Y * pn->W + X] = 0xFF000000u | hsv_x(k ? u : g_pk_h, k ? 1 : u, k ? 1 : 1 - w);
+            }
+    }
+    frame(pn, sx0, sy0, sx1, sy1, 0, S_EDGE, 1);
+    frame(pn, sx0, hy0, sx1, hy1, 0, S_EDGE, 1);
+    float mx = sx0 + g_pk_s * (sx1 - sx0), my = sy0 + (1 - g_pk_v) * (sy1 - sy0), hx = sx0 + g_pk_h * (sx1 - sx0);
+    unsigned cur = hsv_x(g_pk_h, g_pk_s, g_pk_v);
+    box(pn, mx - 7, my - 7, mx + 7, my + 7, 7, cur, 0xFFFFFF, 2);
+    box(pn, hx - 3, hy0 - 3, hx + 3, hy1 + 3, 2, hsv_x(g_pk_h, 1, 1), 0xFFFFFF, 1.5f);
+    hit_px(sq, K_CSV, R_ROLE, 0, 0, 0, 0);
+    hit_px(hs, K_CHUE, R_ROLE, 0, 0, 0, 0);
+    /* the colour, its hex, and the same colour as each built-in theme has it, a click away */
+    float ax = sx1 + 16, ax1 = CP_W - 16;
+    box(pn, ax, sy0, ax1, sy0 + 36, 8, cur, S_EDGE, 1);
+    swprintf(t, 96, L"#%06X", cur);
+    tx(ax, sy0 + 42, ax1, sy0 + 60, t, g_sf_label, S_TEXT, DT_LEFT);
+    tx(ax, sy0 + 64, ax1, sy0 + 80, L"as the themes have it", g_sf_small, S_MUTED, DT_LEFT);
+    for (int i = 0, j = 0; i < TH_N; i++) {
+        if (i == TH_FOLLOW) continue;
+        float a = ax + j % 4 * 34, b = sy0 + 86 + j / 4 * 28;
+        unsigned c = ((const unsigned *)pal_of(i))[g_pick_role & 15];
+        box(pn, a, b, a + 28, b + 22, 6, c, cp_hot(K_PICK, R_CSUG, i) ? S_EDGE_HOT : S_EDGE, 1);
+        hit(a, b, a + 28, b + 22, K_PICK, R_CSUG, i);
+        j++;
+    }
+    /* its hits and text are its own */
+    g_cph_n = min(g_hits_n - sh, 32);
+    memcpy(g_cph, g_hits + sh, sizeof(SetHit) * (size_t)g_cph_n);
+    g_hits_n = sh;
+    HDC mdc = pn->mem;
+    GdiFlush();
+    SetBkMode(mdc, TRANSPARENT);
+    for (int i = 0; i < g_tx_n; i++) {
+        TextOp *o = &g_tx[i];
+        SelectObject(mdc, o->f);
+        SetTextColor(mdc, o->c);
+        DrawTextW(mdc, o->t, -1, &o->r, o->how | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+    GdiFlush();
+    g_tx_n = st;
+    g_clipping = sc;
+    for (int i = 0; i < W * H; i++) if (!(pn->px[i] >> 24) && (pn->px[i] & 0xFFFFFF)) pn->px[i] |= 0xff000000u; /* (GDI leaves its text's alpha at 0) */
+}
+static void cp_hide(void) { if (g_cpw && IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_HIDE); g_cp_key = 0; g_cp_hot = -1; }
+static void cp_tick(void);
+static void cp_drag_at(POINT p) {
+    for (int i = 0; i < g_cph_n; i++) if (g_cph[i].kind == g_cp_drag) {
+        RECT r = g_cph[i].r;
+        float u = clampf((p.x - r.left) / (float)max(1, r.right - r.left - 1), 0, 1), w = clampf((p.y - r.top) / (float)max(1, r.bottom - r.top - 1), 0, 1);
+        if (g_cp_drag == K_CHUE) g_pk_h = fminf(u, 0.9999f); else { g_pk_s = u; g_pk_v = 1 - w; }
+        cpick_apply();
+        cp_tick(); /* at once, not at the next tick */
+        return;
+    }
+}
+static LRESULT CALLBACK cp_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
+    switch (msg) {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE; /* the Settings window keeps the keyboard (Esc closes it) */
+    case WM_SETCURSOR: SetCursor(LoadCursor(NULL, IDC_ARROW)); return TRUE;
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT te = {sizeof te, TME_LEAVE, w, 0}; TrackMouseEvent(&te);
+        if (g_cp_drag) { cp_drag_at(p); return 0; }
+        int h = -1;
+        for (int i = g_cph_n - 1; i >= 0 && h < 0; i--) if (PtInRect(&g_cph[i].r, p)) h = i;
+        if (h != g_cp_hot) { g_cp_hot = h; cp_tick(); }
+        return 0;
+    }
+    case WM_MOUSELEAVE: if (g_cp_hot >= 0 && !g_cp_drag) { g_cp_hot = -1; cp_tick(); } return 0;
+    case WM_LBUTTONDOWN: {
+        int h = -1;
+        for (int i = g_cph_n - 1; i >= 0 && h < 0; i--) if (PtInRect(&g_cph[i].r, p)) h = i;
+        if (h < 0) return 0;
+        SetHit hh = g_cph[h];
+        if (hh.kind == K_CSV || hh.kind == K_CHUE) { g_cp_drag = hh.kind; SetCapture(w); cp_drag_at(p); }
+        else if (hh.kind == K_PICK) { set_choose(hh.row, hh.val); settings_save(); cp_tick(); }
+        else if (hh.kind == K_CLOSE) { g_pick_role = -1; g_sl_dirty = 1; cp_hide(); }
+        return 0;
+    }
+    case WM_LBUTTONUP: if (g_cp_drag) { g_cp_drag = 0; ReleaseCapture(); settings_save(); g_sl_dirty = 1; } return 0;
+    case WM_CAPTURECHANGED: if (g_cp_drag) { g_cp_drag = 0; settings_save(); g_sl_dirty = 1; } return 0;
+    }
+    return DefWindowProc(w, msg, wp, lp);
+}
+/* shown, placed under its swatch (above it when there is no room) and drawn again when what it shows has changed */
+static void cp_tick(void) {
+    if (!g_set || !IsWindowVisible(g_set) || g_pick_role < 0 || g_theme < TH_N || IsRectEmpty(&g_cp_anchor)) { cp_hide(); return; }
+    if (!g_cpw) {
+        WNDCLASSW c = {0};
+        c.lpfnWndProc = cp_proc; c.hInstance = GetModuleHandle(NULL); c.lpszClassName = L"VigilPicker"; c.hCursor = LoadCursor(NULL, IDC_ARROW);
+        RegisterClassW(&c);
+        g_cpw = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"VigilPicker", L"Vigil colour", WS_POPUP, 0, 0, 1, 1, g_set, NULL, c.hInstance, NULL);
+        if (!g_cpw) return;
+    }
+    unsigned key = 2166136261u;
+    float kv[6] = {g_pk_h, g_pk_s, g_pk_v, (float)g_pick_role, (float)g_cp_hot, (float)g_sdpi};
+    for (int i = 0; i < 6; i++) { unsigned u; memcpy(&u, &kv[i], 4); key = (key ^ u) * 16777619u; }
+    key = (key ^ (unsigned)g_theme) * 16777619u;
+    int redraw = key != g_cp_key;
+    if (redraw) { cp_build(); g_cp_key = key; }
+    RECT wr; GetWindowRect(g_set, &wr);
+    int W = g_cp.W, H = g_cp.H, gap = (int)S(8);
+    int x = wr.left + (g_cp_anchor.left + g_cp_anchor.right) / 2 - W / 2, y = wr.top + g_cp_anchor.bottom + gap;
+    RECT wa = work_at((float)x + W / 2.0f, (float)y);
+    if (y + H > wa.bottom) y = wr.top + g_cp_anchor.top - gap - H; /* no room under it: above it */
+    if (x + W > wa.right) x = wa.right - W;
+    if (x < wa.left) x = wa.left;
+    if (!redraw && x == g_cp_x && y == g_cp_y && IsWindowVisible(g_cpw)) return;
+    g_cp_x = x; g_cp_y = y;
+    POINT src = {0, 0}, dst = {x, y};
+    SIZE size = {W, H};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(g_cpw, NULL, &dst, &size, g_cp.mem, &src, 0, &blend, ULW_ALPHA);
+    if (!IsWindowVisible(g_cpw)) ShowWindow(g_cpw, SW_SHOWNOACTIVATE);
+}
+
 static void settings_tick(double now) {
     if (!set_open()) return;
     static double last_frame, last_pics;
@@ -6799,6 +6916,7 @@ static void settings_tick(double now) {
     SIZE size = {W, H};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     UpdateLayeredWindow(g_set, NULL, &dst, &size, g_so.mem, &src, 0, &blend, ULW_ALPHA);
+    cp_tick(); /* the colour picker's window, under its swatch wherever the window and the page went */
 }
 
 static int set_hit_at(POINT p) { for (int i = g_hits_n - 1; i >= 0; i--) if (PtInRect(&g_hits[i].r, p)) return i; return -1; }
@@ -6821,7 +6939,7 @@ static void cpick_at(POINT p) {
     }
 }
 static void krec_stop(void) { g_krec = -1; hotkeys_apply(); g_sl_dirty = 1; }
-static void set_close(void) { if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag = 0; g_slide = -1; g_sizing = 0; if (g_krec >= 0) krec_stop(); }
+static void set_close(void) { cp_hide(); if (g_set) ShowWindow(g_set, SW_HIDE); g_pv_drag = 0; g_slide = -1; g_sizing = 0; if (g_krec >= 0) krec_stop(); }
 
 /* a key pressed while a shortcut is being recorded: it becomes that shortcut ("ctrl+alt+c") */
 static void krec_key(WPARAM vk) {
@@ -6900,6 +7018,7 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         int h = set_hit_at(p);
         if (g_krec >= 0 && (h < 0 || g_hits[h].kind != K_KREC)) krec_stop(); /* a click elsewhere: recording stops */
         if (g_renaming && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE)) ren_end(1); /* and a name being typed is kept */
+        if (g_pick_role >= 0 && (h < 0 || g_hits[h].kind != K_PICK || g_hits[h].row != R_ROLE || g_hits[h].val >= 9)) { g_pick_role = -1; g_sl_dirty = 1; cp_hide(); } /* a click away from the swatches: the picker closes */
         if (h >= 0) {
             SetHit *sh = &g_hits[h];
             switch (sh->kind) {
@@ -6995,6 +7114,10 @@ static LRESULT CALLBACK set_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == VK_RETURN) ren_end(1);
             else if (wp == VK_ESCAPE) ren_end(0);
             else if (wp == VK_BACK && n) { g_my_name[k][n - 1] = 0; g_sl_dirty = 1; }
+            return 0;
+        }
+        if (wp == VK_ESCAPE && g_pick_role >= 0) { /* Esc: the colour picker closes first */
+            g_pick_role = -1; g_sl_dirty = 1; cp_hide();
             return 0;
         }
         if (wp == VK_ESCAPE) { set_close(); return 0; }
@@ -7108,7 +7231,22 @@ static void settings_shot(const char *path) {
     memset(&bh, 0, sizeof bh);
     bh.biSize = sizeof bh; bh.biWidth = W; bh.biHeight = -H; bh.biPlanes = 1; bh.biBitCount = 32; bh.biCompression = BI_RGB;
     BITMAPFILEHEADER fh = {0x4D42, (DWORD)(sizeof fh + sizeof bh + (size_t)W * H * 4), 0, 0, (DWORD)(sizeof fh + sizeof bh)};
-    fwrite(&fh, sizeof fh, 1, f); fwrite(&bh, sizeof bh, 1, f); fwrite(g_so.px, (size_t)W * H * 4, 1, f);
+    uint32_t *px = malloc((size_t)W * H * 4);
+    if (!px) { fclose(f); return; }
+    memcpy(px, g_so.px, (size_t)W * H * 4);
+    if (g_cpw && IsWindowVisible(g_cpw) && g_cp.px) { /* the colour picker's window over it, where it is on the screen */
+        RECT wr; GetWindowRect(g_set, &wr);
+        for (int y = 0; y < g_cp.H; y++)
+            for (int x = 0; x < g_cp.W; x++) {
+                int X = g_cp_x - wr.left + x, Y = g_cp_y - wr.top + y;
+                if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+                uint32_t sp = g_cp.px[y * g_cp.W + x], dp = px[Y * W + X], a = sp >> 24, o = 0;
+                for (int c = 0; c < 32; c += 8) o |= (((sp >> c) & 255) + ((dp >> c) & 255) * (255 - a) / 255) << c;
+                px[Y * W + X] = o;
+            }
+    }
+    fwrite(&fh, sizeof fh, 1, f); fwrite(&bh, sizeof bh, 1, f); fwrite(px, (size_t)W * H * 4, 1, f);
+    free(px);
     fclose(f);
 }
 
