@@ -5997,7 +5997,7 @@ static int page_sections(int pg, SSec *s) {
         ROW(0, RK_SLIDER, R_TEXT, 5, L"Text size", NULL, TEXT_SIZES, NULL, NULL, NULL);
         ROW(3, RK_SEG, R_HOVERP, 4, L"Hover pause", L"resting on a core this long opens its box", PAUSE_NAMES, NULL, NULL, NULL);
         ROW(3, RK_SEG, R_POP, 2, L"New reply", L"Pops open: beside its core for 10 s", POP_NAMES, NULL, NULL, NULL);
-        ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; scroll on up for the earlier turns", TURN_NAMES, NULL, NULL, NULL);
+        ROW(4, RK_SEG, R_TURNS, 2, L"Turns", L"where it opens; push past an edge to switch", TURN_NAMES, NULL, NULL, NULL);
         ROW(4, RK_SEG, R_STEPS, 3, L"Steps", L"what Claude ran, read and edited", STEP_NAMES, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATW, 13, L"Width", L"characters across, every reply", CHAT_COLS_N, NULL, NULL, NULL);
         ROW(2, RK_SLIDER, R_CHATH, 14, L"Height", L"lines before it scrolls", CHAT_ROWS_N, NULL, NULL, NULL);
