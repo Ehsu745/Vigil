@@ -2943,6 +2943,27 @@ static void chat_scroll(float notches) {
     }
 }
 
+/* A touchpad swipe comes as two streams, up-down and sideways; a swipe a little off straight would scroll the box by
+ * only part of it and spin the core with the rest. With a box open, each swipe (events with no 0.25 s gap) takes one
+ * way: up or down unless it is clearly sideways (over about 63 degrees), and then its sideways part scrolls too.
+ * Returns 0 no box (both as they come) or up-down not decided yet, 1 up or down, 2 sideways, 3 a sideways bit before
+ * that is decided (dropped). */
+static double g_swipe_at;
+static int g_swipe_axis, g_swipe_up;
+static float g_swipe_v, g_swipe_h, g_swipe_sv;
+static int swipe_axis(float v, float h, int box_open) {
+    double now = wall();
+    if (now - g_swipe_at > .25) { g_swipe_axis = 0; g_swipe_v = g_swipe_h = g_swipe_sv = 0; }
+    g_swipe_at = now;
+    g_swipe_v += fabsf(v); g_swipe_h += fabsf(h); g_swipe_sv += v;
+    if (v != 0) g_swipe_up = v > 0;
+    else if (g_swipe_sv != 0) g_swipe_up = g_swipe_sv > 0;
+    if (!box_open) return 0;
+    if (!g_swipe_axis && g_swipe_v + g_swipe_h >= .2f) g_swipe_axis = g_swipe_h > g_swipe_v * 2 ? 2 : 1;
+    if (!g_swipe_axis && h != 0) return 3;
+    return g_swipe_axis;
+}
+
 /* a middle-click on the core whose box is open: the latest turn only (the box shrinks to it, its end staying in
  * view), or the earlier turns in above it */
 static void chat_middle(const Session *s) {
@@ -7725,6 +7746,7 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (i < 0 || i >= room->n) return 0;
         float notches = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
         Session *s = &room->s[i];
+        if (swipe_axis(notches, 0, !strcmp(g_chat_sid, s->sid)) == 2) return 0; /* (a swipe gone sideways: it spins it, see below) */
         wheel_spin(s, notches);
         if (!strcmp(g_chat_sid, s->sid)) chat_scroll(notches); /* its box open: the wheel scrolls it, and it stays */
         else g_hover_since = wall(); /* (scrolling on it is not resting on it: no box opens mid-scroll) */
@@ -7733,7 +7755,18 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEHWHEEL: { /* sideways (a touchpad swipe): the core spins about its other axis */
         int i = core_at(p, NULL, NULL);
         if (i < 0 || i >= room->n) return 0;
-        wheel_spin2(&room->s[i], GET_WHEEL_DELTA_WPARAM(wp) / 120.0f, 1);
+        float side = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
+        Session *s = &room->s[i];
+        int open = !strcmp(g_chat_sid, s->sid);
+        int ax = swipe_axis(0, side, open);
+        if (ax == 3) return 0;
+        if (ax == 1) { /* its box open and the swipe mostly up or down: the sideways part scrolls too */
+            float n = (g_swipe_up ? 1 : -1) * fabsf(side) * .5f;
+            wheel_spin(s, n);
+            chat_scroll(n);
+            return 0;
+        }
+        wheel_spin2(s, side, 1);
         return 0;
     }
     case WM_HOTKEY:
