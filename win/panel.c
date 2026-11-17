@@ -4023,14 +4023,39 @@ static LRESULT CALLBACK edit_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void add_drop(HDROP d, int finish);
 
+/* the hint under the reply field as last painted, so a key that leaves it as it is repaints nothing */
+static wchar_t g_in_hint[1200];
+/* the hint: the images still in the text, or the keys; 1 when it names images */
+static int in_hint_text(wchar_t *hint) {
+    int used = 0;
+    hint[0] = 0;
+    if (g_attach_n) {
+        wchar_t *t = edit_text();
+        for (int k = 0; k < g_attach_n; k++) {
+            if (!attach_used(t, k)) continue;
+            wchar_t one[200];
+            swprintf(one, 200, L"%ls[Image #%d] %ls", used++ ? L",  " : L"", g_attach_id[k], g_attach_name[k]);
+            wcsncat(hint, one, 1000 - wcslen(hint));
+        }
+        free(t);
+    }
+    if (used) wcscat(hint, L"   \x00B7   Backspace deletes an image");
+    else wcscpy(hint, L"Enter sends   \x00B7   Shift+Enter new line   \x00B7   Esc closes   \x00B7   drop an image on the core");
+    return used;
+}
+static int in_hint_changed(void) { wchar_t hint[1200]; in_hint_text(hint); return wcscmp(hint, g_in_hint) != 0; }
+
 static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT) g_stat_paint_card++;
     switch (msg) {
     case WM_ERASEBKGND: return 1;
-    case WM_PAINT: { /* like the chat box: dark card, the session's colour down the left edge, a rounded field */
+    case WM_PAINT: { /* like the chat box: dark card, the session's colour down the left edge, a rounded field; drawn
+                      * off-screen first and put on the screen in one go, so a repaint never shows a bare card */
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(w, &ps);
+        HDC wdc = BeginPaint(w, &ps);
         RECT r; GetClientRect(w, &r);
+        HDC dc = CreateCompatibleDC(wdc);
+        HBITMAP bmp = CreateCompatibleBitmap(wdc, r.right, r.bottom), obmp = SelectObject(dc, bmp);
         HBRUSH bg = CreateSolidBrush(chat_bg()), bar = CreateSolidBrush(g_chat_accent), field = CreateSolidBrush(chat_field());
         FillRect(dc, &r, bg);
         RECT b = {0, 0, chat_bar(), r.bottom};
@@ -4051,24 +4076,14 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         RECT tt = {x0, pad, r.right - pad, pad + in_title_h()};
         DrawTextW(dc, title, -1, &tt, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         wchar_t hint[1200];
-        int used = 0;
-        if (g_attach_n) {
-            wchar_t *t = edit_text();
-            hint[0] = 0;
-            for (int k = 0; k < g_attach_n; k++) {
-                if (!attach_used(t, k)) continue;
-                wchar_t one[200];
-                swprintf(one, 200, L"%ls[Image #%d] %ls", used++ ? L",  " : L"", g_attach_id[k], g_attach_name[k]);
-                wcsncat(hint, one, 1000 - wcslen(hint));
-            }
-            free(t);
-        }
-        if (used) wcscat(hint, L"   \x00B7   Backspace deletes an image");
-        else wcscpy(hint, L"Enter sends   \x00B7   Shift+Enter new line   \x00B7   Esc closes   \x00B7   drop an image on the core");
+        int used = in_hint_text(hint);
         SetTextColor(dc, ink(used ? RGB(190, 200, 225) : RGB(120, 126, 142)));
         SelectObject(dc, g_input_sf);
         RECT ht = {x0 + (int)(2 * g_dpi), fy + in_field_h() + gap, r.right - pad, r.bottom - pad};
         DrawTextW(dc, hint, -1, &ht, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        wcsncpy(g_in_hint, hint, 1199); g_in_hint[1199] = 0;
+        BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY); /* (the field's own window is clipped out: WS_CLIPCHILDREN) */
+        SelectObject(dc, obmp); DeleteObject(bmp); DeleteDC(dc);
         EndPaint(w, &ps);
         return 0;
     }
@@ -4083,7 +4098,7 @@ static LRESULT CALLBACK input_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: /* after a paste or a token, every run in its face again; the hint (images still in the text) only when there are images */
         if (HIWORD(wp) == EN_CHANGE) {
             if (g_restyle) { g_restyle = 0; edit_style(); }
-            if (g_attach_n) InvalidateRect(w, NULL, FALSE);
+            if (g_attach_n && in_hint_changed()) InvalidateRect(w, NULL, FALSE); /* (only when the hint would read otherwise) */
             in_fit();
         }
         return 0;
