@@ -2251,6 +2251,7 @@ static float g_peek_rfin;            /* (1) how much of the earlier turns a full
 static float g_scroll_d, g_box_y, g_box_h; /* as drawn: the scroll, the box's top and height, each easing toward its target */
 static int g_sd;                     /* g_scroll_d as painted (a link's click uses it too) */
 static int g_chat_anim;              /* any of them still on its way: the panel ticks at the display's rate */
+static int g_end_hold;               /* the latest turn only again: its end held at the bottom while the box finishes shrinking */
 static int g_chat_most;              /* the tallest the view may be */
 static RECT g_box_beside, g_box_wa;  /* where the box was laid out last (chat_ease places it at each height from there) */
 static int g_box_cy, g_box_x, g_box_w, g_box_below;
@@ -2919,7 +2920,7 @@ static float hist_push_now(void) { return wall() - g_push_at > 0.6 ? 0 : fminf(1
 /* a push kept: the earlier turns stay where the push showed them, or go with the view at the latest turn's end */
 static void hist_commit(void) {
     if (g_peek == 1) { g_chat_hist = 1; g_chat_scroll = g_lat_y - (int)lroundf(g_peek_rfin); if (g_chat_scroll < 0) g_chat_scroll = 0; }
-    else { g_chat_hist = 0; g_hist_land = 2; }
+    else { g_chat_hist = 0; g_hist_land = 2; g_end_hold = 1; }
     g_peek = 0; g_push = 0; g_chat_auto = 0;
 }
 
@@ -3507,16 +3508,23 @@ static void chat_ease(double now, int snap) {
         g_scroll_d += (scroll_to - g_scroll_d) * k; g_box_h += (h_to - g_box_h) * k; g_box_y += (y_to - g_box_y) * k;
     }
     g_chat_anim = p > 0 || fabsf(scroll_to - g_scroll_d) > .5f || fabsf(h_to - g_box_h) > .5f || fabsf(y_to - g_box_y) > .5f;
-    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; }
-    int x = g_box_x, y = (int)lroundf(g_box_y), w = g_box_w, h = (int)lroundf(g_box_h);
+    if (!g_chat_anim) { g_scroll_d = scroll_to; g_box_h = h_to; g_box_y = y_to; g_end_hold = 0; }
+    /* both edges rounded, not the top and the height: the bottom edge then never wobbles a pixel against the top */
+    int x = g_box_x, y = (int)lroundf(g_box_y), w = g_box_w, h = (int)lroundf(g_box_y + g_box_h) - y;
+    if (g_peek == -1 || g_end_hold) { /* shrinking: the text's end stays exactly on the view's bottom, whatever the box's height this frame */
+        int vh = h - (2 * chat_pad() + g_chat_title_h + chat_gap());
+        g_scroll_d = (float)(g_chat_body_h > vh ? g_chat_body_h - vh : 0);
+    }
     static RECT was;
     RECT now_rc = {x, y, x + w, y + h};
     if (!EqualRect(&was, &now_rc) || !IsWindowVisible(g_chat)) { /* only when it moved or changed size: re-shaping repaints it, and the reply line under it */
-        SetWindowPos(g_chat, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (w != was.right - was.left || h != was.bottom - was.top) {
+        int resized = w != was.right - was.left || h != was.bottom - was.top;
+        /* (no copying of the old pixels to the new place: they showed a frame of the text in the wrong spot) */
+        SetWindowPos(g_chat, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW | (resized ? SWP_NOCOPYBITS : 0));
+        if (resized) {
             int rad = (int)(12 * g_dpi);
-            SetWindowRgn(g_chat, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), TRUE);
-            InvalidateRect(g_chat, NULL, FALSE);
+            SetWindowRgn(g_chat, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), FALSE);
+            RedrawWindow(g_chat, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW); /* painted now, at its new size, before the frame is shown */
         }
         was = now_rc;
         if (input_open()) input_place();
