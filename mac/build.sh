@@ -10,7 +10,7 @@
 # Signing: ad-hoc by default. macOS remembers permissions per signature, and an ad-hoc signature changes
 # with every build, so after a rebuild it asks again. To keep them, create a code-signing certificate once
 # (Keychain Access > Certificate Assistant > Create a Certificate, type "Code Signing") and build with
-#   DODECA_SIGN_ID="that certificate's name" sh mac/build.sh
+#   VIGIL_SIGN_ID="that certificate's name" sh mac/build.sh
 set -e
 cd "$(dirname "$0")/.."
 APP=Vigil.app
@@ -42,7 +42,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-codesign --force --sign "${DODECA_SIGN_ID:--}" --identifier "$ID" "$APP" 2>/dev/null
+codesign --force --sign "${VIGIL_SIGN_ID:-${DODECA_SIGN_ID:--}}" --identifier "$ID" "$APP" 2>/dev/null
 
 cat >vigil-panel <<'EOF'
 #!/bin/sh
@@ -52,7 +52,7 @@ cat >vigil-panel <<'EOF'
 # quits with it.
 DIR=$(cd "$(dirname "$0")" && pwd)
 set -- --launcher-pid $$ "$@"
-[ -n "$DODECA_EVENTS" ] && set -- --events "$DODECA_EVENTS" "$@" # apps started by LaunchServices get no environment
+EV=${VIGIL_EVENTS:-$DODECA_EVENTS}; [ -n "$EV" ] && set -- --events "$EV" "$@" # apps started by LaunchServices get no environment
 C=$(command -v claude 2>/dev/null) && set -- --claude "$C" "$@"     # nor this shell's PATH
 if [ -t 0 ] && [ -t 1 ]; then
     TTY=$(tty)

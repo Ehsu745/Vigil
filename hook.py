@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Claude Code hook for vigil.
 
-Appends one JSON line per event to ~/.dodeca-core/events.jsonl:
+Appends one JSON line per event to ~/.vigil/events.jsonl:
 time, session id, event name, folder name, tool name, notification type, and for a subagent's events its
 id and type (e.g. "Explore"), so it can be shown as a core of its own.
 It never stores prompts, tool input/output or full paths in that file.
 
-With DODECA_RICH=1 it also keeps one small file per session, ~/.dodeca-core/msg/<session id>.json,
+With VIGIL_RICH=1 it also keeps one small file per session, ~/.vigil/msg/<session id>.json,
 for the floating panel's chat box and voice features: Claude's last reply, the last notification text
 (e.g. a permission prompt), the iTerm2 session, Windows Terminal tab, tmux pane or vigil-claude launcher the
 conversation runs in (where a reply typed in the panel goes), and the last few turns as the terminal shows them: each prompt, its reply and
@@ -29,17 +29,29 @@ try:
 except ImportError:  # not on Windows; the lock is only a nicety
     fcntl = None
 
-PATH = os.environ.get("DODECA_EVENTS", os.path.expanduser("~/.dodeca-core/events.jsonl"))
+def data_dir():
+    """~/.vigil; the old ~/.dodeca-core is moved there the first time (the name before Vigil)."""
+    new, old = os.path.expanduser("~/.vigil"), os.path.expanduser("~/.dodeca-core")
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:
+            os.rename(old, new)
+        except OSError:  # (another hook moved it at the same moment: fine)
+            return new if os.path.exists(new) else old
+    return new
+
+
+PATH = os.environ.get("VIGIL_EVENTS") or os.environ.get("DODECA_EVENTS") or os.path.join(data_dir(), "events.jsonl")  # (DODECA_*: the old names, still read)
 MSG_DIR = os.path.join(os.path.dirname(PATH), "msg")
-RICH = os.environ.get("DODECA_RICH") == "1"
+RICH = "1" in (os.environ.get("VIGIL_RICH"), os.environ.get("DODECA_RICH"))
 KNOWN = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
          "PostToolUse", "Notification", "Stop", "SubagentStart", "SubagentStop"}
 MAX_TEXT = 4000
 MAX_PROMPT = 2000
 TURNS = 5                  # turns kept: prompt, reply and steps; the last is the one going on
-STEPS = 8                  # steps kept per turn (the count and the tally keep the rest)
+STEPS = 16                 # steps kept per turn, Claude's words between them too (the count and the tally keep the rest)
 MSG_BUDGET = 24000         # the oldest turns go first when the file grows past this
 STALE = 24 * 3600          # msg files of sessions that never sent SessionEnd
+LIVE_FOR = 600             # a turn with no step for this long (no Stop came: an error) takes no more of your messages
 TRANSCRIPT_TAIL = 262144   # how much of the transcript the fallback reads, from the end
 
 
@@ -107,7 +119,9 @@ def step_detail(tool, ti):
     """What a step works on, short: a command's first line, a file's name (never its folder), a pattern."""
     if not isinstance(ti, dict):
         return ""
-    if tool == "Bash":
+    if tool == "Bash":  # what Claude says the command does, else its first line
+        if isinstance(ti.get("description"), str) and ti["description"].strip():
+            return one_line(ti["description"])
         cmd = ti.get("command")
         return one_line(cmd.strip().split("\n")[0] if isinstance(cmd, str) else "")
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead"):
@@ -173,6 +187,9 @@ def fit(turns):
 BACKFILL_MAX = 4 << 20     # how far back in the transcript the first fill reads at most
 
 
+HARNESS = ("<command-", "<local-command", "<system-reminder>", "<bash-", "<task-notification", "Caveat:", "[Request interrupted")
+
+
 def prompt_text(m):
     """A typed prompt in a transcript user line ("" for tool results, commands and the harness's own lines)."""
     c = m.get("content")
@@ -181,9 +198,106 @@ def prompt_text(m):
     if not isinstance(c, str):
         return ""
     t = c.strip()
-    if not t or t.startswith(("<command-", "<local-command", "<system-reminder>", "<bash-", "<task-notification", "Caveat:", "[Request interrupted")):
+    if not t or t.startswith(HARNESS):
         return ""
     return t
+
+
+def notice_step(p):
+    """A background task's notice as a step of the turn it came in ("" for the harness's other lines)."""
+    if not p.startswith("<task-notification"):
+        return None
+    m = re.search(r"<summary>(.*?)</summary>", p, re.S)
+    return ["@notice", " ".join((m.group(1) if m else "background task").split())[:80]]
+
+
+def tail_entries(path):
+    """The transcript's last entries, newest first (its tail only)."""
+    if not path or not os.path.isfile(path):
+        return []
+    with open(path, "rb") as f:
+        f.seek(max(0, os.path.getsize(path) - TRANSCRIPT_TAIL))
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    out = []
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and not e.get("isSidechain") and not e.get("isMeta") and isinstance(e.get("message"), dict):
+            out.append(e)
+    return out
+
+
+def turn_scan(path, sent=()):
+    """Since your prompt (messages you sent during the turn, `sent`, do not end it): Claude's newest words ("" if none
+    yet) and the output tokens of its messages (a message's usage is repeated on each of its blocks: counted once)."""
+    said, tok = "", {}
+    for e in tail_entries(path):
+        m = e["message"]
+        if e.get("type") == "user":
+            p = prompt_text(m)
+            if p and p[:300] not in sent:
+                break  # back to your prompt
+            continue
+        if e.get("type") != "assistant":
+            continue
+        u = m.get("usage")
+        if isinstance(u, dict) and isinstance(u.get("output_tokens"), int):
+            k = m.get("id") or id(m)
+            tok[k] = max(tok.get(k, 0), u["output_tokens"])
+        if not said and isinstance(m.get("content"), list):
+            said = "\n".join(x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text").strip()
+    return said, sum(tok.values())
+
+
+def words_for(path, tid):
+    """What Claude said in the message that makes tool call tid (its text before the call, as the terminal shows it):
+    "" when it said nothing, None when the message is not in the transcript yet (Claude Code writes it a moment after
+    the tool starts, so at PreToolUse it is often still missing)."""
+    if not tid:
+        return None
+    es = tail_entries(path)
+    mid = None
+    for e in es:
+        c = e["message"].get("content")
+        if e.get("type") == "assistant" and isinstance(c, list) and any(
+                isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") == tid for x in c):
+            mid = e["message"].get("id") or id(e)
+            break
+    if mid is None:
+        return None
+    said = []
+    for e in reversed(es):  # oldest first: its blocks in order (one transcript line each, the same message id)
+        m = e["message"]
+        if e.get("type") == "assistant" and (m.get("id") or None) == mid and isinstance(m.get("content"), list):
+            said += [x.get("text", "") for x in m["content"] if isinstance(x, dict) and x.get("type") == "text"]
+    return "\n".join(x for x in said if x.strip()).strip()
+
+
+def say_before(steps, i, said):
+    """Claude's words put in before step i (once: not when the same words are there already)."""
+    said = one_line(said, 300)
+    if not said or any(isinstance(x, list) and len(x) > 1 and x[0] == "@say" and x[1] == said for x in steps):
+        return steps
+    return steps[:i] + [["@say", said]] + steps[i:]
+
+
+def interrupted(path, p):
+    """Whether the turn before prompt p was stopped by you (Esc): the transcript's "[Request interrupted" line comes
+    after its last prompt."""
+    for e in tail_entries(path):
+        if e.get("type") != "user":
+            continue
+        c = e["message"].get("content")
+        if isinstance(c, list):
+            c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+        if isinstance(c, str) and c.strip().startswith("[Request interrupted"):
+            return True
+        q = prompt_text(e["message"])
+        if q and q != p:
+            return False
+    return False
 
 
 def backfill(path):
@@ -248,8 +362,27 @@ def on_turn(sid, ev, d):
     if ev == "UserPromptSubmit":
         p = d.get("prompt")
         p = p[:MAX_PROMPT] if isinstance(p, str) else ""
-        if not (turns and turns[-1].get("p") == p and not turns[-1].get("r")):  # (already in the transcript)
-            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}})
+        if p.lstrip().startswith(HARNESS):  # the harness's own line (a background task's notice): no turn of its own;
+            step = notice_step(p.lstrip())  # the notice is a step of the turn going on, which keeps your prompt
+            if step and turns:
+                s = turns[-1].get("s") if isinstance(turns[-1].get("s"), list) else []
+                turns[-1]["s"] = (s + [step])[-STEPS:]
+        elif turns and turns[-1].get("p") == p and not turns[-1].get("r"):
+            turns[-1].setdefault("t0", int(time.time()))  # (already in the transcript: read in by the first fill)
+        elif turns and turns[-1].get("t0") and not turns[-1].get("d") and not turns[-1].get("r") \
+                and time.time() - (turns[-1].get("ts") or turns[-1]["t0"]) < LIVE_FOR \
+                and not interrupted(d.get("transcript_path"), p):
+            t = turns[-1]  # sent while the turn runs: a line of that turn, as the terminal shows it
+            s = t.get("s") if isinstance(t.get("s"), list) else []
+            t["s"] = (s + [["@you", p[:300]]])[-STEPS:]
+            t["you"] = (t.get("you") or [])[-7:] + [p[:300]]
+            update_msg(sid, {"turns": fit(turns)})
+            return
+        else:
+            last = turns[-1] if turns else None
+            if last and not last.get("n") and not last.get("r") and p.startswith(last.get("p") or "\0"):
+                turns.pop()  # stopped before any step and sent again, longer: the new one only
+            turns.append({"p": p, "r": "", "s": [], "n": 0, "c": {}, "t0": int(time.time())})
         fields["run"] = None
     else:
         if not turns:
@@ -257,18 +390,42 @@ def on_turn(sid, ev, d):
         t = turns[-1]
         tool = str(d.get("tool_name", ""))[:40]
         if ev == "PreToolUse":
-            step = [tool, step_detail(tool, d.get("tool_input"))]
+            tid = str(d.get("tool_use_id") or "")[:80]
+            step = [tool, step_detail(tool, d.get("tool_input"))] + ([tid] if tid else [])  # (the id: its words may come later)
             s = t.get("s") if isinstance(t.get("s"), list) else []
-            t["s"] = (s + [step])[-STEPS:]
+            try:  # the turn's tokens so far, and what Claude said in the message making this call (if written yet)
+                _, tok = turn_scan(d.get("transcript_path"), list(t.get("you") or []))
+                if tok > int(t.get("k") or 0):
+                    t["k"] = tok
+                said = words_for(d.get("transcript_path"), tid)
+            except Exception:
+                said = None
+            s = s + [step]
+            if said:
+                s = say_before(s, len(s) - 1, said)
+            t["s"] = s[-STEPS:]
             t["n"] = int(t.get("n") or 0) + 1
+            t["ts"] = int(time.time())
             c = t.get("c") if isinstance(t.get("c"), dict) else {}
             c[tool] = int(c.get(tool) or 0) + 1
             t["c"] = c
             fields["run"] = step
         elif ev == "PostToolUse":
+            t["ts"] = int(time.time())  # (the last sign of life: the running line reddens after a long quiet)
             fields["run"] = None
+            tid = str(d.get("tool_use_id") or "")[:80]
+            s = t.get("s") if isinstance(t.get("s"), list) else []
+            at = next((i for i, x in enumerate(s) if isinstance(x, list) and len(x) > 2 and x[2] == tid), -1) if tid else -1
+            if at >= 0 and not (at > 0 and isinstance(s[at - 1], list) and s[at - 1][:1] == ["@say"]):
+                try:  # its words were not written yet when it started: now they are, before it
+                    said = words_for(d.get("transcript_path"), tid)
+                except Exception:
+                    said = None
+                if said:
+                    t["s"] = say_before(s, at, said)[-STEPS:]
         elif ev == "Stop":
             t["r"] = d.get("_reply", "")[:MAX_TEXT]
+            t["d"] = 1
             fields["run"] = None
     fields["turns"] = fit(turns)
     update_msg(sid, fields)
@@ -302,6 +459,24 @@ def drop_stale():
             pass
 
 
+def verbs_refresh():
+    """Claude Code updated since its spinner words were read (or never read): spinner_verbs.py reads them again, in the
+    background, so this returns at once."""
+    try:
+        import glob
+        import subprocess
+        out = os.path.join(os.path.dirname(PATH), "claude-verbs.txt")
+        cc = glob.glob(os.path.expanduser("~/.local/share/claude/versions/*"))
+        newest = max((os.path.getmtime(p) for p in cc), default=0)
+        if os.path.exists(out) and os.path.getmtime(out) >= newest:
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spinner_verbs.py")
+        subprocess.Popen([sys.executable, script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except Exception:
+        pass
+
+
 def rich(d, ev, sid, rec):
     aid = rec.get("aid")
     if aid:  # a subagent's: only its final reply is kept, in a file of its own (its steps stay out of the session's turns)
@@ -321,8 +496,9 @@ def rich(d, ev, sid, rec):
         return
     if ev == "SessionStart":
         drop_stale()
+        verbs_refresh()
         pane = os.environ.get("TMUX_PANE", "")
-        inbox = os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
+        inbox = os.environ.get("VIGIL_INBOX") or os.environ.get("DODECA_INBOX", "")  # started by vigil-claude: the pid whose pipe takes typed replies
         fields = {"iterm": os.environ.get("ITERM_SESSION_ID", "")[:80],
                   "tmux": pane if re.fullmatch(r"%\d{1,6}", pane) else "",
                   "inbox": inbox if re.fullmatch(r"\d{1,9}", inbox) else "",
@@ -355,7 +531,8 @@ def rich(d, ev, sid, rec):
             on_turn(sid, ev, d)
     elif ev == "Notification":
         text = d.get("message")
-        if isinstance(text, str) and text.strip() and d.get("notification_type") != "idle_prompt":
+        asks = d.get("notification_type") in (None, "", "permission_prompt", "elicitation_dialog")  # (a login or a quota notice asks nothing)
+        if isinstance(text, str) and text.strip() and asks:
             update_msg(sid, {"notice": text[:MAX_TEXT]})
 
 

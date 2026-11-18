@@ -59,7 +59,7 @@ int event_parse(const char *line, size_t n, Event *e) {
     field(line, end, "cwd", e->cwd, sizeof e->cwd);
     field(line, end, "tool", e->tool, sizeof e->tool);
     field(line, end, "n", e->ntype, sizeof e->ntype);
-    if (field(line, end, "m", num, sizeof num)) e->msg = atoi(num); /* only written with DODECA_RICH */
+    if (field(line, end, "m", num, sizeof num)) e->msg = atoi(num); /* only written with VIGIL_RICH */
     field(line, end, "aid", e->aid, sizeof e->aid);
     field(line, end, "at", e->atype, sizeof e->atype);
     return e->t > 0;

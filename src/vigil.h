@@ -1,5 +1,5 @@
-#ifndef DODECA_H
-#define DODECA_H
+#ifndef VIGIL_H
+#define VIGIL_H
 #include <stddef.h>
 #include <stdint.h>
 
@@ -17,7 +17,7 @@
 typedef struct { float r, g, b; } Col;
 
 /* ---- events.c: follow the JSONL file the hook appends to ------------------------------------ */
-typedef struct { double t; char sid[72], ev[24], cwd[40], tool[40], ntype[32], aid[72], atype[40]; int msg; } Event; /* msg: a new reply is in the msg file (DODECA_RICH); aid, atype: fired in (or for) a subagent */
+typedef struct { double t; char sid[72], ev[24], cwd[40], tool[40], ntype[32], aid[72], atype[40]; int msg; } Event; /* msg: a new reply is in the msg file (VIGIL_RICH); aid, atype: fired in (or for) a subagent */
 typedef struct { char path[1024]; long pos; char *buf; size_t buflen; } Tail;
 void tail_init(Tail *t, const char *path);
 int tail_history(Tail *t, double since, Event *out, int max); /* events newer than `since` already in the file */
@@ -343,7 +343,7 @@ typedef struct {
     /* the mouse (panel only): *_to is set by the panel, the rest eases toward it in room_tick */
     float hover_to, look_x_to, look_y_to; /* 1 while pointed at; cursor offset from the centre, -1..1, y down */
     float hover, look_x, look_y;
-    int unread; /* a reply arrived since the last prompt (only with DODECA_RICH; the panel reads the text) */
+    int unread; /* a reply arrived since the last prompt (only with VIGIL_RICH; the panel reads the text) */
     /* a subagent (its sid: its session's, a dash, its agent id; named for its type), shown as a core of its own while it
      * works; once it has finished it goes when its reply has been seen (the panel: pointed at, then left; sub_seen),
      * or SUB_KEEP seconds after (the terminal) */
