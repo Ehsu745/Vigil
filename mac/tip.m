@@ -6,7 +6,10 @@
 static const CGFloat PAD = 11, BAR = 3, GAP = 6;
 #define MAXW (self.maxWidth > 0 ? self.maxWidth : fmax(460, [self size] * 36) * (self.sizeK > 0 ? self.sizeK : 1)) /* about the same line length at any font size */
 
-@implementation TipView
+@implementation TipView {
+    CGFloat _scrollMax, _pushAcc; // how far the body can scroll; notches pushed past an edge so far
+    int _pushDir;
+}
 - (BOOL)isOpaque { return NO; }
 - (CGFloat)size { return self.fontSize > 0 ? self.fontSize : 12; }
 - (CGFloat)lineH { return ceil([self size] * 1.45); }
@@ -83,7 +86,14 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
         if ([t hasPrefix:@"```"] || [t hasPrefix:@"~~~"]) { code = !code; gap = gap || code; continue; }
         if (!code && !t.length) { gap = !first; continue; }
         NSAttributedString *piece;
-        if (code) {
+        unichar mk = line.length ? [line characterAtIndex:0] : 0;
+        if (!code && mk >= 1 && mk <= 3) { // a turn's marker line (panel.m conv_of): as it is, no Markdown
+            NSColor *c = mk == 1 ? [self strong] : mk == 3 ? [NSColor colorWithSRGBRed:215 / 255.0 green:119 / 255.0 blue:87 / 255.0 alpha:1] : [[self textColor] colorWithAlphaComponent:0.55];
+            NSMutableDictionary *a = [@{NSFontAttributeName: font, NSForegroundColorAttributeName: c,
+                                        NSParagraphStyleAttributeName: [self paraIndent:0 rest:0 gap:gap && !first]} mutableCopy];
+            if (mk == 1) a[NSBackgroundColorAttributeName] = [[self textColor] colorWithAlphaComponent:0.12];
+            piece = [[NSAttributedString alloc] initWithString:[line substringFromIndex:1] attributes:a];
+        } else if (code) {
             piece = [[NSAttributedString alloc] initWithString:line attributes:@{NSFontAttributeName: [self mono],
                 NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.62 green:0.66 blue:0.72 alpha:1],
                 NSParagraphStyleAttributeName: [self paraIndent:step * 1.5 rest:step * 1.5 gap:gap && !first]}];
@@ -155,6 +165,32 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
     [self.title ?: @"" drawWithRect:NSMakeRect(x, top - th, w, th) options:opt attributes:[self attr:YES] context:nil];
     NSAttributedString *body = [self rendered];
     CGFloat bh = [self bodyHeight:body width:w];
-    if (bh > 0) [body drawWithRect:NSMakeRect(x, top - th - GAP - bh, w, bh) options:opt context:nil];
+    if (bh <= 0) return;
+    NSRect shown = NSMakeRect(x, top - th - GAP - bh, w, bh);
+    CGFloat full = ceil([body boundingRectWithSize:NSMakeSize(w, 1e5) options:NSStringDrawingUsesLineFragmentOrigin].size.height);
+    if (full <= bh + 1) { [body drawWithRect:shown options:opt context:nil]; return; }
+    _scrollMax = full - bh; // taller than the box: its end shows, scrollUp moves it down
+    self.scrollUp = fmax(0, fmin(self.scrollUp, _scrollMax));
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(shown);
+    [body drawWithRect:NSMakeRect(x, NSMinY(shown) - self.scrollUp, w, full) options:NSStringDrawingUsesLineFragmentOrigin context:nil];
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+enum { TIP_PUSH = 7 }; // notches past an edge (as win/panel.c's HIST_PUSH)
+- (void)scrollWheel:(NSEvent *)e {
+    CGFloat d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY : e.scrollingDeltaY * [self lineH];
+    if (d == 0) return;
+    BOOL atTop = self.scrollUp >= _scrollMax - 0.5, atEnd = self.scrollUp <= 0.5;
+    if ((d > 0 && atTop) || (d < 0 && atEnd)) { // pushing past an edge: a notch a line (or a wheel click)
+        int dir = d > 0 ? 1 : -1;
+        if (_pushDir != dir) { _pushDir = dir; _pushAcc = 0; }
+        _pushAcc += e.hasPreciseScrollingDeltas ? fabs(d) / [self lineH] : 1;
+        if (_pushAcc >= TIP_PUSH) { _pushAcc = 0; if (self.onPush) self.onPush(dir); }
+        return;
+    }
+    _pushAcc = 0;
+    self.scrollUp = fmax(0, fmin(self.scrollUp + d, _scrollMax));
+    [self setNeedsDisplay:YES];
 }
 @end
