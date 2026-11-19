@@ -407,6 +407,162 @@ static NSString *msg_text(const Session *s, NSString *field) {
     return [v isKindOfClass:[NSString class]] && [v length] ? v : nil;
 }
 
+// ---- the turns as Claude Code's terminal shows them (ported from win/panel.c chat_conv): your prompt, Claude's words
+// and the steps under each folded to a line, the step running now, the running line, the reply. The hook keeps the
+// last 5 turns in "turns" (the last one may be going on) and the step running now in "run". Marker lines for TipView:
+// \x01 your prompt, \x02 dim, \x03 the running line.
+static NSString *str_of(id v) { return [v isKindOfClass:[NSString class]] ? v : nil; }
+static void conv_put(NSMutableString *o, NSString *mark, NSString *text) {
+    for (NSString *l in [text componentsSeparatedByString:@"\n"]) [o appendFormat:@"%@%@\n", mark, l];
+}
+// a prompt that is the harness's own line (hook.py's HARNESS), kept as a turn by an older hook: never shown as yours
+static BOOL harness_p(NSString *p) {
+    NSString *t = [p stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    for (NSString *h in @[@"<command-", @"<local-command", @"<system-reminder>", @"<bash-", @"<task-notification", @"Caveat:", @"[Request interrupted"])
+        if ([t hasPrefix:h]) return YES;
+    return NO;
+}
+// as the terminal's input line shows it: each paste as "[Pasted text +12 lines] its first line"
+static NSString *prompt_shown(NSString *p) {
+    static NSRegularExpression *paste;
+    if (!paste) paste = [NSRegularExpression regularExpressionWithPattern:@"<pasted_content[^>]*>([\\s\\S]*?)(</pasted_content>|$)" options:0 error:NULL];
+    NSMutableString *o = [NSMutableString string];
+    __block NSUInteger at = 0;
+    [paste enumerateMatchesInString:p options:0 range:NSMakeRange(0, p.length) usingBlock:^(NSTextCheckingResult *m, NSMatchingFlags f, BOOL *stop) {
+        (void)f; (void)stop;
+        [o appendString:[p substringWithRange:NSMakeRange(at, m.range.location - at)]];
+        int lines = 0; NSString *first = nil;
+        for (NSString *l in [[p substringWithRange:[m rangeAtIndex:1]] componentsSeparatedByString:@"\n"]) {
+            NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (t.length) { lines++; if (!first) first = t.length > 200 ? [t substringToIndex:200] : t; }
+        }
+        if (o.length && ![o hasSuffix:@"\n"]) [o appendString:@"\n"];
+        [o appendFormat:@"[Pasted text +%d line%@%@]%@%@\n", lines, lines == 1 ? @"" : @"s", [m rangeAtIndex:2].length ? @"" : @" or more", first ? @" " : @"", first ?: @""];
+        at = NSMaxRange(m.range);
+    }];
+    [o appendString:[p substringFromIndex:at]];
+    return [o stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+// steps k0..k1 folded as the terminal folds them: "Ran 2 shell commands, read 3 files"
+static void steps_line(NSMutableString *o, NSArray *steps, NSUInteger k0, NSUInteger k1) {
+    static NSDictionary *cat;
+    static NSArray *one;
+    if (!cat) {
+        cat = @{@"Bash": @0, @"Read": @1, @"Grep": @2, @"Glob": @2, @"Edit": @3, @"MultiEdit": @3, @"NotebookEdit": @3, @"Write": @4,
+                @"WebFetch": @5, @"WebSearch": @6, @"Task": @7, @"Agent": @7, @"Skill": @8};
+        one = @[@"ran %d shell command", @"read %d file", @"searched for %d pattern", @"edited %d file", @"wrote %d file",
+                @"fetched %d page", @"searched the web %d time", @"ran %d agent", @"used %d skill"];
+    }
+    NSMutableArray *order = [NSMutableArray array]; // a category number, or another tool's name
+    NSCountedSet *n = [NSCountedSet set];
+    for (NSUInteger k = k0; k < k1; k++) {
+        NSString *tool = str_of(steps[k][0]);
+        id key = cat[tool] ?: tool;
+        if (!key) continue;
+        if (![n countForObject:key]) [order addObject:key];
+        [n addObject:key];
+    }
+    if (!order.count) return;
+    NSMutableArray *parts = [NSMutableArray array];
+    for (id key in order) {
+        int c = (int)[n countForObject:key];
+        if ([key isKindOfClass:[NSNumber class]]) [parts addObject:[[NSString stringWithFormat:one[[key intValue]], c] stringByAppendingString:c != 1 ? @"s" : @""]];
+        else [parts addObject:c > 1 ? [NSString stringWithFormat:@"used %@ %d times", key, c] : [NSString stringWithFormat:@"used %@", key]];
+    }
+    NSString *line = [parts componentsJoinedByString:@", "];
+    conv_put(o, @"\x02", [[[line substringToIndex:1] uppercaseString] stringByAppendingString:[line substringFromIndex:1]]);
+}
+// "✻ Pondering… (1m 5s · ↓ 2.1k tokens)": a word picked for the turn (Claude Code's own, claude-verbs.txt next to
+// the events file, read out of Claude Code by spinner_verbs.py), how long it has run, Claude's output tokens so far
+static NSString *running_line(NSDictionary *t, NSString *p) {
+    static NSArray *words;
+    if (!words) { // shortcut: read once, so a Claude Code update shows its new words after a restart
+        NSString *f = [[[NSString stringWithUTF8String:g_msg_dir] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"claude-verbs.txt"];
+        NSMutableArray *w = [NSMutableArray array];
+        for (NSString *l in [[NSString stringWithContentsOfFile:f encoding:NSUTF8StringEncoding error:NULL] ?: @"" componentsSeparatedByString:@"\n"])
+            if (l.length) [w addObject:l];
+        words = w.count ? w : @[@"Thinking", @"Working", @"Pondering", @"Musing", @"Brewing", @"Cooking", @"Crafting", @"Building"];
+    }
+    long long t0 = [t[@"t0"] longLongValue], k = [t[@"k"] longLongValue];
+    unsigned hv = (unsigned)t0 * 2654435761u; // the same word as the Windows panel picks
+    for (const char *c = p.UTF8String ?: ""; *c; c++) hv = hv * 31 + (unsigned char)*c;
+    NSMutableArray *tail = [NSMutableArray array];
+    long long el = t0 ? (long long)time(NULL) - t0 : -1;
+    if (el >= 3600) [tail addObject:[NSString stringWithFormat:@"%lldh %lldm", el / 3600, el / 60 % 60]];
+    else if (el >= 60) [tail addObject:[NSString stringWithFormat:@"%lldm %llds", el / 60, el % 60]];
+    else if (el >= 0) [tail addObject:[NSString stringWithFormat:@"%llds", el]];
+    if (k >= 1000) [tail addObject:[NSString stringWithFormat:@"↓ %.1fk tokens", k / 1000.0]];
+    else if (k > 0) [tail addObject:[NSString stringWithFormat:@"↓ %lld tokens", k]];
+    NSString *w = words[hv % words.count];
+    return tail.count ? [NSString stringWithFormat:@"✻ %@… (%@)", w, [tail componentsJoinedByString:@" · "]] : [NSString stringWithFormat:@"✻ %@…", w];
+}
+// a turn going on (or the latest): Claude's words, the steps after each folded, a task's notice, the step running now
+static void conv_steps(NSMutableString *o, NSDictionary *t, NSArray *run, int st) {
+    NSArray *steps = [t[@"s"] isKindOfClass:[NSArray class]] ? t[@"s"] : @[];
+    NSMutableArray *ok = [NSMutableArray array]; // [tool, what] pairs only
+    for (id s in steps) if ([s isKindOfClass:[NSArray class]] && [s count] && str_of(s[0])) [ok addObject:@[s[0], str_of([s count] > 1 ? s[1] : nil) ?: @""]];
+    NSUInteger ns = ok.count, tools = 0;
+    for (NSArray *s in ok) tools += ![s[0] hasPrefix:@"@"];
+    BOOL running = ns && run.count && ![ok[ns - 1][0] hasPrefix:@"@"];
+    NSUInteger end = running ? ns - 1 : ns, k0 = 0;
+    int n = [t[@"n"] intValue];
+    if (n > (int)tools) conv_put(o, @"\x02", [NSString stringWithFormat:@"%d earlier step%@", n - (int)tools, n - tools == 1 ? @"" : @"s"]);
+    for (NSUInteger k = 0; k <= end; k++) {
+        if (k < end && ![ok[k][0] hasPrefix:@"@"]) continue;
+        steps_line(o, ok, k0, k);
+        if (k == end) break;
+        NSString *tool = ok[k][0], *what = ok[k][1];
+        if ([tool isEqualToString:@"@say"]) conv_put(o, @"", what);
+        else if ([tool isEqualToString:@"@notice"]) conv_put(o, @"\x02", [@"Background task: " stringByAppendingString:what]);
+        else if ([tool isEqualToString:@"@you"]) conv_put(o, @"\x01", prompt_shown(what)); // a message you sent while it ran
+        k0 = k + 1;
+    }
+    if (running) conv_put(o, @"\x02", [NSString stringWithFormat:@"● %@(%@)", ok[ns - 1][0], ok[ns - 1][1]]);
+    if (st == ST_THINK || st == ST_WORK) conv_put(o, @"\x03", running_line(t, str_of(t[@"p"]) ?: @""));
+}
+// "12 steps · Bash 5 · Edit 4 · Read 3", the most used first
+static NSString *tally_of(NSDictionary *t) {
+    int n = [t[@"n"] intValue];
+    if (!n) return nil;
+    NSDictionary *c = [t[@"c"] isKindOfClass:[NSDictionary class]] ? t[@"c"] : @{};
+    NSArray *by = [c.allKeys sortedArrayUsingComparator:^NSComparisonResult(id a, id b) { return [c[b] compare:c[a]]; }];
+    NSMutableString *line = [NSMutableString stringWithFormat:@"%d step%@", n, n == 1 ? @"" : @"s"];
+    for (NSUInteger i = 0; i < by.count && i < 4; i++) [line appendFormat:@" · %@ %@", by[i], c[by[i]]];
+    return line;
+}
+// the box's text: the latest turn only (with your prompt: back past the harness's), or all the hook kept; nil when
+// the msg file has no turns (an older hook): then the last reply as before
+static NSString *conv_of(const Session *s, int st, BOOL all) {
+    NSDictionary *m = msg_of(s);
+    NSArray *turns = [m[@"turns"] isKindOfClass:[NSArray class]] ? m[@"turns"] : nil;
+    NSMutableArray *ts = [NSMutableArray array];
+    for (id t in turns) if ([t isKindOfClass:[NSDictionary class]]) [ts addObject:t];
+    if (ts.count > 5) [ts removeObjectsInRange:NSMakeRange(0, ts.count - 5)];
+    if (!ts.count) return nil;
+    NSArray *run = [m[@"run"] isKindOfClass:[NSArray class]] ? m[@"run"] : nil;
+    NSInteger n = (NSInteger)ts.count, i0 = all ? 0 : n - 1;
+    while (!all && i0 > 0 && harness_p(str_of(ts[i0][@"p"]) ?: @"")) i0--;
+    NSMutableString *o = [NSMutableString string];
+    for (NSInteger i = i0; i < n; i++) {
+        NSDictionary *t = ts[i];
+        NSString *p = str_of(t[@"p"]), *r = str_of(t[@"r"]);
+        BOOL live = i == n - 1 && !r.length, wrap = harness_p(p ?: @"");
+        NSUInteger nsteps = [t[@"s"] isKindOfClass:[NSArray class]] ? [t[@"s"] count] : 0;
+        if (i > i0 && !wrap) [o appendString:@"\n"];
+        if (wrap) { // its notice, one dim line: the summary if it has one
+            NSRange a = [p rangeOfString:@"<summary>"], b = [p rangeOfString:@"</summary>"];
+            NSString *sum = a.length && b.length && b.location > NSMaxRange(a) ? [p substringWithRange:NSMakeRange(NSMaxRange(a), MIN(100, b.location - NSMaxRange(a)))] : nil;
+            conv_put(o, @"\x02", sum ? [@"Background task: " stringByAppendingString:sum] : @"Background task");
+        } else if (p.length) conv_put(o, @"\x01", prompt_shown(p));
+        if (live || (i == n - 1 && nsteps)) conv_steps(o, t, run, st);
+        else if (tally_of(t)) conv_put(o, @"\x02", tally_of(t));
+        if (r.length) [o appendFormat:@"%@\n", r];
+    }
+    NSString *notice = msg_text(s, @"notice");
+    if (st == ST_WAIT && notice) [o appendFormat:@"\n%@\n", notice];
+    return [o stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+}
+
 // Keeps a Claude summary in the msg file, so replaying does not ask again. Written only if the reply is
 // still the one that was summarized (the hook clears "summary" whenever a new reply comes in).
 static NSMutableDictionary *g_demo_summary; // --demo has no msg files: kept in memory
@@ -1213,6 +1369,9 @@ static const float DRAG_TURN = 0.012f;  // radians per point dragged
 @property double last, emptySince;
 @property(strong) NSPanel *tip;
 @property(strong) TipView *tipView;
+@property(copy) NSString *tipSid; // whose turns the tooltip shows
+@property double tipSeenAt;         // the pointer was last on its core or on it
+@property BOOL tipAll;             // all the turns the hook kept, not only the latest (pushed past the top)
 @property(copy) NSString *hoverSid, *pttSid; // pttSid: the session push-to-talk is for
 @property double hoverSince, sizeCheck, pendingUntil;
 @property BOOL away, pttByHotkey;
@@ -1484,6 +1643,16 @@ static NSWindowCollectionBehavior follow_behavior(void) {
 
     NSString *sid = hit >= 0 ? [NSString stringWithUTF8String:room->s[hit].sid] : nil;
     if (![sid isEqualToString:self.hoverSid]) { self.hoverSid = sid; self.hoverSince = now; }
+    BOOL onTip = self.tip.visible && NSPointInRect([NSEvent mouseLocation], NSInsetRect(self.tip.frame, -12, -12));
+    if (hit >= 0 || onTip) self.tipSeenAt = now;
+    if (hit < 0 && self.tip.visible && now - self.tipSeenAt < 0.5) { // on the tooltip, or on the way over to it (to scroll it): it stays
+        Session *s = session_by_sid(self.tipSid);
+        if (s) {
+            NSRect r = [self.view coreRect:(int)(s - room->s)];
+            [self showTipFor:s at:[self.view convertPoint:NSMakePoint(NSMidX(r), NSMidY(r)) toView:nil] now:now];
+            return;
+        }
+    }
     if (hit < 0 || now - self.hoverSince < 0.3) { [self.tip orderOut:nil]; return; } // a short pause before the tooltip
     [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
     if (!room->s[hit].sub) room->s[hit].unread = 0; // its reply is in the tooltip, so it is seen: READY ends (once its pieces are home)
@@ -1589,13 +1758,17 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
         self.tip = [self newTipPanel:&v];
         v.maxBodyLines = (int)lround(16 * g_tip_size);
         self.tipView = v;
+        self.tip.ignoresMouseEvents = NO; // the wheel over it scrolls the turns
+        __weak typeof(self) me = self;
+        v.onPush = ^(int dir) { me.tipAll = dir > 0; };
     }
+    if (!self.tip.visible || ![self.tipSid isEqualToString:sid_of(s)]) { self.tipSid = sid_of(s); self.tipAll = NO; self.tipView.scrollUp = 0; }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
     NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
     if (s->unread) title = [title stringByAppendingString:@" · new reply"];
     if (g_single && g_focus_pinned && [g_focus isEqualToString:sid_of(s)]) title = [title stringByAppendingString:@" · pinned"];
     int st = session_shown(s, now);
-    NSString *body = (st == ST_WAIT ? msg_text(s, @"notice") : nil) ?: msg_text(s, @"reply") ?: @"(no reply yet)";
+    NSString *body = conv_of(s, s->state, self.tipAll) ?: (st == ST_WAIT ? msg_text(s, @"notice") : nil) ?: msg_text(s, @"reply") ?: @"(no reply yet)";
     Col c = s->aura_a > 0.01f ? s->aura : s->cur.eh; // single core: the session's own colour, else its state colour
     self.tipView.accent = [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
     if (![title isEqualToString:self.tipView.title] || ![body isEqualToString:self.tipView.body] || !self.tip.visible) {
