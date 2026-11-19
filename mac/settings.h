@@ -29,7 +29,7 @@ BOOL hex_light(unsigned rgb); // a light colour, that wants dark text on it
 - (void)close;
 @property(readonly) BOOL visible;
 - (void)changed;                      // a value changed elsewhere (the menu, a reset): draw again
-- (void)showPage:(int)page;            // 0 General, 1 Motions
+- (void)showPage:(int)page;            // 0 General, 1 Motions, 2 Chat
 - (void)showState:(int)st;             // the preview's main core in this state (on the Motions page: its row)
 - (BOOL)saveShot:(NSString *)path;    // the window as a PNG (--settings-shot)
 @end

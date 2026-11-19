@@ -4,7 +4,7 @@
 #import "tip.h"
 
 static const CGFloat PAD = 11, BAR = 3, GAP = 6;
-#define MAXW (self.maxWidth > 0 ? self.maxWidth : fmax(460, [self size] * 36) * (self.sizeK > 0 ? self.sizeK : 1)) /* about the same line length at any font size */
+#define MAXW (self.cols > 0 ? ceil(self.cols * [@"0" sizeWithAttributes:@{NSFontAttributeName: [self bodyFont]}].width) : fmax(460, [self size] * 36))
 
 @implementation TipView {
     CGFloat _scrollMax, _pushAcc; // how far the body can scroll; notches pushed past an edge so far
@@ -175,9 +175,13 @@ static NSRegularExpression *re(NSString *p) { return [NSRegularExpression regula
     NSRectClip(shown);
     [body drawWithRect:NSMakeRect(x, NSMinY(shown) - self.scrollUp, w, full) options:NSStringDrawingUsesLineFragmentOrigin context:nil];
     [NSGraphicsContext restoreGraphicsState];
+    if (self.showBar) { // where in the text the box is: a thumb down the right edge
+        CGFloat th2 = fmax(16, bh * bh / full), ty = NSMinY(shown) + (bh - th2) * (self.scrollUp / _scrollMax);
+        [[[self textColor] colorWithAlphaComponent:0.35] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(NSMaxX(self.bounds) - 6, ty, 3, th2) xRadius:1.5 yRadius:1.5] fill];
+    }
 }
 
-enum { TIP_PUSH = 7 }; // notches past an edge (as win/panel.c's HIST_PUSH)
 - (void)scrollWheel:(NSEvent *)e {
     CGFloat d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY : e.scrollingDeltaY * [self lineH];
     if (d == 0) return;
@@ -186,7 +190,7 @@ enum { TIP_PUSH = 7 }; // notches past an edge (as win/panel.c's HIST_PUSH)
         int dir = d > 0 ? 1 : -1;
         if (_pushDir != dir) { _pushDir = dir; _pushAcc = 0; }
         _pushAcc += e.hasPreciseScrollingDeltas ? fabs(d) / [self lineH] : 1;
-        if (_pushAcc >= TIP_PUSH) { _pushAcc = 0; if (self.onPush) self.onPush(dir); }
+        if (_pushAcc >= (self.pushNeed > 0 ? self.pushNeed : 20)) { _pushAcc = 0; if (self.onPush) self.onPush(dir); }
         return;
     }
     _pushAcc = 0;

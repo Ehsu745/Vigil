@@ -37,18 +37,35 @@ static int g_demo_n, g_exit_empty, g_always, g_fit_pane, g_all_spaces;
 static const char *g_reply_shot; // --reply-shot FILE: open a reply box, save it with its tooltip as a PNG, quit
 static float g_glow = 1.0f, g_core = 0.35f;
 // Settings window (Look, Motion, Replies): how big the cores are, the small cores, the text box's look
-static float g_scale = 1, g_tip_size = 1;       // Size on screen; Box size
+static float g_scale = 1;                       // Size on screen
 static int g_others = 1;                        // single-core mode: the other sessions as small cores around the main one
 static float g_gravity = 2;                     // how hard the main core holds the small ones on their orbit (one of GRAVITIES)
 static double g_egg_chance = 0.12;              // the easter egg: the chance a round of Skein knocks into a small core (--egg: always)
 static int g_orbit3d = 1;                       // the orbit drawn tilted, swaying on its own; flat while the pointer is near
 static float g_orbit_tilt = 55;                 // the most it tilts, degrees (Settings > Look > Tilt)
-static int g_tip_mono, g_tip_middle;            // the text box in the terminal's face; in the middle of the screen
+static int g_tip_mono;                          // the text box in the terminal's face
+// Settings > Chat (as the Windows panel's Chat and Box pages): what the reply box shows and how it opens
+static int g_chat_cols = 60, g_chat_rows = 16;  // Width: characters across at most; Height: lines before it scrolls
+static int g_place;                             // Place: 0 Auto (left of the panel, else right), 1 left, 2 right, 3 below, 4 above, 5 middle
+static int g_hover_pause = 3;                   // Hover pause: tenths of a second on a core before its box opens
+static int g_chat_pop;                          // New reply: a finished reply opens its box for POP_FOR s, no hover needed
+static int g_chat_bar = 1;                      // Scroll bar: down the box's right edge when it scrolls
+static int g_push_need = 20;                    // Push: notches past an edge that switch between the latest turn and all
+static int g_turns_all;                         // Turns: the box opens on every turn kept, else the latest only
+static int g_steps_mode;                        // Steps: 0 folded to a line, 1 every step, 2 none
+enum { POP_FOR = 10 };
+static struct { NSString *key; int *v, lo, hi, launch; } CHAT_INTS[] = {
+    {@"chatCols", &g_chat_cols, 40, 160, 0}, {@"chatRows", &g_chat_rows, 8, 60, 0}, {@"place", &g_place, 0, 5, 0},
+    {@"hoverPause", &g_hover_pause, 0, 20, 0}, {@"chatPop", &g_chat_pop, 0, 1, 0}, {@"chatBar", &g_chat_bar, 0, 1, 0},
+    {@"push", &g_push_need, 4, 40, 0}, {@"turnsAll", &g_turns_all, 0, 1, 0}, {@"steps", &g_steps_mode, 0, 2, 0},
+};
+enum { CHAT_N = sizeof CHAT_INTS / sizeof *CHAT_INTS };
+static int chat_int(NSString *key) { for (int i = 0; i < CHAT_N; i++) if ([CHAT_INTS[i].key isEqualToString:key]) return i; return -1; }
 static int g_tip_bg, g_text_col;                // indexes into TIP_BGS / TEXT_COLS (5: the custom colour)
 static unsigned g_tip_custom = 0x18191E, g_text_custom = 0xE6E8F0;
 static int g_wheel_spin;                        // what ⌥-scroll on a core does: roll, roll back, turn, turn back, off
 static const char *g_settings_shot;             // --settings-shot FILE: open the Settings window, save it as a PNG, quit
-static int g_settings_open;                     // --settings [motions|ready]: open it at start (1 General, 2 Motions, 3 Motions on Ready)
+static int g_settings_open;                     // --settings [motions|ready|chat]: open it at start (1 General, 2 Motions, 3 Motions on Ready, 4 Chat)
 static int g_smooth = SM_BALANCED; // Settings > Smoothness: how often the pictures are made (SMOOTH in session.c)
 static int g_ready_hot; // a core is READY: its thrown pieces want every frame
 // the panel's clock: 30 a second as before, 60 for Smooth and Max, and while a core is READY
@@ -141,7 +158,7 @@ static void pointer_visible(BOOL on) {
 // wins over the launch options; "Use launch options again" forgets it. g_launch is what the options said.
 static struct {
     int voice, auto_speak, summarize, confirm_send, labels_hover; CGFloat font_size; float glow; char shape[16], frame[16]; double away;
-    float core, scale, tip_size, gravity, orbit_tilt; int orbit3d, others, tip_mono, tip_middle, tip_bg, text_col, wheel_spin, smooth, all_spaces, always; unsigned tip_custom, text_custom;
+    float core, scale, gravity, orbit_tilt; int orbit3d, others, tip_mono, tip_bg, text_col, wheel_spin, smooth, all_spaces, always; unsigned tip_custom, text_custom;
 } g_launch;
 // Settings > Follow me: 0 stays in its Space, 1 every Space while iTerm2 is in front (--all-spaces), 2 every Space over any app (--always too)
 static int follow_mode(void) { return g_all_spaces ? (g_always ? 2 : 1) : 0; }
@@ -151,8 +168,9 @@ static void remember_launch(void) {
     g_launch.smooth = g_smooth;
     g_launch.all_spaces = g_all_spaces; g_launch.always = g_always;
     g_launch.labels_hover = g_labels_hover; g_launch.font_size = g_font_size; g_launch.glow = g_glow; g_launch.away = g_away_after;
-    g_launch.gravity = g_gravity; g_launch.orbit3d = g_orbit3d; g_launch.orbit_tilt = g_orbit_tilt; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.tip_size = g_tip_size; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
-    g_launch.tip_middle = g_tip_middle; g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
+    g_launch.gravity = g_gravity; g_launch.orbit3d = g_orbit3d; g_launch.orbit_tilt = g_orbit_tilt; g_launch.core = g_core; g_launch.scale = g_scale; g_launch.others = g_others; g_launch.tip_mono = g_tip_mono;
+    for (int i = 0; i < CHAT_N; i++) CHAT_INTS[i].launch = *CHAT_INTS[i].v;
+    g_launch.tip_bg = g_tip_bg; g_launch.text_col = g_text_col; g_launch.wheel_spin = g_wheel_spin;
     g_launch.tip_custom = g_tip_custom; g_launch.text_custom = g_text_custom;
     snprintf(g_launch.shape, sizeof g_launch.shape, "%s", g_shape_name);
     snprintf(g_launch.frame, sizeof g_launch.frame, "%s", g_frame);
@@ -162,8 +180,9 @@ static void restore_launch(void) {
     g_smooth = g_launch.smooth;
     g_all_spaces = g_launch.all_spaces; g_always = g_launch.always;
     g_labels_hover = g_launch.labels_hover; g_font_size = g_launch.font_size; g_glow = g_launch.glow; g_away_after = g_launch.away;
-    g_gravity = g_launch.gravity; g_orbit3d = g_launch.orbit3d; g_orbit_tilt = g_launch.orbit_tilt; g_core = g_launch.core; g_scale = g_launch.scale; g_tip_size = g_launch.tip_size; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
-    g_tip_middle = g_launch.tip_middle; g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
+    g_gravity = g_launch.gravity; g_orbit3d = g_launch.orbit3d; g_orbit_tilt = g_launch.orbit_tilt; g_core = g_launch.core; g_scale = g_launch.scale; g_others = g_launch.others; g_tip_mono = g_launch.tip_mono;
+    for (int i = 0; i < CHAT_N; i++) *CHAT_INTS[i].v = CHAT_INTS[i].launch;
+    g_tip_bg = g_launch.tip_bg; g_text_col = g_launch.text_col; g_wheel_spin = g_launch.wheel_spin;
     g_tip_custom = g_launch.tip_custom; g_text_custom = g_launch.text_custom;
     motion_map_default(MOTION_MAP); // the motion map has no launch option: back to its defaults
     READY_ATKS = (1u << RA_N) - 2;  // nor READY's attacks: all of them
@@ -185,13 +204,14 @@ static void load_settings(void) {
     if ((n = j[@"away"])) g_away_after = n.doubleValue;
     if ((n = j[@"core"]) && n.floatValue > 0.05f && n.floatValue < 0.9f) g_core = n.floatValue;
     if ((n = j[@"scale"]) && n.floatValue >= 0.5f && n.floatValue <= 2.5f) g_scale = n.floatValue;
-    if ((n = j[@"tipSize"]) && n.floatValue >= 0.5f && n.floatValue <= 2) g_tip_size = n.floatValue;
     if ((n = j[@"others"])) g_others = n.boolValue;
     if ((n = j[@"gravity"]) && n.floatValue >= 0.5f && n.floatValue <= 8) g_gravity = n.floatValue;
     if ((n = j[@"orbit3d"])) g_orbit3d = n.boolValue;
     if ((n = j[@"orbitTilt"]) && n.floatValue >= 0 && n.floatValue <= 80) g_orbit_tilt = n.floatValue;
     if ((n = j[@"tipMono"])) g_tip_mono = n.boolValue;
-    if ((n = j[@"tipMiddle"])) g_tip_middle = n.boolValue;
+    if ((n = j[@"tipMiddle"]) && n.boolValue) g_place = 5; // (an older file: Opens > Middle)
+    for (int i = 0; i < CHAT_N; i++)
+        if ((n = j[CHAT_INTS[i].key]) && [n isKindOfClass:[NSNumber class]] && n.intValue >= CHAT_INTS[i].lo && n.intValue <= CHAT_INTS[i].hi) *CHAT_INTS[i].v = n.intValue;
     if ((n = j[@"tipColor"]) && n.intValue >= 0 && n.intValue < 6) g_tip_bg = n.intValue;
     if ((n = j[@"textColor"]) && n.intValue >= 0 && n.intValue < 6) g_text_col = n.intValue;
     if ((n = j[@"tipCustom"]) && n.unsignedIntValue <= 0xFFFFFF) g_tip_custom = n.unsignedIntValue;
@@ -221,14 +241,15 @@ static void load_settings(void) {
 static void save_settings(void) {
     NSMutableArray *rt = [NSMutableArray array], *act = [NSMutableArray array];
     for (int i = 0; i < ST_N; i++) { [rt addObject:@(MOTION_MAP[i].rt)]; [act addObject:@(MOTION_MAP[i].act)]; }
-    NSDictionary *j = @{@"mapRoutines": rt, @"mapActions": act, @"readyAttacks": @(READY_ATKS), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
+    NSMutableDictionary *j = [@{@"mapRoutines": rt, @"mapActions": act, @"readyAttacks": @(READY_ATKS), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0), @"summarize": @(g_summarize_claude != 0),
                         @"confirmSend": @(g_confirm_send != 0), @"labelsHover": @(g_labels_hover != 0), @"fontSize": @(g_font_size),
                         @"glow": @(g_glow), @"shape": @(g_shape_name), @"away": @(g_away_after), @"frame": @(g_frame),
-                        @"core": @(g_core), @"scale": @(g_scale), @"tipSize": @(g_tip_size), @"others": @(g_others != 0), @"gravity": @(g_gravity),
+                        @"core": @(g_core), @"scale": @(g_scale), @"others": @(g_others != 0), @"gravity": @(g_gravity),
                         @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt),
-                        @"tipMono": @(g_tip_mono != 0), @"tipMiddle": @(g_tip_middle != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
+                        @"tipMono": @(g_tip_mono != 0), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col),
                         @"tipCustom": @(g_tip_custom), @"textCustom": @(g_text_custom), @"wheelSpin": @(g_wheel_spin), @"follow": @(follow_mode()),
-                        @"smooth": @(SMOOTH_NAME[g_smooth])};
+                        @"smooth": @(SMOOTH_NAME[g_smooth])} mutableCopy];
+    for (int i = 0; i < CHAT_N; i++) j[CHAT_INTS[i].key] = @(*CHAT_INTS[i].v);
     [[NSFileManager defaultManager] createDirectoryAtPath:[settings_file() stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:NULL];
     [[NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted error:NULL] writeToFile:settings_file() atomically:YES];
@@ -472,6 +493,13 @@ static void steps_line(NSMutableString *o, NSArray *steps, NSUInteger k0, NSUInt
     NSString *line = [parts componentsJoinedByString:@", "];
     conv_put(o, @"\x02", [[[line substringToIndex:1] uppercaseString] stringByAppendingString:[line substringFromIndex:1]]);
 }
+// Settings > Chat > Steps: the steps k0..k1 folded to one line, each on its own ("● Bash(make)"), or none
+static void steps_put(NSMutableString *o, NSArray *steps, NSUInteger k0, NSUInteger k1) {
+    if (g_steps_mode == 0) steps_line(o, steps, k0, k1);
+    else if (g_steps_mode == 1)
+        for (NSUInteger k = k0; k < k1; k++)
+            if (![steps[k][0] hasPrefix:@"@"]) conv_put(o, @"\x02", [NSString stringWithFormat:@"● %@(%@)", steps[k][0], steps[k][1]]);
+}
 // "✻ Pondering… (1m 5s · ↓ 2.1k tokens)": a word picked for the turn (Claude Code's own, claude-verbs.txt next to
 // the events file, read out of Claude Code by spinner_verbs.py), how long it has run, Claude's output tokens so far
 static NSString *running_line(NSDictionary *t, NSString *p) {
@@ -497,19 +525,24 @@ static NSString *running_line(NSDictionary *t, NSString *p) {
     return tail.count ? [NSString stringWithFormat:@"✻ %@… (%@)", w, [tail componentsJoinedByString:@" · "]] : [NSString stringWithFormat:@"✻ %@…", w];
 }
 // a turn going on (or the latest): Claude's words, the steps after each folded, a task's notice, the step running now
+// a turn's steps as [tool, what] pairs of strings (the hook's, checked)
+static NSArray *steps_of(NSDictionary *t) {
+    NSMutableArray *ok = [NSMutableArray array];
+    for (id s in [t[@"s"] isKindOfClass:[NSArray class]] ? t[@"s"] : @[])
+        if ([s isKindOfClass:[NSArray class]] && [s count] && str_of(s[0])) [ok addObject:@[s[0], str_of([s count] > 1 ? s[1] : nil) ?: @""]];
+    return ok;
+}
 static void conv_steps(NSMutableString *o, NSDictionary *t, NSArray *run, int st) {
-    NSArray *steps = [t[@"s"] isKindOfClass:[NSArray class]] ? t[@"s"] : @[];
-    NSMutableArray *ok = [NSMutableArray array]; // [tool, what] pairs only
-    for (id s in steps) if ([s isKindOfClass:[NSArray class]] && [s count] && str_of(s[0])) [ok addObject:@[s[0], str_of([s count] > 1 ? s[1] : nil) ?: @""]];
+    NSArray *ok = steps_of(t);
     NSUInteger ns = ok.count, tools = 0;
     for (NSArray *s in ok) tools += ![s[0] hasPrefix:@"@"];
     BOOL running = ns && run.count && ![ok[ns - 1][0] hasPrefix:@"@"];
     NSUInteger end = running ? ns - 1 : ns, k0 = 0;
     int n = [t[@"n"] intValue];
-    if (n > (int)tools) conv_put(o, @"\x02", [NSString stringWithFormat:@"%d earlier step%@", n - (int)tools, n - tools == 1 ? @"" : @"s"]);
+    if (n > (int)tools && g_steps_mode != 2) conv_put(o, @"\x02", [NSString stringWithFormat:@"%d earlier step%@", n - (int)tools, n - tools == 1 ? @"" : @"s"]);
     for (NSUInteger k = 0; k <= end; k++) {
         if (k < end && ![ok[k][0] hasPrefix:@"@"]) continue;
-        steps_line(o, ok, k0, k);
+        steps_put(o, ok, k0, k);
         if (k == end) break;
         NSString *tool = ok[k][0], *what = ok[k][1];
         if ([tool isEqualToString:@"@say"]) conv_put(o, @"", what);
@@ -517,7 +550,7 @@ static void conv_steps(NSMutableString *o, NSDictionary *t, NSArray *run, int st
         else if ([tool isEqualToString:@"@you"]) conv_put(o, @"\x01", prompt_shown(what)); // a message you sent while it ran
         k0 = k + 1;
     }
-    if (running) conv_put(o, @"\x02", [NSString stringWithFormat:@"● %@(%@)", ok[ns - 1][0], ok[ns - 1][1]]);
+    if (running && g_steps_mode != 2) conv_put(o, @"\x02", [NSString stringWithFormat:@"● %@(%@)", ok[ns - 1][0], ok[ns - 1][1]]);
     if (st == ST_THINK || st == ST_WORK) conv_put(o, @"\x03", running_line(t, str_of(t[@"p"]) ?: @""));
 }
 // "12 steps · Bash 5 · Edit 4 · Read 3", the most used first
@@ -555,7 +588,14 @@ static NSString *conv_of(const Session *s, int st, BOOL all) {
             conv_put(o, @"\x02", sum ? [@"Background task: " stringByAppendingString:sum] : @"Background task");
         } else if (p.length) conv_put(o, @"\x01", prompt_shown(p));
         if (live || (i == n - 1 && nsteps)) conv_steps(o, t, run, st);
-        else if (tally_of(t)) conv_put(o, @"\x02", tally_of(t));
+        else if (g_steps_mode == 1 && nsteps) { // done: every step kept, not the tally
+            NSArray *ok = steps_of(t);
+            int tools = 0;
+            for (NSArray *x in ok) tools += ![x[0] hasPrefix:@"@"];
+            int more = [t[@"n"] intValue] - tools;
+            if (more > 0) conv_put(o, @"\x02", [NSString stringWithFormat:@"%d earlier step%@", more, more == 1 ? @"" : @"s"]);
+            steps_put(o, ok, 0, ok.count);
+        } else if (g_steps_mode != 2 && tally_of(t)) conv_put(o, @"\x02", tally_of(t));
         if (r.length) [o appendFormat:@"%@\n", r];
     }
     NSString *notice = msg_text(s, @"notice");
@@ -1545,7 +1585,7 @@ static NSWindowCollectionBehavior follow_behavior(void) {
     }
     [self onSignal:SIGTERM handler:^{ [NSApp terminate:nil]; }];
     if (g_reply_shot) [self performSelector:@selector(replyShot) withObject:nil afterDelay:2.0];
-    if (g_settings_open || g_settings_shot) { [self openSettings]; [self.settings showPage:g_settings_open >= 2]; if (g_settings_open == 3) [self.settings showState:ST_READY]; }
+    if (g_settings_open || g_settings_shot) { [self openSettings]; [self.settings showPage:g_settings_open == 4 ? 2 : g_settings_open >= 2]; if (g_settings_open == 3) [self.settings showState:ST_READY]; }
     if (g_settings_shot) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self.settings saveShot:@(g_settings_shot)];
         [NSApp terminate:nil];
@@ -1632,6 +1672,8 @@ static NSWindowCollectionBehavior follow_behavior(void) {
     [self.view satsTakeMouse:hit >= 0 ? sid_of(&room->s[hit]) : nil];
     BOOL ignore = hit < 0 && !self.view.busy; // a drag or press keeps going when the mouse leaves the core
     if (self.panel.ignoresMouseEvents != ignore) self.panel.ignoresMouseEvents = ignore;
+    // a reply box left on another Space would keep every other tooltip away here: it closes, its draft kept
+    if (self.reply.open && !self.reply.view.window.isOnActiveSpace) [self.reply close];
     if (self.reply.open) { // while a reply is typed, the tooltip of its session stays up above it
         Session *s = session_by_sid(self.reply.sid);
         if (!s) { [self.reply close]; return; }
@@ -1653,7 +1695,15 @@ static NSWindowCollectionBehavior follow_behavior(void) {
             return;
         }
     }
-    if (hit < 0 || now - self.hoverSince < 0.3) { [self.tip orderOut:nil]; return; } // a short pause before the tooltip
+    if (hit < 0 && g_chat_pop && !self.view.busy) // Settings > Chat > New reply: a reply just in opens its box for a while
+        for (int i = 0; i < room->n; i++) {
+            Session *s = &room->s[i];
+            if (!s->unread || s->sub || now - s->burst_at > POP_FOR) continue;
+            NSRect r = [self.view coreRect:i];
+            [self showTipFor:s at:[self.view convertPoint:NSMakePoint(NSMidX(r), NSMidY(r)) toView:nil] now:now];
+            return;
+        }
+    if (hit < 0 || now - self.hoverSince < g_hover_pause / 10.0) { [self.tip orderOut:nil]; return; } // Settings > Chat > Hover pause
     [self showTipFor:&room->s[hit] at:[self.view convertPoint:center toView:nil] now:now];
     if (!room->s[hit].sub) room->s[hit].unread = 0; // its reply is in the tooltip, so it is seen: READY ends (once its pieces are home)
     else if (room->s[hit].sub_done > 0) { room->s[hit].sub_seen = 1; room->s[hit].unread = 0; } // a finished subagent's: it goes once the pointer leaves
@@ -1722,11 +1772,13 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     v.monoName = g_font_name;
     v.boxColor = hex_color(tip_bg_hex());
     v.inkColor = tip_ink();
-    v.sizeK = g_tip_size;
+    v.cols = g_chat_cols;
+    v.pushNeed = g_push_need;
+    v.showBar = g_chat_bar;
     v.title = nil; // measures itself again
 }
 - (void)styleTips {
-    if (self.tipView) { [self styleTip:self.tipView]; self.tipView.maxBodyLines = (int)lround(16 * g_tip_size); }
+    if (self.tipView) { [self styleTip:self.tipView]; self.tipView.maxBodyLines = g_chat_rows; }
     if (self.previewView) [self styleTip:self.previewView];
     self.reply.fontSize = g_font_size;
     self.reply.boxColor = hex_color(tip_bg_hex());
@@ -1756,13 +1808,12 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     if (!self.tip) {
         TipView *v;
         self.tip = [self newTipPanel:&v];
-        v.maxBodyLines = (int)lround(16 * g_tip_size);
+        v.maxBodyLines = g_chat_rows;
         self.tipView = v;
-        self.tip.ignoresMouseEvents = NO; // the wheel over it scrolls the turns
         __weak typeof(self) me = self;
         v.onPush = ^(int dir) { me.tipAll = dir > 0; };
     }
-    if (!self.tip.visible || ![self.tipSid isEqualToString:sid_of(s)]) { self.tipSid = sid_of(s); self.tipAll = NO; self.tipView.scrollUp = 0; }
+    if (!self.tip.visible || ![self.tipSid isEqualToString:sid_of(s)]) { self.tipSid = sid_of(s); self.tipAll = g_turns_all; self.tipView.scrollUp = 0; }
     NSString *name = [NSString stringWithUTF8String:s->name[0] ? s->name : "claude"] ?: @"claude";
     NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state_line(s, session_shown(s, now))];
     if (s->unread) title = [title stringByAppendingString:@" · new reply"];
@@ -1776,17 +1827,24 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
         self.tipView.body = body;
         // to the left of the panel, level with the core, kept on the screen (or in the middle of it: Settings > Opens)
         NSRect vis = (self.panel.screen ?: [NSScreen mainScreen]).visibleFrame;
-        self.tipView.maxWidth = g_tip_middle ? fmin(fmax(fmax(460, g_font_size * 36) * g_tip_size, vis.size.width * 0.45 * g_tip_size), 1000 * g_tip_size) : 0;
         NSSize sz = [self.tipView fit];
         NSPoint at = [self.panel convertPointToScreen:center];
-        NSRect f = NSMakeRect(NSMinX(self.panel.frame) - sz.width - 8, at.y - sz.height / 2, sz.width, sz.height);
-        if (g_tip_middle) f.origin = NSMakePoint(NSMidX(vis) - sz.width / 2, NSMidY(vis) - sz.height / 2);
+        const Room *room = shown_room(); // the core itself, for Below and Above
+        NSRect core = NSMakeRect(at.x - 30, at.y - 30, 60, 60);
+        if (s >= room->s && s < room->s + room->n) core = [self.panel convertRectToScreen:[self.view convertRect:[self.view coreRect:(int)(s - room->s)] toView:nil]];
+        NSRect f = NSMakeRect(NSMinX(self.panel.frame) - sz.width - 8, at.y - sz.height / 2, sz.width, sz.height); // left of the panel, level with the core
+        int place = g_place ? g_place : NSMinX(f) >= NSMinX(vis) ? 1 : 2; // Auto: left if it fits, else right
+        if (place == 2) f.origin.x = NSMaxX(self.panel.frame) + 8;
+        else if (place == 3 || place == 4) f.origin = NSMakePoint(NSMidX(core) - sz.width / 2, place == 3 ? NSMinY(core) - sz.height - 8 : NSMaxY(core) + 8);
+        else if (place == 5) f.origin = NSMakePoint(NSMidX(vis) - sz.width / 2, NSMidY(vis) - sz.height / 2);
+        if (NSMaxX(f) > NSMaxX(vis)) f.origin.x = NSMaxX(vis) - sz.width;
         if (NSMinX(f) < NSMinX(vis)) f.origin.x = NSMinX(vis);
         if (NSMaxY(f) > NSMaxY(vis)) f.origin.y = NSMaxY(vis) - sz.height;
         if (NSMinY(f) < NSMinY(vis)) f.origin.y = NSMinY(vis);
         BOOL typing = self.reply.open && [self.reply.sid isEqualToString:sid_of(s)];
         if (typing && NSMinY(f) < NSMinY(vis) + self.reply.height + 6) f.origin.y = NSMinY(vis) + self.reply.height + 6; // room for the box
         [self.tip setFrame:f display:YES];
+        self.tip.ignoresMouseEvents = NSIntersectsRect(f, self.panel.frame); // over the cores (Below, Above): clicks go through to them, so no scrolling there
     }
     [self.tipView setNeedsDisplay:YES];
     if (!self.tip.visible) [self.tip orderFrontRegardless];
@@ -2316,11 +2374,12 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
 - (id)setting:(NSString *)key {
     NSDictionary *d = @{@"shape": @(g_shape_name), @"glow": @(g_glow), @"scale": @(g_scale), @"core": @(g_core), @"frame": @(g_frame),
                         @"others": @(g_others != 0), @"gravity": @(g_gravity), @"orbit3d": @(g_orbit3d != 0), @"orbitTilt": @(g_orbit_tilt), @"wheelSpin": @(g_wheel_spin), @"tipMono": @(g_tip_mono != 0), @"fontSize": @(g_font_size),
-                        @"tipSize": @(g_tip_size), @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
-                        @"textCustom": @(g_text_custom), @"follow": @(follow_mode()), @"tipMiddle": @(g_tip_middle != 0), @"labelsHover": @(g_labels_hover != 0),
+                        @"tipColor": @(g_tip_bg), @"textColor": @(g_text_col), @"tipCustom": @(g_tip_custom),
+                        @"textCustom": @(g_text_custom), @"follow": @(follow_mode()), @"labelsHover": @(g_labels_hover != 0),
                         @"away": @(g_away_after), @"voice": @(g_voice != 0), @"autoSpeak": @(g_auto_speak != 0),
                         @"summarize": @(g_summarize_claude != 0), @"confirmSend": @(g_confirm_send != 0), @"fontName": g_font_name};
-    return d[key];
+    int c = chat_int(key);
+    return c >= 0 ? @(*CHAT_INTS[c].v) : d[key];
 }
 - (void)chooseSetting:(NSString *)key value:(id)value { [self applySetting:key value:value]; save_settings(); }
 - (BOOL)settingsSaved { return [[NSFileManager defaultManager] fileExistsAtPath:settings_file()]; }
@@ -2351,11 +2410,10 @@ static NSColor *tip_ink(void) { return g_text_col == 5 ? hex_color(g_text_custom
     else if ([key isEqualToString:@"orbitTilt"]) g_orbit_tilt = [v floatValue];
     else if ([key isEqualToString:@"wheelSpin"]) g_wheel_spin = [v intValue];
     else if ([key isEqualToString:@"scale"]) { g_scale = [v floatValue]; [self place]; }
-    else if ([key isEqualToString:@"tipMono"] || [key isEqualToString:@"tipSize"] || [key isEqualToString:@"tipMiddle"] || [key isEqualToString:@"tipColor"]
+    else if ([key isEqualToString:@"tipMono"] || [key isEqualToString:@"tipColor"] || chat_int(key) >= 0
              || [key isEqualToString:@"textColor"] || [key isEqualToString:@"tipCustom"] || [key isEqualToString:@"textCustom"]) {
-        if ([key isEqualToString:@"tipMono"]) g_tip_mono = [v boolValue];
-        else if ([key isEqualToString:@"tipSize"]) g_tip_size = [v floatValue];
-        else if ([key isEqualToString:@"tipMiddle"]) g_tip_middle = [v boolValue];
+        if (chat_int(key) >= 0) *CHAT_INTS[chat_int(key)].v = [v intValue];
+        else if ([key isEqualToString:@"tipMono"]) g_tip_mono = [v boolValue];
         else if ([key isEqualToString:@"tipColor"]) g_tip_bg = [v intValue];
         else if ([key isEqualToString:@"textColor"]) g_text_col = [v intValue];
         else if ([key isEqualToString:@"tipCustom"]) g_tip_custom = [v unsignedIntValue];
@@ -2692,7 +2750,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(a, "--reply-shot") && v) { g_reply_shot = v; i++; }
             else if (!strcmp(a, "--settings-shot") && v) { g_settings_shot = v; i++; }
             else if (!strcmp(a, "--egg")) g_egg_chance = 1;
-            else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } else if (v && !strcmp(v, "ready")) { g_settings_open = 3; i++; } }
+            else if (!strcmp(a, "--settings")) { g_settings_open = 1; if (v && !strcmp(v, "motions")) { g_settings_open = 2; i++; } else if (v && !strcmp(v, "ready")) { g_settings_open = 3; i++; } else if (v && !strcmp(v, "chat")) { g_settings_open = 4; i++; } }
             else if (!strcmp(a, "--labels") && v) { g_labels_hover = !strcmp(v, "hover"); i++; }
             else if (!strcmp(a, "--single")) g_single = 1;
             else if (!strcmp(a, "--mode-hotkey") && v) { g_mode_hotkey = v; i++; }

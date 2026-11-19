@@ -36,10 +36,16 @@ static NSDictionary<NSString *, NSArray *> *choices(void) {
         @"wheelSpin": @[@0, @1, @2, @3, @4],
         @"tipMono": @[@YES, @NO],
         @"fontSize": @[@12, @14, @16, @20, @24],
-        @"tipSize": @[@0.75, @1.0, @1.35, @1.75],
         @"tipColor": @[@0, @1, @2, @3, @4, @5],
         @"textColor": @[@0, @1, @2, @3, @4, @5],
-        @"tipMiddle": @[@NO, @YES],
+        @"turnsAll": @[@0, @1],
+        @"steps": @[@0, @1, @2],
+        @"chatPop": @[@0, @1],
+        @"place": @[@0, @1, @2, @3, @4, @5],
+        @"chatCols": @[@40, @50, @60, @70, @80, @90, @100, @110, @120, @130, @140, @150, @160],
+        @"chatRows": @[@8, @12, @16, @20, @24, @28, @32, @36, @40, @44, @48, @52, @56, @60],
+        @"push": @[@4, @6, @8, @10, @12, @15, @18, @20, @24, @28, @32, @36, @40],
+        @"hoverPause": @[@0, @1, @2, @3, @4, @5, @6, @7, @8, @9, @10, @11, @12, @13, @14, @15, @16, @17, @18, @19, @20],
         @"labelsHover": @[@YES, @NO],
         @"away": @[@60, @120, @300, @0],
         @"follow": @[@0, @1, @2],
@@ -471,8 +477,8 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     box(0, 0, WW, WH, 18, S_BG, 0x2A2A30, 1);
     // title, tabs (one for now), close
     tx(28, 14, 400, 50, @"Settings", ui(18, NSFontWeightSemibold), S_TEXT, 0, NO);
-    NSArray *tabs = @[@"General", @"Motions"];
-    for (int i = 0; i < 2; i++) { // the open page ringed in orange like a chosen chip, the other plain text
+    NSArray *tabs = @[@"General", @"Motions", @"Chat"];
+    for (int i = 0; i < 3; i++) { // the open page ringed in orange like a chosen chip, the other plain text
         CGFloat a = 132 + i * 96;
         BOOL on = self.tab == i, hot = [self isHot:K_TAB key:nil val:i];
         if (on) box(a, 19, a + 88, 45, 13, S_CHIP, S_OR, 1.5);
@@ -513,7 +519,7 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         [self hit:x0 :y0 :x1 :y0 + 28 kind:K_STATE key:nil val:i];
     }
 
-    if (self.tab == 1) [self motionsPage]; else [self generalPage];
+    if (self.tab == 1) [self motionsPage]; else if (self.tab == 2) [self chatPage]; else [self generalPage];
     [self foot];
 }
 
@@ -598,17 +604,13 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
     tx(l - 2, y0 + 156, l + 12, y0 + 176, @"A", small, S_MUTED, 1, NO);
     [self slider:l + 20 y:y0 + 166 x1:r - 22 key:@"fontSize" n:5];
     tx(r - 16, y0 + 154, r + 2, y0 + 180, @"A", ui(15, NSFontWeightSemibold), S_MUTED, 1, NO);
-    tx(l, y0 + 190, r, y0 + 208, @"Box size", label, S_LABEL, 0, NO);
-    box(l, y0 + 220, l + 10, y0 + 228, 2, S_MUTED, 0, 0);
-    [self slider:l + 20 y:y0 + 224 x1:r - 22 key:@"tipSize" n:4];
-    box(r - 12, y0 + 216, r + 2, y0 + 232, 3, S_MUTED, 0, 0);
-    tx(l, y0 + 248, r, y0 + 266, @"Colours", label, S_LABEL, 0, NO);
+    tx(l, y0 + 190, r, y0 + 208, @"Colours", label, S_LABEL, 0, NO);
     BOOL hb = self.hot.kind == K_PICK && [self.hot.key isEqualToString:@"tipColor"], ht = self.hot.kind == K_PICK && [self.hot.key isEqualToString:@"textColor"];
     int bi = hb ? self.hot.val : [[self value:@"tipColor"] intValue], ti = ht ? self.hot.val : [[self value:@"textColor"] intValue];
-    tx(l + 60, y0 + 248, r, y0 + 266, [NSString stringWithFormat:@"%@  ·  %@", TIP_BG_NAMES[bi], TEXT_NAMES[ti]], small, S_MUTED, 2, NO);
+    tx(l + 60, y0 + 190, r, y0 + 208, [NSString stringWithFormat:@"%@  ·  %@", TIP_BG_NAMES[bi], TEXT_NAMES[ti]], small, S_MUTED, 2, NO);
     CGFloat sl = l + 38, sw = (r - sl - 5 * 6) / 6;
     for (int row = 0; row < 2; row++) { // Box: the swatches, then the palette; Text: "Aa" in each colour on the box's colour, then the palette
-        CGFloat yy = y0 + 272 + row * 34;
+        CGFloat yy = y0 + 214 + row * 34;
         NSString *key = row ? @"textColor" : @"tipColor";
         tx(l, yy, sl - 4, yy + 26, row ? @"Text" : @"Box", small, S_MUTED, 0, NO);
         for (int i = 0; i < 6; i++) {
@@ -635,11 +637,10 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
             [self hit:a :yy :a + sw :yy + 26 kind:K_PICK key:key val:i];
         }
     }
-    tx(l, y0 + 342, r, y0 + 360, @"Opens", label, S_LABEL, 0, NO);
-    NSArray *opens = @[@"Next to core", @"Middle"], *labels = @[@"On hover", @"Always"];
-    for (int i = 0; i < 2; i++) { CGFloat a = l + i * (bw + 6); [self pick:a :y0 + 364 :a + bw :y0 + 392 rad:10 key:@"tipMiddle" val:i label:opens[i]]; }
-    tx(l, y0 + 404, r, y0 + 422, @"Names over cores (all-cores mode)", label, S_LABEL, 0, NO);
-    for (int i = 0; i < 2; i++) { CGFloat a = l + i * (bw + 6); [self pick:a :y0 + 426 :a + bw :y0 + 454 rad:10 key:@"labelsHover" val:i label:labels[i]]; }
+    NSArray *labels = @[@"On hover", @"Always"];
+    tx(l, y0 + 290, r, y0 + 308, @"Names over cores (all-cores mode)", label, S_LABEL, 0, NO);
+    for (int i = 0; i < 2; i++) { CGFloat a = l + i * (bw + 6); [self pick:a :y0 + 312 :a + bw :y0 + 340 rad:10 key:@"labelsHover" val:i label:labels[i]]; }
+    tx(l, y0 + 360, r, y0 + 400, @"How the box opens, its size and what it shows: the Chat tab.", small, S_MUTED, 0, YES);
 
     // Voice (macOS): four switches in a row
     box(24, 786, 856, 846, 16, S_CARD, 0, 0);
@@ -653,6 +654,53 @@ static void tx(CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1, NSString *t, NSFo
         [self toggle:a :807 :a + vw key:vk[i] title:vt[i] sub:nil enabled:en];
     }
 
+}
+
+// ---- the Chat page: what the reply box shows and how it opens (the Windows panel's Chat and Box pages) ---------
+// a row of chips under a label and a hint
+- (void)chips:(NSString *)key names:(NSArray *)names l:(CGFloat)l r:(CGFloat)r y:(CGFloat)y title:(NSString *)title sub:(NSString *)sub {
+    tx(l, y, r, y + 18, title, ui(12.5, NSFontWeightRegular), S_LABEL, 0, NO);
+    tx(l, y + 18, r, y + 34, sub, ui(11.5, NSFontWeightRegular), S_MUTED, 0, NO);
+    CGFloat n = names.count, w = (r - l - (n - 1) * 6) / n;
+    for (NSUInteger i = 0; i < names.count; i++) { CGFloat a = l + i * (w + 6); [self pick:a :y + 40 :a + w :y + 68 rad:10 key:key val:(int)i label:names[i]]; }
+}
+// a slider under a label, the value it is at on the right
+- (void)stops:(NSString *)key l:(CGFloat)l r:(CGFloat)r y:(CGFloat)y title:(NSString *)title value:(NSString *)value {
+    tx(l, y, r, y + 18, title, ui(12.5, NSFontWeightRegular), S_LABEL, 0, NO);
+    tx(l, y, r, y + 18, value, ui(11.5, NSFontWeightRegular), S_MUTED, 2, NO);
+    [self slider:l + 8 y:y + 36 x1:r - 8 key:key n:(int)[choices()[key] count]];
+}
+- (void)chatPage {
+    const CGFloat y0 = 304, cw = (832 - 16) / 2.0;
+    CGFloat cx[2];
+    for (int k = 0; k < 2; k++) {
+        cx[k] = 24 + k * (cw + 16);
+        box(cx[k], y0, cx[k] + cw, 846, 16, S_CARD, 0, 0);
+        tx(cx[k] + 16, y0 + 14, cx[k] + cw - 16, y0 + 36, k ? @"Box" : @"Chat", ui(15, NSFontWeightSemibold), S_TEXT, 0, NO);
+    }
+    int v;
+    CGFloat l = cx[0] + 16, r = cx[0] + cw - 16;
+    [self chips:@"turnsAll" names:@[@"Latest", @"All kept"] l:l r:r y:y0 + 46 title:@"Turns" sub:@"where it opens; push past the top or the end to switch"];
+    [self chips:@"steps" names:@[@"Folded", @"Every step", @"Hidden"] l:l r:r y:y0 + 126 title:@"Steps" sub:@"what Claude ran, read and edited"];
+    v = [[self value:@"push"] intValue];
+    [self stops:@"push" l:l r:r y:y0 + 206 title:@"Push" value:[NSString stringWithFormat:@"%d notches past an edge", v]];
+    tx(l, y0 + 270, r, y0 + 330, @"Point at a core, then move onto its box: the wheel scrolls it. Push on past the top for the earlier turns, past the end for the latest only.",
+       ui(11.5, NSFontWeightRegular), S_MUTED, 0, YES);
+
+    l = cx[1] + 16; r = cx[1] + cw - 16;
+    v = [[self value:@"chatCols"] intValue];
+    [self stops:@"chatCols" l:l r:r y:y0 + 46 title:@"Width" value:[NSString stringWithFormat:@"%d characters across", v]];
+    v = [[self value:@"chatRows"] intValue];
+    [self stops:@"chatRows" l:l r:r y:y0 + 106 title:@"Height" value:[NSString stringWithFormat:@"%d lines before it scrolls", v]];
+    tx(l, y0 + 166, r, y0 + 184, @"Place", ui(12.5, NSFontWeightRegular), S_LABEL, 0, NO);
+    tx(l, y0 + 166, r, y0 + 184, @"Auto: left of the panel, else right", ui(11.5, NSFontWeightRegular), S_MUTED, 2, NO);
+    NSArray *places = @[@"Auto", @"Left", @"Right", @"Below", @"Above", @"Middle"];
+    CGFloat pw = (r - l - 12) / 3;
+    for (int i = 0; i < 6; i++) { CGFloat a = l + (i % 3) * (pw + 6), b = y0 + 190 + (i / 3) * 34; [self pick:a :b :a + pw :b + 28 rad:14 key:@"place" val:i label:places[i]]; }
+    v = [[self value:@"hoverPause"] intValue];
+    [self stops:@"hoverPause" l:l r:r y:y0 + 266 title:@"Hover pause" value:v ? [NSString stringWithFormat:@"%.1f s on a core opens its box", v / 10.0] : @"Instant"];
+    [self chips:@"chatPop" names:@[@"On hover", @"Pops open"] l:l r:r y:y0 + 326 title:@"New reply" sub:@"Pops open: beside its core for 10 s"];
+    [self toggle:l :y0 + 414 :r key:@"chatBar" title:@"Scroll bar" sub:@"down the box's right edge" enabled:YES];
 }
 
 - (void)foot {
