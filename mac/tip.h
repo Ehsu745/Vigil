@@ -9,12 +9,13 @@
 @property BOOL monoBody;             // the body in the terminal's face (monoName) instead of the system font
 @property(copy) NSString *monoName;
 @property(strong) NSColor *boxColor, *inkColor; // nil: the usual dark box and light text
-@property CGFloat sizeK;             // Settings > Box size: how wide the box may grow (0 = 1)
-@property CGFloat maxWidth;          // 0: the usual; the box in the middle of the screen may be wider
+@property int cols;                  // Settings > Chat > Width: characters across at most (0: about 64)
 // The wheel over the box scrolls a body taller than maxBodyLines (scrollUp: points up from its end, 0 = the end shows).
-// Pushing on past the top or the end for TIP_PUSH notches calls onPush(+1 or -1). Body lines starting with \x01 are
+// Pushing on past the top or the end for pushNeed notches calls onPush(+1 or -1); showBar draws a scroll bar. Body lines starting with \x01 are
 // your prompt (a band), \x02 dim, \x03 the running line in Claude Code's orange.
 @property CGFloat scrollUp;
+@property int pushNeed;
+@property BOOL showBar;
 @property(copy) void (^onPush)(int dir);
 - (NSSize)fit;
 @end
